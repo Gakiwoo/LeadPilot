@@ -148,7 +148,7 @@ docs/
 - `npm run smoke` → **16/16 通过**：健康检查、数据源 0/6 如实上报、provider 清单、判断 E6005、写信 E6005（正文为空）、PII 400 E6004、T0 抽取可核验、T0 非法来源 400、写信接入 T0 锚点、评测门禁 385、空样本 NO_DATA、任务创建、SSE 真实推流、中止保留游标、任务快照 `sourceMode=demo`、审计元数据。
 - `npm run verify:restart` → **AC-03 全链路 PASS**：创建长任务 → 强杀进程 → 直读 SQLite 落盘值 → 同库重启 → 恢复 `paused / recovered=true`、游标与点数与落盘值逐项一致、追加「额度不重复扣减」日志 → `resume` 从原游标继续且点数未重复扣。
 - 安全活体：`HOST=0.0.0.0` 但无 token → 启动前置拒绝（exit 1）；`CORS=*` → 启动前置拒绝（exit 1）；启用 token 后 `/health` 200、`/v1/tasks` 无 token 401 `E6009` / 带 Bearer 200 / 非白名单 Origin 不回显。
-- GitHub Actions `ci.yml`：干净检出关键源码检查 → typecheck → test → build → 启动服务 → smoke → AC-03 重启验证。
+- GitHub Actions `ci.yml`：干净检出关键源码检查 → typecheck → test → build → 启动服务 → smoke → AC-03 重启验证。v0.4.0 对应 run `42396390790` 全链路全绿（31 s，含两个新增步骤）。
 
 > **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地文件都在，所以 typecheck/build/test 全绿；CI 从 git 干净检出时报 `TS2307: Cannot find module '@/data/*'` 与连带 `TS7006`。现改为 `/data/` 锚定仓库根，并加 CI 检查。**结论：本地全绿不等于仓库可构建，必须让 CI 在干净检出上跑一遍。**
 
