@@ -12,7 +12,8 @@ coverage
 src-tauri/target
 
 # 本地运行产物 / 持久化数据库
-data/
+# 注意：必须锚定仓库根目录，否则会连源码目录 src/data/ 一起排除（CI 干净检出会缺模块）
+/data/
 *.db
 *.db-shm
 *.db-wal
