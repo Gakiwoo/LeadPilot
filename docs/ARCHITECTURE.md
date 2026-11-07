@@ -109,6 +109,8 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 `vite.config.ts` 设 `fileParallelism: false`，`cacheDir` 指向项目内。原因：当前 Windows 会话的 fs 代理不允许多个 Vitest worker 并发写 SSR 转换缓存（报 EPERM，且会随机漏跑一个测试文件）。改为顺序执行后 6 个文件 / 67 个测试稳定全绿、0 skipped。这是环境适配，不是产品约束；CI 环境可去掉。
 
+**v0.3.0 补充教训**：本地全绿 ≠ 仓库可构建。首次推 GitHub 后 CI 在干净检出上报 `TS2307: Cannot find module '@/data/*'`，根因是 `.gitignore` 写了 `data/`（无前导斜杠会匹配任意层级目录），把源码 `src/data/` 一起排除，首提交漏掉 `demo-data.ts` / `repository.ts`；本地文件都在所以全部通过。改为 `/data/` 锚定仓库根并补回文件后 CI 全绿。**规则：忽略本地运行产物一律用 `/` 锚定根目录；首次接入 CI 必须做一次干净检出验证。**
+
 ## ADR-009 · 共享协议单一真源，禁止前后端各写一份枚举
 
 **决策**：`shared/model-protocol.json` 同时被 `src/domain/llm-judgement.ts`、`src/domain/constants.ts`、`src/services/adapters.ts`、`server/protocol.mjs`、`server/gateway.mjs`、`server/eval.mjs` 读取。

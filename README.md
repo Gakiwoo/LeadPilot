@@ -131,7 +131,7 @@ docs/
 8. **持久化模式如实上报。** `memory` 不得说成「已持久化」；进程重启后活跃任务降为 `paused` 并保留游标与已用点数，点击继续才断点续跑，额度不重复扣。
 9. **禁止浮动模型指针。** 无具体快照版本不发起真实调用，评审结果不可复现时用 `NO_DATA` 而不是编造通过。
 
-## 验证记录（2026-11-07）
+## 验证记录（2026-11-08）
 
 - `npm run typecheck` / `npm run build` 通过；`npm test` → **6 文件 / 67 用例全绿，0 skipped**（含 sqlite 文件恢复、鉴权 / CORS / 限流、快照锁定、AC-03 续跑）。
 - `npm run smoke` → **11/11 通过**：健康检查、provider 清单、判断 E6005、写信 E6005（正文为空）、PII 400 E6004、评测门禁 385、空样本 NO_DATA、任务创建、SSE 真实推流、中止保留游标、审计元数据。
@@ -139,6 +139,9 @@ docs/
 - 单元测试另覆盖：配置 Key 后真实调用链、5xx 切顺位、30 天缓存、连续失败熔断、写信 F6-2 硬约束与 HTTP 200/400/503 三态。
 - **AC-03 真实杀进程验证（独立实例 + 专用 SQLite 文件，11/11 PASS）**：创建长任务推进游标 → 强杀进程 → 直读 SQLite 原文拿到落盘值 `status=running / offset=28 / pointsUsed=0` → 用同一文件重启 → 恢复为 `paused`、`recovered=true`、游标与点数与落盘值逐项一致、追加「额度不重复扣减」日志 → 显式 `resume` 后从 offset 28 继续且点数未重复扣。
 - **安全边界活体验证**：`HOST=0.0.0.0` 但无 token → 启动前置拒绝（exit 1）；`CORS=*` → 启动前置拒绝（exit 1）；启用 token 后 `/health` 200、`/v1/tasks` 无 token 401 `E6009`、带 Bearer 200、非白名单 Origin 不被回显。
+- **GitHub Actions CI**：run `42393636712` 全绿（Install → Typecheck → Unit tests → Build → E2E smoke，27 s）。
+
+> **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地文件都在，所以 typecheck/build/test 全绿；CI 从 git 干净检出时报 `TS2307: Cannot find module '@/data/*'` 与连带 `TS7006`。现改为 `/data/` 锚定仓库根。**结论：本地全绿不等于仓库可构建，必须让 CI 在干净检出上跑一遍。**
 
 > **Vite/Vitest 注意**：`server/store.mjs` 用 `process.getBuiltinModule('node:sqlite')` 做同步探测，不能用 `await import('node:sqlite')`——Vite 会把动态 import 重写成 `import('sqlite')` 导致 Vitest 下探测失败、`createStore()` 静默退到 JSON 兜底。这个坑已用一个曾经被 skip 的用例锁死。
 

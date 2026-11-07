@@ -52,7 +52,7 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | Git 仓库与首提交 | ✅ | `Gakiwoo/LeadPilot`，`main` 分支，SSH remote；`.gitignore` 排除 `.env` / `data/` / `*.db` / `.workbuddy/` |
-| CI | ✅ | `.github/workflows/ci.yml`：Node 22 + `npm ci` + typecheck + test + build + 启动服务 + smoke |
+| CI | ✅ | `.github/workflows/ci.yml`：Node 22 + `npm ci` + typecheck + test + build + 启动服务 + smoke。首跑暴露 `.gitignore` 的 `data/` 误排除 `src/data/`（干净检出 `TS2307`），改为 `/data/` 补回两个源码后 run `42393636712` 全链路全绿（27 s） |
 | 配置样板 | ✅ | `.env.example` 覆盖监听 / 鉴权 / CORS / 限流 / 持久化 / provider Key / 快照变量，全为空值 |
 | 服务端鉴权 / CORS / 限流 | ✅ | 401 `E6009` / 429 `E6010` / 启动前置拒绝无 token 的对外监听，3 个 HTTP 单测覆盖 |
 | 模型快照锁定 | ✅ | `E6008` + `-latest` 拒绝 + health 暴露 `pinned`，2 个单测覆盖 |
