@@ -1,0 +1,23 @@
+node_modules
+dist
+dist-ssr
+.vite
+coverage
+*.local
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+src-tauri/target
+
+# 本地运行产物 / 持久化数据库
+data/
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+.tmp/
+
+# WorkBuddy 会话工作区数据（含个人记忆，绝不进公开仓库）
+.workbuddy/

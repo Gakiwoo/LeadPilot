@@ -1,0 +1,35 @@
+{
+  "name": "leadpilot",
+  "private": true,
+  "version": "0.2.0",
+  "description": "LeadPilot 猎客 · B2B 外贸客户开发工作台（客户端基线 + 云端网关/编排器）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "cloud": "node server/index.mjs",
+    "smoke": "node scripts/e2e-smoke.mjs",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "lucide-react": "^0.454.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "$comment": "PRD v1.1 受限输出协议与网关参数的单一真源。前端 src/domain/llm-judgement.ts 与服务端 server/protocol.mjs 共同读取，避免两套枚举漂移。价格为 PRD 9.4.2 / 9.4.3 的 2026-11-06 公开定价快照，仅供量级判断，签合同前须按各家官网复核（PRD A.3 要求每季度复核）。",
+  "schemaVersion": "schema-v1",
+  "promptVersion": "judge-v1.1.0",
+  "wireFormat": {
+    "$comment": "PRD 6.7.3 使用 snake_case 字段名；前端内部表示可用 camelCase，但网关入口必须接受 snake_case。",
+    "evidenceFields": ["quote", "source_url", "fetched_at"],
+    "companyIdField": "company_id",
+    "outputFields": ["customer_type", "import_signal", "size_estimate", "negative_flags", "notes_for_human"],
+    "versionFields": ["model_id", "model_version", "prompt_version", "schema_version"],
+    "notesForHumanDoesNotScore": true
+  },
+  "enums": {
+    "customer_type": ["importer", "distributor", "wholesaler", "brand_owner", "retailer", "factory", "epc", "trader", "unknown"],
+    "import_signal": ["confirmed", "inferred", "no_signal", "contradicted"],
+    "size_estimate": ["S", "M", "L", "XL", "unknown"],
+    "negative_flags": [
+      "competitor_suspected", "manufacturer_signal", "shell_company", "stale_page",
+      "free_email_only", "no_import_evidence", "out_of_market"
+    ]
+  },
+  "$negativeFlagsNote": "PRD 6.7.3 只给出 competitor_suspected 一个示例，未列完整白名单。此 7 项为基线定义，需 M0 评审拍板后冻结。",
+  "forbiddenFields": ["score", "total_score", "rating", "points"],
+  "rules": {
+    "temperature": 0,
+    "evidenceMinHitRate": 0.9,
+    "provenanceRateMin": 0.95,
+    "conflictThreshold": 30,
+    "alphaHardCap": 0.6,
+    "cacheTtlDays": 30,
+    "confidenceReviewThreshold": 0.5,
+    "votesForT2": 3,
+    "forbidFloatingModelPointer": true,
+    "systemPromptGuard": "你只能使用 <context> 标签内的内容作答。不得使用你训练数据中关于该公司的任何信息。context 中没有的内容，必须输出 no_signal。"
+  },
+  "$alphaNote": "PRD 6.7.4 公式 α = min(0.60, confidence × evidence_coverage)；6.7.5 给出各维度规则/模型参与度。本实现把参与度的模型占比作为 α 的分维上限（min(cap, conf×coverage)），属解释性取舍，需在 9.5 基准集上验证后冻结。",
+  "modelParticipation": {
+    "match": 0.4,
+    "propensity": 0.15,
+    "size": 0.3,
+    "import": 0.25,
+    "contact": 0
+  },
+  "routing": {
+    "t0Tasks": ["extract", "classify", "expand_keywords"],
+    "t1Tasks": ["judge_import", "judge_size", "write_email"],
+    "t2Conditions": ["confidence_lt_0.5", "conflict", "L4_high_value"],
+    "trafficTargets": { "T0": 0.85, "T1": 0.13, "T2": 0.02 },
+    "$mvpScopeConflict": "PRD 4.1 写 MVP 只做 T0/T1 两级路由（T2 与 BYOK 延后 V1），但 F0-2 明确定义三级路由、F0-1 建议 MVP 落地一家 T0 + 一家 T2。本基线实现完整三级路由规则，实际 provider 接入范围按 M0 拍板。"
+  },
+  "downgrade": {
+    "timeoutMs": 30000,
+    "timeoutRetries": 1,
+    "timeoutBackoffMs": 2000,
+    "rateLimitBackoffMs": [1000, 4000, 12000],
+    "rateLimitRetries": 3,
+    "serverErrorSwitchImmediately": true,
+    "schemaRetrySameProvider": 1,
+    "circuitBreaker": { "failures": 10, "windowMs": 300000, "openMs": 900000 },
+    "allProvidersDown": {
+      "code": "E6005",
+      "behaviour": "不降级为无判断：该维度 no_signal、综合分显示区间、置信度标低、界面标注未经模型校验"
+    }
+  },
+  "billing": {
+    "pointCostFormula": "ceil((input_tokens * in_rate + output_tokens * out_rate + search_calls * search_rate) / point_value) * model_tier_multiplier",
+    "modelTierMultiplier": { "T0": 1.0, "T1": 1.6, "T2": 4.0 },
+    "pointValueUsd": 0.005,
+    "searchRateUsdPerCall": 0.001,
+    "$pointValueNote": "PRD F0-6 要求折算率由运营后台配置，避免模型涨价时改代码。此值为基线默认值，生产必须外置到配置中心。",
+    "depthPointsPerCompany": { "1": 1, "2": 2, "3": 4, "4": 8 },
+    "byokChargesPoints": false
+  },
+  "providers": [
+    { "key": "deepseek-flash-valley", "name": "DeepSeek V4.1-Flash（谷时）", "vendor": "deepseek", "tier": "T0", "region": "domestic", "model": "deepseek-flash", "inUsdPerM": 0.15, "outUsdPerM": 0.60, "envKey": "DEEPSEEK_API_KEY", "baseUrl": "https://api.deepseek.com/v1" },
+    { "key": "deepseek-pro", "name": "DeepSeek V4-Pro（谷时）", "vendor": "deepseek", "tier": "T1", "region": "domestic", "model": "deepseek-pro", "inUsdPerM": 0.66, "outUsdPerM": 1.98, "envKey": "DEEPSEEK_API_KEY", "baseUrl": "https://api.deepseek.com/v1" },
+    { "key": "glm-flash", "name": "GLM-5.3-Flash", "vendor": "zhipu", "tier": "T0", "region": "domestic", "model": "glm-5.3-flash", "inUsdPerM": 0.15, "outUsdPerM": 0.50, "envKey": "ZHIPU_API_KEY", "baseUrl": "https://open.bigmodel.cn/api/paas/v4" },
+    { "key": "glm-5.3", "name": "GLM-5.3", "vendor": "zhipu", "tier": "T1", "region": "domestic", "model": "glm-5.3", "inUsdPerM": 1.40, "outUsdPerM": 4.40, "envKey": "ZHIPU_API_KEY", "baseUrl": "https://open.bigmodel.cn/api/paas/v4" },
+    { "key": "minimax-flash", "name": "MiniMax M3.1 Flash", "vendor": "minimax", "tier": "T0", "region": "domestic", "model": "minimax-m3.1-flash", "inUsdPerM": 0.15, "outUsdPerM": 0.60, "envKey": "MINIMAX_API_KEY", "baseUrl": "https://api.minimax.chat/v1" },
+    { "key": "qwen-flash", "name": "Qwen3.8-Flash", "vendor": "qwen", "tier": "T0", "region": "domestic", "model": "qwen3.8-flash", "inUsdPerM": 0.15, "outUsdPerM": 0.47, "envKey": "DASHSCOPE_API_KEY", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+    { "key": "kimi-k2.6", "name": "Moonshot Kimi K2.6", "vendor": "moonshot", "tier": "T1", "region": "domestic", "model": "kimi-k2.6", "inUsdPerM": 0.39, "outUsdPerM": 1.80, "envKey": "MOONSHOT_API_KEY", "baseUrl": "https://api.moonshot.cn/v1", "$priceRange": "PRD 标注来源价差大：输入 0.39–0.95 / 输出 1.80–4.00，须官网核对" },
+    { "key": "gpt-5", "name": "OpenAI GPT-5", "vendor": "openai", "tier": "T2", "region": "overseas", "model": "gpt-5", "inUsdPerM": 1.25, "outUsdPerM": 10.00, "envKey": "OPENAI_API_KEY", "baseUrl": "https://api.openai.com/v1" },
+    { "key": "claude", "name": "Anthropic Claude", "vendor": "anthropic", "tier": "T2", "region": "overseas", "model": "claude-sonnet-4-5-20250929", "inUsdPerM": 2.00, "outUsdPerM": 10.00, "envKey": "ANTHROPIC_API_KEY", "baseUrl": "https://api.anthropic.com/v1", "$priceRange": "PRD 标注约 1–3 / 5–15，取中值" },
+    { "key": "gemini-flash", "name": "Google Gemini 3.x Flash", "vendor": "google", "tier": "T2", "region": "overseas", "model": "gemini-3-flash", "inUsdPerM": 0.75, "outUsdPerM": 3.75, "envKey": "GEMINI_API_KEY", "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai", "$priceNote": "PRD 标注为促销价，需核对有效期" }
+  ],
+  "emailPolicy": {
+    "$comment": "PRD F6-2 内容硬约束：Prompt 层与代码校验层共用同一份禁词/字数口径，服务端生成与客户端校验不得漂移。",
+    "bannedWords": [
+      "dear sir or madam", "i hope this email finds you well", "free", "guarantee", "100%",
+      "click here", "limited time", "act now", "no obligation", "best price guaranteed",
+      "we are a leading manufacturer", "20 years experience", "!!"
+    ],
+    "wordLimits": { "short": 90, "medium": 160, "long": 230 },
+    "modelMustNotEmit": ["sender_identity", "postal_address", "unsubscribe_footer", "placeholder"],
+    "$complianceNote": "真实发件人身份、物理地址与退订尾巴由代码注入，绝不交给模型（PRD F6-5 / CAN-SPAM）。"
+  },
+  "evalGates": {
+    "$comment": "PRD 9.5.2 八项评测指标；P0 任一不达标阻断发布。",
+    "baselineSize": 385,
+    "baselineComposition": "8 种客户类型全覆盖 · 有/无海关数据市场各半 · S/M/L/XL 各档 · 15% 疑似同行 + 10% 空壳负样本",
+    "p0": ["provenance_rate", "signal_precision", "rule_compliance"],
+    "metrics": {
+      "provenance_rate": { "name": "可溯源率", "threshold": 0.95, "direction": ">=" },
+      "signal_precision": { "name": "信号精确率", "threshold": 0.90, "direction": ">=" },
+      "extraction_recall": { "name": "抽取召回率", "threshold": 0.70, "direction": ">=" },
+      "rule_compliance": { "name": "规则遵从率", "threshold": 1.0, "direction": ">=" },
+      "kappa": { "name": "Cohen's Kappa（分类）", "threshold": 0.65, "direction": ">=" },
+      "spearman_rho": { "name": "Spearman ρ（连续）", "threshold": 0.75, "direction": ">=" },
+      "schema_pass_rate": { "name": "Schema 合法率", "threshold": 0.99, "direction": ">=" },
+      "refusal_rate": { "name": "拒答率", "threshold": 0.05, "direction": "<=" }
+    }
+  },
+  "errorCodes": {
+    "E6001": "provider 超时", "E6002": "限流", "E6003": "schema 校验失败",
+    "E6004": "证据校验不通过", "E6005": "全部 provider 不可用（降级模式）",
+    "E6006": "BYOK Key 无效", "E6007": "内容触发 provider 安全策略拒答"
+  },
+  "piiExclusion": {
+    "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",
+    "rejectRequestFields": ["email", "phone", "contact_name", "contact_email", "owner_name", "body_html", "body_text", "refresh_token", "access_token", "api_key"],
+    "rejectPatterns": ["@", "+86", "Bearer ", "sk-"],
+    "onViolation": "HTTP 400 + E6004，不转发给任何 provider"
+  }
+}
