@@ -6,19 +6,31 @@
  */
 import type { TaskConfig } from '@/types'
 
-const BASE = ((import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_LEADPILOT_API)
-  ?? 'http://127.0.0.1:5181'
+const ENV = (import.meta as ImportMeta & { env?: Record<string, string> }).env ?? {}
+const BASE = ENV.VITE_LEADPILOT_API ?? 'http://127.0.0.1:5181'
+// 仅本地开发使用；生产应由同源反向代理注入凭据，不要在公网前端下发长期 token
+const TOKEN = ENV.VITE_LEADPILOT_TOKEN ?? ''
 
 export const gatewayBaseUrl = BASE
+
+function authHeaders(): Record<string, string> {
+  return TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}
+}
 
 export interface GatewayHealth {
   online: boolean
   mode: 'configured' | 'unconfigured-demo' | 'offline'
   configuredCount: number
+  pinnedCount: number
+  readyCount: number
   totalProviders: number
-  providers: { key: string; name: string; tier: string; region: string; configured: boolean; circuitOpen: boolean }[]
+  providers: {
+    key: string; name: string; tier: string; region: string; model: string
+    modelVersion: string | null; configured: boolean; pinned: boolean; circuitOpen: boolean
+  }[]
   cacheEntries: number
   auditEntries: number
+  security?: { mode: string; loopback: boolean; cors: string[]; rateLimitPerMinute: number }
   reason?: string
 }
 
@@ -56,7 +68,7 @@ async function jsonFetch<T>(path: string, init?: RequestInit, timeoutMs = 4000):
     const res = await fetch(`${BASE}${path}`, {
       ...init,
       signal: controller.signal,
-      headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+      headers: { 'content-type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
     })
     const body = await res.json() as T & { ok?: boolean }
     if (!res.ok) return { ...body, ok: false } as T
@@ -69,20 +81,33 @@ async function jsonFetch<T>(path: string, init?: RequestInit, timeoutMs = 4000):
 export async function probeGateway(): Promise<GatewayHealth> {
   try {
     const h = await jsonFetch<{
-      ok: boolean; mode: string; configuredCount: number; totalProviders: number
-      providers: GatewayHealth['providers']; cacheEntries: number; auditEntries: number
+      ok: boolean; mode: string; configuredCount: number; pinnedCount: number; readyCount: number
+      totalProviders: number;       providers: GatewayHealth['providers']
+      cacheEntries: number; auditEntries: number; reason?: string
+      security?: GatewayHealth['security']
     }>('/v1/gateway/health', undefined, 1600)
+    if (h.ok === false && (h as { code?: string }).code === 'E6009') {
+      return {
+        online: false, mode: 'offline', configuredCount: 0, pinnedCount: 0, readyCount: 0,
+        totalProviders: 0, providers: [], cacheEntries: 0, auditEntries: 0,
+        reason: '网关要求访问令牌：请在前端环境变量配置 VITE_LEADPILOT_TOKEN，或清除服务端的 LEADPILOT_API_TOKEN。',
+      }
+    }
     return {
       online: true,
       mode: h.mode === 'configured' ? 'configured' : 'unconfigured-demo',
-      configuredCount: h.configuredCount, totalProviders: h.totalProviders,
+      configuredCount: h.configuredCount ?? 0,
+      pinnedCount: h.pinnedCount ?? 0,
+      readyCount: h.readyCount ?? 0,
+      totalProviders: h.totalProviders,
       providers: h.providers ?? [], cacheEntries: h.cacheEntries, auditEntries: h.auditEntries,
+      security: h.security, reason: h.reason,
     }
   } catch {
     return {
-      online: false, mode: 'offline', configuredCount: 0, totalProviders: 0,
-      providers: [], cacheEntries: 0, auditEntries: 0,
-      reason: `云端服务未启动或不可达（${BASE}）。启动：node server/index.mjs`,
+      online: false, mode: 'offline', configuredCount: 0, pinnedCount: 0, readyCount: 0,
+      totalProviders: 0, providers: [], cacheEntries: 0, auditEntries: 0,
+      reason: `云端服务未启动或不可达（${BASE}）。启动：npm run cloud`,
     }
   }
 }
@@ -152,27 +177,58 @@ export async function controlCloudTask(taskId: string, action: 'pause' | 'resume
   }
 }
 
-/** 云端任务 + SSE 流式订阅；数据源未接入时事件带 demo:true */
+/**
+ * 云端任务 + SSE 流式订阅；数据源未接入时事件带 demo:true。
+ * 用 fetch 流式读取而非 EventSource：EventSource 无法携带 Authorization 头，
+ * 把 token 拼进 query 会泄漏到访问日志，这里必须在鉴权开启后仍保持请求头携带凭据。
+ */
 export function startCloudTask(
   config: TaskConfig,
   onEvent: (event: { type: string; [k: string]: unknown }) => void,
 ): Promise<{ ok: boolean; taskId?: string; reason?: string; close(): void }> {
-  let source: EventSource | null = null
-  const close = () => { source?.close(); source = null }
+  let controller: AbortController | null = null
+  const close = () => { controller?.abort(); controller = null }
   return jsonFetch<{ ok: boolean; task: { id: string } }>('/v1/tasks', {
     method: 'POST', body: JSON.stringify(config),
-  }, 6000).then((res) => {
+  }, 6000).then(async (res) => {
     if (!res.ok || !res.task?.id) {
       return { ok: false, reason: '云端任务创建失败', close }
     }
-    source = new EventSource(`${BASE}/v1/tasks/${res.task.id}/events`)
-    source.onmessage = (e) => { try { onEvent(JSON.parse(e.data)) } catch { /* 忽略非法事件 */ } }
-    for (const type of ['hello', 'stage', 'progress', 'source_warning', 'done', 'aborted', 'paused', 'resumed', 'queued']) {
-      source.addEventListener(type, (e) => {
-        try { onEvent({ type, ...JSON.parse((e as MessageEvent).data) }) } catch { /* 忽略 */ }
+    controller = new AbortController()
+    let response: Response
+    try {
+      response = await fetch(`${BASE}/v1/tasks/${encodeURIComponent(res.task.id)}/events`, {
+        headers: authHeaders(), signal: controller.signal,
       })
+    } catch {
+      return { ok: false, reason: 'SSE 连接失败', close }
     }
-    source.onerror = () => onEvent({ type: 'error', reason: 'SSE 连接中断' })
+    if (!response.ok || !response.body) {
+      return { ok: false, reason: `SSE 订阅被拒绝（HTTP ${response.status}）`, close }
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    void (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const chunks = buffer.split('\n\n')
+          buffer = chunks.pop() ?? ''
+          for (const chunk of chunks) {
+            const lines = chunk.split('\n')
+            const data = lines.find((l) => l.startsWith('data: '))
+            if (!data) continue
+            const type = lines.find((l) => l.startsWith('event: '))?.slice(7).trim() ?? 'message'
+            try { onEvent({ type, ...JSON.parse(data.slice(6)) }) } catch { /* 忽略非法事件 */ }
+          }
+        }
+      } catch {
+        onEvent({ type: 'error', reason: 'SSE 连接中断' })
+      }
+    })()
     return { ok: true, taskId: res.task.id, close }
   }).catch(() => ({ ok: false, reason: '云端服务未启动', close }))
 }

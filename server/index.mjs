@@ -3,8 +3,8 @@
  *
  * 启动：node server/index.mjs        （默认 127.0.0.1:5181）
  * 配置：DEEPSEEK_API_KEY / OPENAI_API_KEY / ... 见 shared/model-protocol.json 的 providers.envKey
- * 说明：未配置任何 Key 时，网关返回 E6005 降级；采集编排器事件带 demo:true。
- *      本服务不保存任何凭据、不落库、不记录客户原文或邮箱。
+ * 说明：未配置 Key / 未锁定模型快照时，网关返回 E6005 / E6008 降级；编排器事件带 demo:true。
+ *      本服务不保存任何凭据、不记录客户原文或邮箱；任务游标、缓存与审计落本地持久化存储。
  */
 import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
@@ -12,19 +12,76 @@ import { createGateway } from './gateway.mjs'
 import { createOrchestrator } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
 import { evaluateBaseline, baselineManifest } from './eval.mjs'
+import { createStore } from './store.mjs'
 
 const PORT = Number(process.env.LEADPILOT_PORT ?? 5181)
 const HOST = process.env.LEADPILOT_HOST ?? '127.0.0.1'
 const MAX_BODY = 256 * 1024
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+const IS_LOOPBACK = LOOPBACK_HOSTS.has(HOST)
+const API_TOKEN = process.env.LEADPILOT_API_TOKEN ?? ''
+const CORS_LIST = (process.env.LEADPILOT_CORS ?? 'http://127.0.0.1:5180')
+  .split(',').map((x) => x.trim()).filter(Boolean)
+const RATE_LIMIT = Math.max(1, Number(process.env.LEADPILOT_RATE_LIMIT ?? 120))
+const DEFAULT_SECURITY = {
+  token: API_TOKEN,
+  loopback: IS_LOOPBACK,
+  cors: CORS_LIST,
+  rateLimit: RATE_LIMIT,
+}
 
 export function createApp(opts = {}) {
-  const gateway = opts.gateway ?? createGateway()
-  const orchestrator = opts.orchestrator ?? createOrchestrator(opts.orchestratorOptions)
+  const store = opts.store ?? createStore()
+  const gateway = opts.gateway ?? createGateway({ store })
+  const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store })
+  // 允许测试注入独立的安全上下文，不污染进程级默认值
+  const sec = { ...DEFAULT_SECURITY, ...(opts.security ?? {}) }
+  const hits = new Map() // ip -> { count, resetAt }
+
+  function securityInfo() {
+    return {
+      mode: sec.token ? 'token' : 'local-open',
+      loopback: sec.loopback,
+      cors: sec.cors,
+      rateLimitPerMinute: sec.rateLimit,
+      note: '仅本机回环且未设置令牌时免鉴权；对外监听必须配置 LEADPILOT_API_TOKEN 且 CORS 不得为 *。',
+    }
+  }
+
+  /** 每个请求按 Origin 白名单决定 Allow-Origin，绝不默认通配 */
+  function applyCors(req, res) {
+    const origin = req.headers?.origin
+    const allowed = sec.cors.includes('*')
+      ? '*'
+      : (origin && sec.cors.includes(origin) ? origin : (sec.cors[0] ?? 'http://127.0.0.1:5180'))
+    res.setHeader('Access-Control-Allow-Origin', allowed)
+    res.setHeader('Vary', 'Origin')
+  }
 
   function cors(res) {
-    res.setHeader('Access-Control-Allow-Origin', process.env.LEADPILOT_CORS ?? '*')
-    res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization')
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization, x-leadpilot-token')
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  }
+
+  /** 本地回环默认免鉴权；一旦设置 token 或非本机部署，必须携带有效令牌 */
+  function authOk(req) {
+    if (!sec.token) return sec.loopback
+    const bearer = String(req.headers?.authorization ?? '')
+    const supplied = bearer.startsWith('Bearer ') ? bearer.slice(7) : String(req.headers?.['x-leadpilot-token'] ?? '')
+    return supplied.length > 0 && supplied === sec.token
+  }
+
+  function rateOk(req, res) {
+    const ip = req.socket?.remoteAddress ?? 'unknown'
+    const now = Date.now()
+    let rec = hits.get(ip)
+    if (!rec || now >= rec.resetAt) { rec = { count: 0, resetAt: now + 60_000 }; hits.set(ip, rec) }
+    rec.count += 1
+    if (rec.count > sec.rateLimit) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((rec.resetAt - now) / 1000))))
+      return false
+    }
+    return true
   }
 
   function json(res, status, body) {
@@ -81,22 +138,37 @@ export function createApp(opts = {}) {
   }
 
   const server = createServer(async (req, res) => {
-    if (req.method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return }
+    applyCors(req, res)
     const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`)
     const path = url.pathname
     const method = req.method ?? 'GET'
 
+    if (method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return }
+    if (!rateOk(req, res)) {
+      return fail(res, 429, 'E6010', '请求过于频繁', `同一 IP 每分钟超过 ${sec.rateLimit} 次`, '稍后重试或调高 LEADPILOT_RATE_LIMIT')
+    }
+    // /health 供探活与前端启动探测，其余 /v1/* 全部要求鉴权（配置了 token 或对外监听时）
+    if (!(method === 'GET' && path === '/health') && !authOk(req)) {
+      return fail(res, 401, 'E6009', '访问令牌缺失或无效', '服务端要求携带有效令牌', '在请求头加 Authorization: Bearer <LEADPILOT_API_TOKEN>')
+    }
+
     try {
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.2.0',
+          ok: true, service: 'leadpilot-cloud', version: '0.3.0',
           gateway: gateway.health(),
           orchestrator: { tasks: orchestrator.listTasks().length, maxConcurrent: 3 },
           protocol: { schemaVersion: protocol.schemaVersion, promptVersion: protocol.promptVersion },
+          security: securityInfo(),
+          persistence: {
+            mode: store.mode,
+            durable: store.mode !== 'memory',
+            recoveredTasks: orchestrator.recoveredIds?.length ?? 0,
+          },
           demo: gateway.health().mode === 'unconfigured-demo',
         })
       }
-      if (method === 'GET' && path === '/v1/gateway/health') return json(res, 200, gateway.health())
+      if (method === 'GET' && path === '/v1/gateway/health') return json(res, 200, { ...gateway.health(), security: securityInfo() })
       if (method === 'GET' && path === '/v1/gateway/audit') return json(res, 200, { entries: gateway.getAudit(), circuit: gateway.getCircuitState(), cache: gateway.getCacheStats() })
       if (method === 'GET' && path === '/v1/eval/gates') return json(res, 200, baselineManifest())
       if (method === 'GET' && path === '/v1/tasks') return json(res, 200, { tasks: orchestrator.listTasks() })
@@ -165,18 +237,29 @@ export function createApp(opts = {}) {
     }
   })
 
-  return { server, gateway, orchestrator }
+  return { server, gateway, orchestrator, store }
 }
 
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 if (isDirectRun) {
-  const { server, gateway } = createApp()
+  // 启动前硬校验：绝不在「对外监听 + 无鉴权 / CORS 通配」的组合下静默放行
+  if (!IS_LOOPBACK && !API_TOKEN) {
+    // eslint-disable-next-line no-console
+    console.error('[LeadPilot] SECURITY_CONFIG: 非本机监听必须设置 LEADPILOT_API_TOKEN，服务拒绝启动。')
+    process.exit(1)
+  }
+  if (!IS_LOOPBACK && CORS_LIST.includes('*')) {
+    // eslint-disable-next-line no-console
+    console.error('[LeadPilot] SECURITY_CONFIG: 非本机监听禁止 CORS 通配 *，请显式列出允许的前端来源。')
+    process.exit(1)
+  }
+  const { server, gateway, store } = createApp()
   server.listen(PORT, HOST, () => {
     const h = gateway.health()
     // eslint-disable-next-line no-console
-    console.log(`[LeadPilot] cloud API http://${HOST}:${PORT} · providers ${h.configuredCount}/${h.totalProviders} configured · mode=${h.mode}`)
+    console.log(`[LeadPilot] cloud API http://${HOST}:${PORT} · providers ${h.readyCount}/${h.totalProviders} ready (${h.configuredCount} keys / ${h.pinnedCount} pinned) · mode=${h.mode} · security=${API_TOKEN ? 'token' : 'local-open'} · persistence=${store.mode}`)
   })
-  const shutdown = () => server.close(() => process.exit(0))
+  const shutdown = () => server.close(() => { store.close(); process.exit(0) })
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 }

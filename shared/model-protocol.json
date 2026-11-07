@@ -31,8 +31,10 @@
     "confidenceReviewThreshold": 0.5,
     "votesForT2": 3,
     "forbidFloatingModelPointer": true,
+    "requirePinnedModelVersion": true,
     "systemPromptGuard": "你只能使用 <context> 标签内的内容作答。不得使用你训练数据中关于该公司的任何信息。context 中没有的内容，必须输出 no_signal。"
   },
+  "$modelVersionNote": "PRD 6.7.3 禁止 -latest 浮动指针，要求版本留痕可复现。基线不预置任何猜测的快照 ID：provider 必须经 LEADPILOT_MODEL_VERSION_<KEY> 环境变量注入官网可查的具体版本，否则网关拒绝发起真实调用并返回 E6008。仅配 API Key 不等于可调用。",
   "$alphaNote": "PRD 6.7.4 公式 α = min(0.60, confidence × evidence_coverage)；6.7.5 给出各维度规则/模型参与度。本实现把参与度的模型占比作为 α 的分维上限（min(cap, conf×coverage)），属解释性取舍，需在 9.5 基准集上验证后冻结。",
   "modelParticipation": {
     "match": 0.4,
@@ -113,7 +115,9 @@
   "errorCodes": {
     "E6001": "provider 超时", "E6002": "限流", "E6003": "schema 校验失败",
     "E6004": "证据校验不通过", "E6005": "全部 provider 不可用（降级模式）",
-    "E6006": "BYOK Key 无效", "E6007": "内容触发 provider 安全策略拒答"
+    "E6006": "BYOK Key 无效", "E6007": "内容触发 provider 安全策略拒答",
+    "E6008": "模型快照未锁定（禁止浮动指针，拒绝发起真实调用）",
+    "E6009": "访问令牌缺失或无效", "E6010": "请求超过限流阈值"
   },
   "piiExclusion": {
     "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",

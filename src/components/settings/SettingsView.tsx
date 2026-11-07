@@ -132,9 +132,10 @@ export default function SettingsView() {
                   desc={`真实运行于 ${gatewayBaseUrl}；Key 只从服务端环境变量读取，不落库、不进日志、不回传前端`}
                   extra={<Badge tone={gateway?.mode === 'configured' ? 'emerald' : 'amber'}>{gateway?.mode === 'configured' ? '已配置 Key' : gateway?.online ? '在线 · 未配 Key' : gateway ? '离线' : '探测中'}</Badge>}
                 />
-                <div className="grid grid-cols-4 gap-3 text-[11px]">
+                <div className="grid grid-cols-5 gap-3 text-[11px]">
                   {[
-                    { label: '已配置 provider', value: gateway ? `${gateway.configuredCount} / ${gateway.totalProviders}` : '—' },
+                    { label: '可真实调用', value: gateway ? `${gateway.readyCount} / ${gateway.totalProviders}` : '—' },
+                    { label: '已配 Key / 已锁快照', value: gateway ? `${gateway.configuredCount} / ${gateway.pinnedCount}` : '—' },
                     { label: '结果缓存', value: gateway ? `${gateway.cacheEntries} 条 · TTL ${diag?.cache.ttlDays ?? 30} 天` : '—' },
                     { label: '调用审计', value: gateway ? `${gateway.auditEntries} 条` : '—' },
                     { label: '熔断中', value: diag ? `${diag.circuit.length} 家` : '—' },
@@ -152,7 +153,20 @@ export default function SettingsView() {
                 </div>
                 {gateway?.mode !== 'configured' && (
                   <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
-                    <strong>当前为 E6005 降级模式</strong>：判断与写信请求不会转发给任何 provider，界面把分数改为区间显示并标注「未经模型校验」。配置任一 Key（如 <code>DEEPSEEK_API_KEY</code> / <code>OPENAI_API_KEY</code>）后重启云端服务即可走真实调用链，无需改前端代码。
+                    <strong>{(gateway?.configuredCount ?? 0) > 0 && gateway?.pinnedCount === 0 ? '当前为 E6008 降级模式（快照未锁定）' : '当前为 E6005 降级模式'}</strong>：判断与写信请求不会转发给任何 provider，界面把分数改为区间显示并标注「未经模型校验」。
+                    {(gateway?.configuredCount ?? 0) > 0 && gateway?.pinnedCount === 0
+                      ? '已配 Key 但未锁定 model_version 快照，禁止 -latest 浮动指针。请设置 LEADPILOT_MODEL_VERSION_<PROVIDER_KEY> 为官网可查的具体版本 ID 后重启服务。'
+                      : '配置任一 Key（如 DEEPSEEK_API_KEY）并锁定对应快照后重启云端服务即可走真实调用链，无需改前端代码。'}
+                    {gateway?.reason && <span className="mt-1 block opacity-80">{gateway.reason}</span>}
+                  </p>
+                )}
+                {gateway?.security && (
+                  <p className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2 text-[10px] text-muted">
+                    <ShieldCheck size={12} className="text-emerald-600" />
+                    网关安全：
+                    <Badge tone={gateway.security.mode === 'token' ? 'emerald' : 'slate'}>{gateway.security.mode === 'token' ? 'Bearer 令牌鉴权' : '仅本机免鉴权'}</Badge>
+                    <span>CORS {gateway.security.cors.join(' / ')}</span>
+                    <span>· 限流 {gateway.security.rateLimitPerMinute} 次/分钟/IP</span>
                   </p>
                 )}
               </Card>
@@ -165,7 +179,12 @@ export default function SettingsView() {
                       <Badge tone={p.tier === 'T0' ? 'emerald' : p.tier === 'T1' ? 'blue' : 'violet'}>{p.tier}</Badge>
                       <span className="font-medium text-ink">{p.name}</span>
                       <span className="text-muted">{p.region === 'domestic' ? '境内组' : '境外组'}</span>
-                      <span className="ml-auto">{p.circuitOpen ? <Badge tone="rose">熔断中</Badge> : p.configured ? <Badge tone="emerald">已配 Key</Badge> : <Badge tone="slate">未配置</Badge>}</span>
+                      {p.modelVersion && <code className="max-w-[180px] truncate text-[10px] text-slate-500" title={p.modelVersion}>{p.modelVersion}</code>}
+                      <span className="ml-auto flex items-center gap-1.5">
+                        {p.configured && !p.pinned && <Badge tone="amber">快照未锁定</Badge>}
+                        {p.pinned && <Badge tone="violet">快照已锁</Badge>}
+                        {p.circuitOpen ? <Badge tone="rose">熔断中</Badge> : p.configured ? <Badge tone="emerald">已配 Key</Badge> : <Badge tone="slate">未配置</Badge>}
+                      </span>
                     </div>
                   ))}
                   {!gateway?.online && <p className="text-[11px] text-muted">云端服务不可达，无法读取 provider 清单。启动命令：<code>node server/index.mjs</code></p>}

@@ -23,9 +23,62 @@ const MAX_CONCURRENT = 3
 export function createOrchestrator(opts = {}) {
   const now = opts.now ?? (() => Date.now())
   const tickMs = opts.tickMs ?? 400
+  const store = opts.store ?? null // 传入持久化存储后，任务游标跨进程可恢复（AC-03）
   const tasks = new Map()
   const subscribers = new Map()
   const timers = new Map()
+
+  /** 内部全量状态（含游标 / tick / 日志），用于持久化；与对外的 snapshot 刻意区分 */
+  function serialize(task) {
+    return {
+      id: task.id, config: task.config, status: task.status,
+      pointsEstimated: task.pointsEstimated, pointsUsed: task.pointsUsed,
+      createdAt: task.createdAt, finishedAt: task.finishedAt ?? null,
+      startedMs: task.startedMs ?? null, tick: task.tick ?? 0,
+      cursor: task.cursor, progress: task.progress, demo: true,
+    }
+  }
+
+  function persist(task) {
+    if (!store) return
+    try { store.taskUpsert(task.id, serialize(task)) } catch (err) {
+      // 持久化失败必须可见，绝不静默假装已落盘
+      // eslint-disable-next-line no-console
+      console.warn(`[LeadPilot] 任务 ${task.id} 持久化失败：${String(err?.message ?? err)}`)
+    }
+  }
+
+  /** 进程重启后：活跃任务一律降为 paused 并保留游标，由用户显式点击「继续」恢复 */
+  function hydrate() {
+    if (!store) return []
+    const ids = []
+    for (const raw of store.taskList()) {
+      if (!raw?.id || !raw.progress || !raw.cursor) continue
+      const wasActive = raw.status === 'running' || raw.status === 'queued'
+      const task = {
+        ...raw,
+        status: wasActive ? 'paused' : raw.status,
+        tick: raw.tick ?? 0,
+        startedMs: now(),
+        recovered: true,
+        progress: {
+          ...raw.progress,
+          log: [...(raw.progress.log ?? []), {
+            at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }),
+            level: 'warn',
+            text: wasActive
+              ? '进程重启：已从持久化游标恢复为「已暂停」，点击继续即断点续跑，额度不重复扣减（AC-03）'
+              : '任务状态已从持久化存储恢复',
+          }].slice(-80),
+        },
+      }
+      tasks.set(task.id, task)
+      ids.push(task.id)
+      persist(task)
+    }
+    return ids
+  }
+  const recoveredIds = hydrate()
 
   function emit(taskId, type, data) {
     const payload = { type, taskId, at: new Date(now()).toISOString(), demo: true, ...data }
@@ -47,6 +100,8 @@ export function createOrchestrator(opts = {}) {
       progress: task.progress, cursor: task.cursor,
       pointsEstimated: task.pointsEstimated, pointsUsed: task.pointsUsed,
       createdAt: task.createdAt, finishedAt: task.finishedAt,
+      recovered: Boolean(task.recovered),
+      persistence: store?.mode ?? 'memory',
       demo: true,
     }
   }
@@ -60,6 +115,7 @@ export function createOrchestrator(opts = {}) {
     task.progress.log.push({ at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: status === 'done' ? 'info' : 'warn', text: reason })
     task.progress.stage = status === 'done' ? '完成' : task.progress.stage
     task.progress.etaRange = [0, 0]
+    persist(task)
     emit(task.id, status === 'done' ? 'done' : 'aborted', { progress: task.progress, cursor: task.cursor, pointsUsed: task.pointsUsed, reason })
   }
 
@@ -104,6 +160,7 @@ export function createOrchestrator(opts = {}) {
     p.log.push({ at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: 'info', text: `${p.stage} · 新增 ${batch} 条候选 · 已入库 ${p.stored}` })
     p.log = p.log.slice(-80)
 
+    persist(task)
     emit(task.id, 'progress', {
       progress: p, cursor: task.cursor, demoDomains,
       note: '演示编排：候选域名为占位标识，客户端使用本地演示池渲染，不代表真实采集结果',
@@ -118,6 +175,7 @@ export function createOrchestrator(opts = {}) {
     if (timers.has(task.id)) return
     task.status = 'running'
     task.startedMs = now()
+    persist(task)
     timers.set(task.id, setInterval(() => tick(task), tickMs))
     emit(task.id, 'started', { config: task.config, hardTimeoutMin: HARD_TIMEOUT_MIN[task.config.depth] ?? 25 })
   }
@@ -148,6 +206,7 @@ export function createOrchestrator(opts = {}) {
       },
     }
     tasks.set(id, task)
+    persist(task)
     if (task.status === 'running') start(task)
     else emit(id, 'queued', { position: running - MAX_CONCURRENT + 1 })
     return snapshot(task)
@@ -160,6 +219,7 @@ export function createOrchestrator(opts = {}) {
     const t = tasks.get(id); if (!t || t.status !== 'running') return null
     t.status = 'paused'
     clearInterval(timers.get(id)); timers.delete(id)
+    persist(t)
     emit(id, 'paused', { cursor: t.cursor })
     return snapshot(t)
   }
@@ -167,6 +227,7 @@ export function createOrchestrator(opts = {}) {
   function resume(id, cursor) {
     const t = tasks.get(id); if (!t || !['paused', 'queued'].includes(t.status)) return null
     if (cursor) t.cursor = { ...t.cursor, ...cursor }
+    persist(t)
     start(t)
     emit(id, 'resumed', { cursor: t.cursor, note: '从持久化游标继续，额度不重复扣减（PRD F2-2）' })
     return snapshot(t)
@@ -180,5 +241,9 @@ export function createOrchestrator(opts = {}) {
 
   function dispose() { for (const timer of timers.values()) clearInterval(timer); timers.clear(); tasks.clear(); subscribers.clear() }
 
-  return { createTask, getTask, listTasks, pause, resume, abort, subscribe, emit, dispose, snapshot }
+  return {
+    createTask, getTask, listTasks, pause, resume, abort, subscribe, emit, dispose, snapshot,
+    persistence: store?.mode ?? 'memory',
+    recoveredIds,
+  }
 }

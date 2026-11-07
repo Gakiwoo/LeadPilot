@@ -44,16 +44,32 @@ export function createGateway(opts = {}) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch
   const nowFn = opts.now ?? (() => Date.now())
   const sleepFn = opts.sleep ?? sleep
-  const cache = new Map()
-  const audit = []
+  const store = opts.store ?? null
+  const memoryCache = new Map()
+  const memoryAudit = []
+  // 传入持久化存储后，30 天结果缓存与调用审计跨进程可恢复；mode 在 health 中如实暴露
+  const cache = store ? {
+    get(key) { return store.cacheGet(key) },
+    set(key, value) { store.cacheSet(key, value, protocol.rules.cacheTtlDays * 86400000) },
+    get size() { return store.cacheStats().entries },
+  } : memoryCache
+  const audit = memoryAudit
   const failures = new Map() // providerKey -> number[] (timestamps)
   const circuit = new Map()  // providerKey -> openUntil
 
-  const providers = protocol.providers.map((p) => ({
-    ...p,
-    configured: Boolean(env[p.envKey]),
-    apiKey: env[p.envKey] ?? '',
-  }))
+  /** 快照 ID 只能由环境变量注入；基线不预置任何猜测值，-latest 一律视为未锁定 */
+  const versionEnvKey = (key) => `LEADPILOT_MODEL_VERSION_${key.toUpperCase().replace(/-/g, '_')}`
+  const providers = protocol.providers.map((p) => {
+    const raw = String(env[versionEnvKey(p.key)] ?? '').trim()
+    const pinned = raw.length > 0 && !/latest/i.test(raw)
+    return {
+      ...p,
+      configured: Boolean(env[p.envKey]),
+      apiKey: env[p.envKey] ?? '',
+      modelVersion: pinned ? raw : null,
+      snapshotLocked: pinned,
+    }
+  })
 
   function isOpen(p) {
     const until = circuit.get(p.key) ?? 0
@@ -74,26 +90,69 @@ export function createGateway(opts = {}) {
 
   function appendAudit(entry) {
     // 调用审计只记元数据，绝不记录 prompt / 原文 / 客户邮箱（PRD 11.4.4 / 8.3）
-    audit.push({ at: new Date(nowFn()).toISOString(), ...entry })
-    if (audit.length > 500) audit.shift()
+    const full = { at: new Date(nowFn()).toISOString(), ...entry }
+    memoryAudit.push(full)
+    if (memoryAudit.length > 500) memoryAudit.shift()
+    if (store) {
+      try { store.auditAppend(full) } catch (err) {
+        // 审计落盘失败必须可见，不能静默当作成功
+        // eslint-disable-next-line no-console
+        console.warn(`[LeadPilot] 调用审计持久化失败：${String(err?.message ?? err)}`)
+      }
+    }
+  }
+
+  function readAudit() {
+    return store ? store.auditList(500) : [...memoryAudit]
   }
 
   function health() {
     const list = providers.map((p) => ({
-      key: p.key, name: p.name, tier: p.tier, region: p.region, model: p.model,
-      configured: p.configured,
+      key: p.key, name: p.name, tier: p.tier, region: p.region, model: p.modelVersion,
+      modelVersion: p.modelVersion, configured: p.configured, pinned: p.snapshotLocked,
       circuitOpen: isOpen(p),
       recentFailures: (failures.get(p.key) ?? []).length,
     }))
+    const configuredCount = list.filter((p) => p.configured).length
+    const pinnedCount = list.filter((p) => p.configured && p.pinned).length
+    const readyCount = list.filter((p) => p.configured && p.pinned && !p.circuitOpen).length
     return {
-      ok: list.some((p) => p.configured && !p.circuitOpen),
-      mode: list.some((p) => p.configured) ? 'configured' : 'unconfigured-demo',
-      configuredCount: list.filter((p) => p.configured).length,
+      ok: readyCount > 0,
+      mode: readyCount > 0 ? 'configured' : 'unconfigured-demo',
+      configuredCount, pinnedCount, readyCount,
       totalProviders: list.length,
       cacheEntries: cache.size,
-      auditEntries: audit.length,
+      auditEntries: readAudit().length,
+      persistence: store?.mode ?? 'memory',
       providers: list,
-      note: '未配置 API Key 时网关返回 E6005 降级，不伪造模型判断。Key 只从环境变量读取，不落库、不进日志。',
+      note: '只配 API Key 不足以调用：还必须锁定 model_version 快照。未锁定返回 E6008，未配 Key 返回 E6005，都不伪造模型判断。',
+      reason: configuredCount === 0
+        ? '未配置任何 API Key：判断与写信明确返回 E6005 降级。'
+        : pinnedCount === 0
+          ? `已配置 ${configuredCount} 家 API Key，但未锁定任何 model_version 快照：拒绝真实调用（E6008）。请设置 LEADPILOT_MODEL_VERSION_* 环境变量。`
+          : readyCount === 0
+            ? '所有已锁定快照的 provider 均处于熔断中，暂时不可用。'
+            : undefined,
+    }
+  }
+
+  /** 无可用 provider 时区分「没 Key」「有 Key 但没锁快照」「全部熔断」，绝不笼统说成降级 */
+  function noProviderReason() {
+    if (!providers.some((p) => p.configured)) {
+      return {
+        codes: ['E6005'],
+        reason: '全部 provider 不可用或未配置 API Key：本次为规则估算，未经模型校验。请把不确定性显式化（PRD F0-4）。',
+      }
+    }
+    if (!providers.some((p) => p.configured && p.snapshotLocked)) {
+      return {
+        codes: ['E6008'],
+        reason: '已配置 API Key 但未锁定 model_version 快照：禁止 -latest 浮动指针，网关拒绝发起真实调用。请设置 LEADPILOT_MODEL_VERSION_<PROVIDER_KEY> 为官网可查的具体版本 ID。',
+      }
+    }
+    return {
+      codes: ['E6005'],
+      reason: '所有已锁定快照的 provider 均处于熔断或不可用状态：本次为规则估算，未经模型校验。',
     }
   }
 
@@ -101,7 +160,8 @@ export function createGateway(opts = {}) {
   function chainFor(tier, region) {
     const order = tier === 'T0' ? ['T0', 'T1', 'T2'] : tier === 'T1' ? ['T1', 'T2'] : ['T2']
     return order.flatMap((t) => providers.filter((p) =>
-      p.tier === t && p.configured && !isOpen(p) && (region.group !== 'domestic' || p.region === 'domestic'),
+      p.tier === t && p.configured && p.snapshotLocked && !isOpen(p)
+      && (region.group !== 'domestic' || p.region === 'domestic'),
     ))
   }
 
@@ -112,10 +172,12 @@ export function createGateway(opts = {}) {
     try {
       const isAnthropic = p.vendor === 'anthropic'
       const url = isAnthropic ? `${p.baseUrl}/messages` : `${p.baseUrl}/chat/completions`
+      // chainFor 只放行已锁定快照的 provider；此处用快照 ID 调用与留痕，保证可复现
+      const pinnedModel = p.modelVersion ?? p.model
       const body = isAnthropic
-        ? { model: p.model, max_tokens: 900, temperature: protocol.rules.temperature, system: messages[0].content, messages: messages.slice(1) }
+        ? { model: pinnedModel, max_tokens: 900, temperature: protocol.rules.temperature, system: messages[0].content, messages: messages.slice(1) }
         : {
-          model: p.model, messages, temperature: protocol.rules.temperature, max_tokens: 900,
+          model: pinnedModel, messages, temperature: protocol.rules.temperature, max_tokens: 900,
           response_format: { type: 'json_object' },
         }
       const res = await fetchImpl(url, {
@@ -214,10 +276,11 @@ export function createGateway(opts = {}) {
 
     const chain = chainFor(tier, region)
     if (!chain.length) {
-      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', latencyMs: nowFn() - started })
+      const down = noProviderReason()
+      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], latencyMs: nowFn() - started })
       return {
-        ok: false, degraded: true, judgement: null, tier, region, errorCodes: ['E6005'],
-        reason: '全部 provider 不可用或未配置 API Key：本次为规则估算，未经模型校验。请把不确定性显式化（PRD F0-4）。',
+        ok: false, degraded: true, judgement: null, tier, region,
+        errorCodes: down.codes, reason: down.reason,
       }
     }
 
@@ -240,7 +303,7 @@ export function createGateway(opts = {}) {
       const verified = verifyEvidence(checked.value, sanitized.texts)
       const points = pointCost(result.usage, tier, 0, p)
       appendAudit({
-        taskType: 'judge', tier, providerKey: p.key, model: p.model, cached: false,
+        taskType: 'judge', tier, providerKey: p.key, model: p.modelVersion, cached: false,
         input: result.usage.input, output: result.usage.output, points,
         piiRemoved: sanitized.removed,
         provenanceRate: Number(verified.provenanceRate.toFixed(3)),
@@ -252,7 +315,7 @@ export function createGateway(opts = {}) {
         judgement: {
           ...checked.value,
           model_id: p.model,
-          model_version: p.model, // 生产必须锁定具体快照，禁止 -latest
+          model_version: p.modelVersion, // chainFor 保证非 null，禁止 -latest 浮动指针
           prompt_version: protocol.promptVersion,
           schema_version: protocol.schemaVersion,
         },
@@ -262,7 +325,7 @@ export function createGateway(opts = {}) {
         evidenceFields: verified.fields,
         errorCodes: verified.passesGate ? [] : ['E6004'],
         tier, region, cached: false,
-        audit: { providerKey: p.key, model: p.model, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
+        audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
       }
       payload.clientJudgement = toClientJudgement(payload.judgement)
       cache.set(key, { at: nowFn(), judgement: payload.judgement, providerKey: p.key, provenanceRate: verified.provenanceRate })
@@ -310,10 +373,11 @@ export function createGateway(opts = {}) {
 
     const chain = chainFor(tier, region)
     if (!chain.length) {
-      appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', latencyMs: nowFn() - started })
+      const down = noProviderReason()
+      appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], latencyMs: nowFn() - started })
       return {
-        ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: ['E6005'],
-        reason: '全部 T1/T2 provider 不可用或未配置 API Key：本次不生成模型正文，客户端将回退本地确定性模板并明确标注 DEMO。',
+        ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: down.codes,
+        reason: down.reason + ' 本次不生成模型正文，客户端将回退本地确定性模板并明确标注 DEMO。',
       }
     }
 
@@ -329,7 +393,7 @@ export function createGateway(opts = {}) {
       }
       const points = pointCost(result.usage, tier, 0, p)
       appendAudit({
-        taskType: 'write_email', tier, providerKey: p.key, model: p.model, cached: false,
+        taskType: 'write_email', tier, providerKey: p.key, model: p.modelVersion, cached: false,
         input: result.usage.input, output: result.usage.output, points,
         wordCount: checked.value.wordCount, latencyMs: nowFn() - started,
       })
@@ -338,7 +402,7 @@ export function createGateway(opts = {}) {
         ok: true, subject: checked.value.subject, body: checked.value.body,
         anchorUsed: checked.value.anchorUsed, wordCount: checked.value.wordCount,
         tier, region, cached: false,
-        audit: { providerKey: p.key, model: p.model, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
+        audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
         note: '正文未经合规尾巴注入：真实身份 / 物理地址 / 退订说明由客户端代码追加，并通过发送前校验后才可入草稿队列。',
       }
     }
@@ -352,7 +416,8 @@ export function createGateway(opts = {}) {
 
   return {
     route, regionDecision, health, judge, writeEmail,
-    getAudit: () => [...audit],
+    persistence: store?.mode ?? 'memory',
+    getAudit: readAudit,
     getCacheStats: () => ({ entries: cache.size, ttlDays: protocol.rules.cacheTtlDays }),
     getCircuitState: () => [...circuit.entries()].filter(([, until]) => until > nowFn()).map(([key, until]) => ({ providerKey: key, openUntil: new Date(until).toISOString() })),
     _internals: { providers, callOnce, chainFor, cache, recordFailure, recordSuccess, isOpen },
