@@ -241,7 +241,13 @@ export interface TaskProgress {
   stored: number
   qualified: number
   etaRange: [number, number]
-  sources: { name: string; hits: number; failures: number; status: 'ok' | 'warn' | 'fail'; reason?: string }[]
+  sources: {
+    name: string; hits: number; failures: number; status: 'ok' | 'warn' | 'fail'
+    reason?: string
+    /** v0.4.0：数据源注册表状态，unconfigured/ready/blocked 等；UI 必须如实展示，不把占位说成已接入 */
+    key?: string
+    mode?: string
+  }[]
   log: { at: string; level: 'info' | 'warn' | 'error'; text: string }[]
 }
 

@@ -5,17 +5,13 @@
  *          硬超时、并发上限 3、单源失败显式降级、暂停/继续/中止。
  * 未接部分：6 类 DataSourceAdapter 与 Playwright 集群。所有事件带 demo:true，
  *          不生成任何「看起来像真公司」的数据，由客户端用本地演示池渲染。
+ *
+ * v0.4.0：源清单改由 server/data-sources.mjs 的注册表提供（可插拔 + 显式健康状态），
+ *         编排器不再硬编码源名；注册表如实报告 0/6 已接入，绝不制造「已接入」假象。
  */
+import { createDataSourceRegistry } from './data-sources.mjs'
 
 export const STAGES = ['检索候选', '规范化', '去重', '抓取详情', '验证邮箱', '模型判断与评分']
-const SOURCE_NAMES = [
-  '搜索引擎适配器（SerpAPI / Bing / CSE）',
-  '企业注册库适配器',
-  '海关数据适配器（授权）',
-  '官网抓取器（Playwright + 代理池）',
-  '邮箱发现适配器',
-  '邮箱验证器（MX + SMTP 自建）',
-]
 const HARD_TIMEOUT_MIN = { 1: 10, 2: 25, 3: 50, 4: 90 }
 const SOURCES_BY_DEPTH = { 1: 3, 2: 5, 3: 6, 4: 6 }
 const MAX_CONCURRENT = 3
@@ -24,6 +20,7 @@ export function createOrchestrator(opts = {}) {
   const now = opts.now ?? (() => Date.now())
   const tickMs = opts.tickMs ?? 400
   const store = opts.store ?? null // 传入持久化存储后，任务游标跨进程可恢复（AC-03）
+  const dataSources = opts.dataSources ?? createDataSourceRegistry()
   const tasks = new Map()
   const subscribers = new Map()
   const timers = new Map()
@@ -35,7 +32,8 @@ export function createOrchestrator(opts = {}) {
       pointsEstimated: task.pointsEstimated, pointsUsed: task.pointsUsed,
       createdAt: task.createdAt, finishedAt: task.finishedAt ?? null,
       startedMs: task.startedMs ?? null, tick: task.tick ?? 0,
-      cursor: task.cursor, progress: task.progress, demo: true,
+      cursor: task.cursor, progress: task.progress,
+      sourceMode: task.sourceMode ?? 'demo', demo: true,
     }
   }
 
@@ -95,6 +93,7 @@ export function createOrchestrator(opts = {}) {
   }
 
   function snapshot(task) {
+    const ds = dataSources.health()
     return {
       id: task.id, status: task.status, config: task.config,
       progress: task.progress, cursor: task.cursor,
@@ -102,6 +101,8 @@ export function createOrchestrator(opts = {}) {
       createdAt: task.createdAt, finishedAt: task.finishedAt,
       recovered: Boolean(task.recovered),
       persistence: store?.mode ?? 'memory',
+      sourceMode: task.sourceMode ?? 'demo',
+      dataSources: { ready: ds.readyCount, total: ds.total },
       demo: true,
     }
   }
@@ -121,6 +122,7 @@ export function createOrchestrator(opts = {}) {
 
   function tick(task) {
     if (task.status !== 'running') return
+    const ds = dataSources.health()
     const p = task.progress
     const target = Math.max(10, Math.min(1000, Number(task.config.targetCount) || 100))
     const depth = [1, 2, 3, 4].includes(Number(task.config.depth)) ? Number(task.config.depth) : 2
@@ -134,7 +136,17 @@ export function createOrchestrator(opts = {}) {
     }
 
     const batch = Math.min(4, Math.max(1, Math.ceil(target / 12)))
-    const demoDomains = Array.from({ length: batch }, (_, i) => `candidate-${task.cursor.offset + i + 1}.demo.local`)
+    const plan = dataSources.planBatch({ count: batch, cursorOffset: task.cursor.offset })
+    // 已注册实现但真实采集链路尚未接入：显式阻塞并暂停，不推进游标、不假装进度
+    if (plan.sourceMode === 'blocked') {
+      p.log.push({ at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: 'warn', text: plan.note })
+      p.log = p.log.slice(-80)
+      emit(task.id, 'source_warning', { sourceMode: 'blocked', note: plan.note, completeness: 0 })
+      pause(task.id)
+      return
+    }
+    task.sourceMode = plan.sourceMode
+    const demoDomains = plan.domains
     task.cursor.offset += batch
     task.cursor.processedDomains = [...task.cursor.processedDomains.slice(-200), ...demoDomains]
 
@@ -149,9 +161,11 @@ export function createOrchestrator(opts = {}) {
       const s = p.sources[2]
       s.status = 'warn'
       s.failures = 1
-      s.reason = '数据源适配器未接入（配额不可用）· 本次结果基于其余源，完整性约 78%'
+      s.reason = s.mode === 'unconfigured'
+        ? `数据源「${s.name}」未接入（unconfigured）· 演示编排完整性 0%，不代表真实采集`
+        : `数据源「${s.name}」${s.reason ?? '不可用'} · 本次结果基于其余源`
       p.log.push({ at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: 'warn', text: s.reason })
-      emit(task.id, 'source_warning', { source: s, completeness: 0.78 })
+      emit(task.id, 'source_warning', { source: s, completeness: 0, sourceMode: plan.sourceMode })
     }
     for (let i = 0; i < p.sources.length; i++) {
       const s = p.sources[i]
@@ -163,7 +177,9 @@ export function createOrchestrator(opts = {}) {
     persist(task)
     emit(task.id, 'progress', {
       progress: p, cursor: task.cursor, demoDomains,
-      note: '演示编排：候选域名为占位标识，客户端使用本地演示池渲染，不代表真实采集结果',
+      sourceMode: plan.sourceMode,
+      dataSources: { ready: ds.readyCount, total: ds.total },
+      note: plan.note,
     })
 
     const elapsedMin = (now() - task.startedMs) / 60000
@@ -185,6 +201,8 @@ export function createOrchestrator(opts = {}) {
     const depth = [1, 2, 3, 4].includes(Number(config.depth)) ? Number(config.depth) : 2
     const target = Math.max(10, Math.min(1000, Number(config.targetCount) || 100))
     const id = `task_${now()}_${Math.random().toString(36).slice(2, 8)}`
+    const ds = dataSources.health()
+    const shownSources = ds.sources.slice(0, SOURCES_BY_DEPTH[depth] ?? 5)
     const task = {
       id, config: { ...config, depth, targetCount: target },
       status: running >= MAX_CONCURRENT ? 'queued' : 'running',
@@ -194,14 +212,18 @@ export function createOrchestrator(opts = {}) {
       finishedAt: undefined,
       startedMs: now(),
       tick: 0,
+      sourceMode: ds.mode === 'demo' ? 'demo' : 'blocked',
       cursor: { stageIndex: 0, offset: 0, processedDomains: [] },
       progress: {
         stage: STAGES[0], stageIndex: 0, candidates: 0, stored: 0, qualified: 0, etaRange: [4, 8],
-        sources: SOURCE_NAMES.slice(0, SOURCES_BY_DEPTH[depth] ?? 5).map((name) => ({ name, hits: 0, failures: 0, status: 'ok' })),
+        sources: shownSources.map((s) => ({
+          key: s.key, name: s.name, mode: s.mode, reason: s.reason,
+          hits: 0, failures: 0, status: 'ok',
+        })),
         log: [{
           at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }),
           level: 'warn',
-          text: '演示编排：数据源适配器与 Playwright 集群未接入，本任务不产生真实采集结果',
+          text: `数据源 ${ds.readyCount}/${ds.total} 已接入：${ds.note}；本任务不产生真实采集结果、不写入客户记录`,
         }],
       },
     }
@@ -244,6 +266,7 @@ export function createOrchestrator(opts = {}) {
   return {
     createTask, getTask, listTasks, pause, resume, abort, subscribe, emit, dispose, snapshot,
     persistence: store?.mode ?? 'memory',
+    dataSources,
     recoveredIds,
   }
 }

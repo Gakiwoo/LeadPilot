@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.3.0 · 2026-11-07（ADR-013–015 为本次新增）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.4.0 · 2026-11-08（ADR-016–018 为本次新增）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -28,6 +28,8 @@
 │  protocol.mjs     schema / 证据 / PII / 计费 / Prompt（共享协议）   │
 │  orchestrator.mjs 6 阶段任务状态机 · 游标 · 并发上限 3 · 硬超时     │
 │  store.mjs        tasks/cache/audit 持久化 · 重启恢复（AC-03）     │
+│  t0.mjs           T0 规则事实抽取（可核验引用，不调模型）         │
+│  data-sources.mjs 6 类数据源注册表 · health · 显式 demo/blocked    │
 │  eval.mjs         8 项评测 + P0 发布门禁                          │
 │  ⚠ 数据源适配器 / Playwright 集群 / Gmail 仍未接入                │
 └──────────────────────────────────────────────────────────────────┘
@@ -59,7 +61,7 @@
 
 **理由**：PRD 6.7.2 要求「同一输入必须得到同一分数」。评分引擎一旦掺入 IO 或时间，就失去可复现性与可审计性，也无法在 CI 里跑 385 家基准集回归。
 
-**后果**：所有模型结果以「已验证的离散枚举」形式从外部传入 `buildScoreCard(features, judgement, options)`；引擎本身不知道模型存在。前端 32 个测试里没有任何 mock server；服务端 35 个测试才负责验证网关、编排器、安全边界与持久化。
+**后果**：所有模型结果以「已验证的离散枚举」形式从外部传入 `buildScoreCard(features, judgement, options)`；引擎本身不知道模型存在。前端 32 个测试里没有任何 mock server；服务端 48 个测试才负责验证网关、编排器、T0 抽取、数据源注册表、安全边界与持久化。
 
 ## ADR-003 · 不用「采样 3 次取中位数」稳定分数
 
@@ -107,7 +109,7 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 ## ADR-008 · 测试顺序执行
 
-`vite.config.ts` 设 `fileParallelism: false`，`cacheDir` 指向项目内。原因：当前 Windows 会话的 fs 代理不允许多个 Vitest worker 并发写 SSR 转换缓存（报 EPERM，且会随机漏跑一个测试文件）。改为顺序执行后 6 个文件 / 67 个测试稳定全绿、0 skipped。这是环境适配，不是产品约束；CI 环境可去掉。
+`vite.config.ts` 设 `fileParallelism: false`，`cacheDir` 指向项目内。原因：当前 Windows 会话的 fs 代理不允许多个 Vitest worker 并发写 SSR 转换缓存（报 EPERM，且会随机漏跑一个测试文件）。改为顺序执行后 6 个文件 / 80 个测试稳定全绿、0 skipped。这是环境适配，不是产品约束；CI 环境可去掉。
 
 **v0.3.0 补充教训**：本地全绿 ≠ 仓库可构建。首次推 GitHub 后 CI 在干净检出上报 `TS2307: Cannot find module '@/data/*'`，根因是 `.gitignore` 写了 `data/`（无前导斜杠会匹配任意层级目录），把源码 `src/data/` 一起排除，首提交漏掉 `demo-data.ts` / `repository.ts`；本地文件都在所以全部通过。改为 `/data/` 锚定仓库根并补回文件后 CI 全绿。**规则：忽略本地运行产物一律用 `/` 锚定根目录；首次接入 CI 必须做一次干净检出验证。**
 
@@ -170,6 +172,40 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **SSE 鉴权**：`EventSource` 不能带 Authorization，把 token 拼进 query 会泄漏到日志与浏览器历史。前端改为 `fetch` 流式读取并解析 `event/data` 帧，服务端 SSE 走同一套 `authOk()`。
 
 **已知限制**：`VITE_LEADPILOT_TOKEN` 会暴露在浏览器 bundle，只适用于本机开发 / 可信内网；公网生产必须由同源反向代理注入凭据，前端不持有长期 token。详见 `.env.example` 注释。
+
+## ADR-016 · T0 事实抽取必须是确定性规则层
+
+**决策**：新增 `server/t0.mjs` 与共享协议的 `t0Extraction` 词表。输入是「调用方已经拿到的原文」（`url / text / fetched_at`），输出客户类型 / 进口信号 / 规模 / 产品词 / 负面信号 / 开发信锚点，每条事实携带 `quote / source_url / fetched_at`；未命中维度进 `noSignalFields`，绝不补零。不调用模型、不联网、不推断、不翻译、不做同义扩展。
+
+**理由**：PRD 6.7.1 的「模型不生产事实」必须落在链路最底层。规则分的输入如果来自模型自由文本，幻觉会沿评分链一路传到综合分，且无法用 `temperature=0` 复现。T0 用确定性规则 + 逐字可核验引用，才能给 385 家基准集提供稳定输入。词表放在 `shared/model-protocol.json`，遵守 ADR-009 单一真源。
+
+**硬约束**：`quote` 必须是清洗后原文的连续子串，产出后逐条用 `text.includes(quote)` 复核，任何一条不过直接丢弃；`no_signal` 明确注释「无记录 ≠ 没进口」，不得据此推 `no_import_evidence` 负面标记或给 0 分。输出 `extractor='rules'` 与网关 `judge()` 严格区分，禁止混称模型结果。
+
+**接入点**：`POST /v1/t0/extract`（400 `E6004` 拦截非法来源 / PII）；`gateway.writeEmail()` 收到 `sources` 时锚点优先取 T0 quote，返回 `anchorSource='t0-rules'` 与 `t0` 元数据，**所有降级路径也如实上报**，不因 T0 成功而伪造模型正文。前端 `extractFactsWithGateway()` 提供对称入口，但当前客户端没有真实原文，不主动调用——避免制造「有原文」的假象。
+
+**升级条件**：词表是基线定义，必须与 385 家人工标注基准集一起校准 `extraction_recall ≥ 0.70` 后冻结；真实数据源接入后再把「原文抓取」接在 T0 之前。
+
+## ADR-017 · 数据源注册表可插拔，但绝不半接入
+
+**决策**：新增 `server/data-sources.mjs`，注册 PRD 的 6 类源，统一 `search / healthCheck` 契约，逐源暴露 `unconfigured / not_implemented / ready / unhealthy`。编排器只消费 `health()` 与 `planBatch()`：无 ready 源 → `sourceMode='demo'` + 占位域名；**有 ready 源也返回 `sourceMode='blocked'` + 空 domains + 立即暂停任务**。异步 `collect()` 已实现且单测覆盖，但编排器当前不调用。
+
+**理由**：最容易骗人的不是纯假数据，而是「真 SSE + 假候选域名」的混合体（ADR-012）。如果一注入实现就自动渲染出「看起来像真公司」的名单，而域名去重、T0 原文抓取、客户端写入契约都还没评审，产品最核心的可信度资产就没了。宁可显式 `blocked` 并暂停，也不产出半真半假的中间态。
+
+**后果**：`health()` 如实报 `0/6 已接入`，`/health` 与 `/v1/gateway/health` 同步暴露，设置页与执行页逐源显示「未接入」；任务快照带 `sourceMode` 与 `dataSources`，SSE 事件同源。真实接入时必须一次性完成：6 类 adapter 实现 → 代理池与限速 → 域名去重 → T0 原文 → 客户端写入契约 → 端到端回归，然后才允许把 `blocked` 改为放行。
+
+## ADR-018 · 依赖漏洞按暴露面分级，不盲目跨 major
+
+**现状**：`npm audit` 报 6 项（3 moderate / 1 high / 2 critical），**全部在 dev 工具链**：`vite 5.4.21`、`vitest 2.1.9`、`esbuild`、`tinypool`、`vite-node`、`@vitest/mocker`。`npm audit fix`（不带 `--force`）实测零效果，所有修复都要求 `vite@8.3.6` / `vitest@5.1.0` 跨 major。
+
+**决策**：不执行 `audit fix --force`。改为按暴露面收敛：
+- `vite.config.ts` 的 `server` 与 `preview` 显式绑定 `127.0.0.1`（esbuild dev server 任意站点读响应、Vite optimized deps `.map` 路径穿越都要求攻击者能访问到 dev server）；
+- CI 只跑 `npm ci` + 构建 + 服务端冒烟，不启动、不暴露 dev server；
+- 不启用 Vitest UI server（任意文件读/执行的前提），`fileParallelism: false` 且不向 worker 传入外部可控 options（tinypool 原型污染 RCE 的前提）；
+- 生产 `dist/` 是纯静态资源，不含 Vite dev server 与 Vitest，这 6 项不进入运行时产物。
+
+**理由**：跨 3 个 major 会同时改动 Vite 插件 API、Vitest 配置格式与 TS 构建链，回归面远大于「本机开发服务器被局域网访问」这一实际风险。安全修复应先把暴露面关掉，再择期做有完整回归保障的版本升级，而不是为了把 audit 数字清零引入不可控变更。
+
+**升级条件（单独分支，勿与功能改动混做）**：确认 `@vitejs/plugin-react` / Tailwind / PostCSS 兼容 Vite 8 → 升级 → 回归 `typecheck / test / build / smoke / verify:restart` → 人工核对前端 dev 启动与 HMR → 复核 `npm audit`。每季度或 Vite/Vitest 发布安全补丁时重跑审计。
 
 ---
 

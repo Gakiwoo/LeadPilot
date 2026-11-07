@@ -66,6 +66,11 @@ async function main() {
   check('云端服务健康检查', health.status === 200 && health.body.ok === true,
     `status=${health.status} mode=${health.body?.gateway?.mode ?? 'n/a'}`)
 
+  const ds = health.body?.dataSources
+  check('数据源注册表如实报告 0/6 已接入（不制造「已接入」假象）',
+    ds?.total === 6 && ds?.readyCount === 0 && ds?.mode === 'demo',
+    `ready=${ds?.readyCount ?? 'n/a'}/${ds?.total ?? 'n/a'} mode=${ds?.mode ?? 'n/a'}`)
+
   const gh = await req('/v1/gateway/health')
   check('网关 provider 清单可读', gh.status === 200 && Array.isArray(gh.body.providers),
     `configured=${gh.body?.configuredCount}/${gh.body?.totalProviders}`)
@@ -97,6 +102,42 @@ async function main() {
   check('PII 请求被 400 E6004 拒绝', pii.status === 400 && pii.body.code === 'E6004',
     `status=${pii.status} code=${pii.body?.code}`)
 
+  const t0Doc = {
+    url: 'https://smoke.example/about',
+    text: 'Authorized distributor for Parker fittings across Benelux. We stock hydraulic hose fittings for industrial buyers.',
+    fetched_at: '2026-11-08',
+  }
+  const t0 = await post('/v1/t0/extract', {
+    company_id: 'smoke_t0', sources: [t0Doc], keywords: ['hydraulic hose fittings'],
+  })
+  const t0QuotesVerifiable = t0.status === 200
+    && Array.isArray(t0.body?.evidence)
+    && t0.body.evidence.length > 0
+    && t0.body.evidence.every((e) => t0Doc.text.includes(e.quote))
+  check('T0 规则抽取：引用逐字可核验、不调模型、不补零',
+    t0QuotesVerifiable && t0.body.extractor === 'rules' && t0.body.sourceMode === 'provided-text',
+    `status=${t0.status} facts=${t0.body?.coverage?.hitFields?.length ?? 0}/${t0.body?.coverage?.dimensions?.length ?? 0} evidence=${t0.body?.evidence?.length ?? 0}`)
+
+  const t0Bad = await post('/v1/t0/extract', {
+    company_id: 'smoke_t0', sources: [{ url: 'not-a-url', text: 'x', fetched_at: '2026-11-08' }],
+  })
+  check('T0 非法来源被 400 E6004 拒绝（不拿缺失来源硬凑事实）',
+    t0Bad.status === 400 && t0Bad.body.code === 'E6004',
+    `status=${t0Bad.status} code=${t0Bad.body?.code}`)
+
+  const t0Email = await post('/v1/email/generate', {
+    anchor: 'client supplied anchor', product: 'hydraulic hose fittings',
+    advantages: ['stable lead times'], purpose: 'intro', tone: 'concise',
+    maxWords: 90, language: 'en', country: '美国', sources: [t0Doc],
+  })
+  check('写信链路接入 T0：锚点来源可核验，且降级时不伪造正文',
+    t0Email.body?.anchorSource === 't0-rules'
+    && t0Email.body?.t0?.ok === true
+    && typeof t0Email.body?.anchor === 'string'
+    && t0Doc.text.includes(t0Email.body.anchor)
+    && (t0Email.status === 503 ? t0Email.body?.body === null : typeof t0Email.body?.body === 'string'),
+    `status=${t0Email.status} anchorSource=${t0Email.body?.anchorSource}`)
+
   const gates = await req('/v1/eval/gates')
   check('评测门禁清单可读', gates.status === 200 && gates.body.baselineSize === 385,
     `status=${gates.status} baseline=${gates.body?.baselineSize}`)
@@ -122,6 +163,11 @@ async function main() {
     const aborted = await post(`/v1/tasks/${taskId}/abort`, {})
     check('中止任务并保留游标', aborted.status === 200 && aborted.body?.task?.status === 'aborted',
       `status=${aborted.status} offset=${aborted.body?.task?.cursor?.offset}`)
+    check('任务快照显式标注 sourceMode=demo 且数据源未接入',
+      aborted.body?.task?.sourceMode === 'demo'
+      && aborted.body?.task?.dataSources?.ready === 0
+      && aborted.body?.task?.progress?.sources?.every((s) => s.mode === 'unconfigured'),
+      `sourceMode=${aborted.body?.task?.sourceMode} ready=${aborted.body?.task?.dataSources?.ready}`)
   }
 
   const audit = await req('/v1/gateway/audit')

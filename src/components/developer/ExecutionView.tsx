@@ -98,9 +98,12 @@ export default function ExecutionView({ task }: { task: DevTask }) {
           <SectionTitle title="分源统计" desc="单源失败不影响整体，且必须显式告知（不允许静默降级）" />
           <div className="space-y-1.5">
             {p.sources.map((s) => (
-              <div key={s.name} className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] ${s.status === 'warn' ? 'border-amber-200 bg-amber-50' : 'border-line'}`}>
+              <div key={s.key ?? s.name} className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] ${s.status === 'warn' ? 'border-amber-200 bg-amber-50' : 'border-line'}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${s.status === 'warn' ? 'bg-amber-500' : s.status === 'fail' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
                 <span className="font-medium text-ink">{s.name}</span>
+                {s.mode === 'unconfigured' && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">未接入</span>}
+                {s.mode === 'not_implemented' && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">接口未实现</span>}
+                {s.mode === 'ready' && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">已就绪</span>}
                 <span className="ml-auto tabular-nums text-muted">命中 {s.hits}</span>
                 {s.failures > 0 && <span className="tabular-nums text-amber-700">失败 {s.failures}</span>}
               </div>

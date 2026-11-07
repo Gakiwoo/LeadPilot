@@ -50,6 +50,42 @@
     "trafficTargets": { "T0": 0.85, "T1": 0.13, "T2": 0.02 },
     "$mvpScopeConflict": "PRD 4.1 写 MVP 只做 T0/T1 两级路由（T2 与 BYOK 延后 V1），但 F0-2 明确定义三级路由、F0-1 建议 MVP 落地一家 T0 + 一家 T2。本基线实现完整三级路由规则，实际 provider 接入范围按 M0 拍板。"
   },
+  "t0Extraction": {
+    "$comment": "PRD 6.7.1 / F6-1：T0 抽取层只做确定性规则匹配，不调用模型、不推断、不补零。每条事实必须携带可在传入原文中逐字核验的 quote；未命中的字段一律进 noSignalFields。词表为基线定义，需随 385 家基准集校准后冻结（ADR-016）。",
+    "rulesVersion": "t0-rules-v1",
+    "maxSourceChars": 60000,
+    "minQuoteChars": 8,
+    "maxQuoteChars": 180,
+    "maxSources": 12,
+    "customerTypeTerms": {
+      "importer": ["we import", "importer of", "importing", "imports from", "进口商", "自营进口"],
+      "distributor": ["distributor", "authorized distributor", "authorised distributor", "distribution partner", "经销商", "分销商"],
+      "wholesaler": ["wholesaler", "wholesale supplier", "批发商", "现货批发"],
+      "brand_owner": ["our brand", "brand owner", "own brand", "品牌方"],
+      "retailer": ["retailer", "retail store", "online shop", "零售商"],
+      "factory": ["our factory", "we manufacture", "manufacturer", "production line", "制造商", "自有工厂"],
+      "epc": ["epc contractor", "engineering procurement", "system integrator", "系统集成商", "总承包"],
+      "trader": ["trading company", "trader", "贸易公司"]
+    },
+    "importSignalTerms": {
+      "confirmed": ["customs record", "hs code", "bill of lading", "import shipment", "we import", "imported from", "报关记录", "进口批次"],
+      "inferred": ["authorized distributor", "distribution partner", "local stock", "serving the local market", "本地库存", "区域代理"],
+      "contradicted": ["we do not import", "no import", "不进口", "不经营进口"]
+    },
+    "employeeBands": {
+      "S": { "max": 19, "label": "1–19 人" },
+      "M": { "max": 199, "label": "20–199 人" },
+      "L": { "max": 999, "label": "200–999 人" },
+      "XL": { "max": null, "label": "1000+ 人" }
+    },
+    "employeePatterns": ["(\\d[\\d,]{0,6})\\s*(?:\\+|\\s)?\\s*(?:employees|staff|people|workers|员工|名员工)"],
+    "negativeFlagTerms": {
+      "competitor_suspected": ["we manufacture", "our factory", "leading manufacturer", "oem factory", "自有工厂"],
+      "manufacturer_signal": ["production line", "manufacturing capacity", "factory", "生产线"]
+    },
+    "productStopWords": ["company", "products", "about", "home", "contact", "service", "quality", "welcome", "有限公司", "公司"],
+    "$noFabricationNote": "抽取层绝不产出公司名、域名、邮箱、联系人、营收数字或任何原文未逐字出现的实体；不做同义扩展、不做翻译补全。quote 必须是原文连续子串。"
+  },
   "downgrade": {
     "timeoutMs": 30000,
     "timeoutRetries": 1,

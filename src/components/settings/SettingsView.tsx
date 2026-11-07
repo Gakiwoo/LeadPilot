@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Activity, CloudCog, Coins, Database, Globe2, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Activity, CloudCog, Coins, Cpu, Database, Globe2, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import type { CompanyProfile, Settings } from '@/types'
 import { PROVIDERS, resolveRegionPolicy, route } from '@/services/adapters'
 import { minimizeForModel } from '@/domain/compliance'
@@ -167,6 +167,21 @@ export default function SettingsView() {
                     <Badge tone={gateway.security.mode === 'token' ? 'emerald' : 'slate'}>{gateway.security.mode === 'token' ? 'Bearer 令牌鉴权' : '仅本机免鉴权'}</Badge>
                     <span>CORS {gateway.security.cors.join(' / ')}</span>
                     <span>· 限流 {gateway.security.rateLimitPerMinute} 次/分钟/IP</span>
+                  </p>
+                )}
+                {gateway?.online && (
+                  <p className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2 text-[10px] text-muted">
+                    <Database size={12} className="text-slate-500" />
+                    采集数据源：
+                    <Badge tone={gateway.dataSources?.readyCount ? 'emerald' : 'slate'}>
+                      {gateway.dataSources ? `${gateway.dataSources.readyCount} / ${gateway.dataSources.total} 已就绪` : '—'}
+                    </Badge>
+                    <span>注册表 6 类 · 未接入时编排器显式 demo，绝不写入客户记录</span>
+                    <span className="mx-1">·</span>
+                    <Cpu size={12} className="text-slate-500" />
+                    T0 规则抽取：
+                    <Badge tone="blue">{gateway.t0?.rulesVersion ?? '—'}</Badge>
+                    <span>确定性规则，不调模型、不联网、不补零</span>
                   </p>
                 )}
               </Card>

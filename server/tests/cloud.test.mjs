@@ -5,6 +5,9 @@ import { evaluateBaseline, baselineManifest } from '../eval.mjs'
 import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft } from '../protocol.mjs'
 import { createApp } from '../index.mjs'
 import { createStore, createMemoryStore, sqliteAvailable } from '../store.mjs'
+import { extractFacts, validateT0Input, T0_RULES_VERSION } from '../t0.mjs'
+import { createDataSourceRegistry, SOURCE_DEFS } from '../data-sources.mjs'
+import { sanitizeContext } from '../protocol.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync } from 'node:fs'
@@ -297,6 +300,34 @@ describe('T1 写信链路 · F6-2 硬约束 / F6-5 合规尾巴 / E6005 降级',
     expect(r.body).toBeNull()
   })
 
+  it('传入官网原文时 T0 规则抽取接管个性化锚点，降级仍如实上报且正文为空', async () => {
+    const text = 'Authorized distributor for Parker fittings across Benelux. '
+      + 'We stock hydraulic hose fittings for industrial buyers.'
+    const g = createGateway({ env: {}, fetchImpl: async () => { throw new Error('不应发起请求') } })
+    const r = await g.writeEmail(emailInput({
+      sources: [{ url: 'https://acme.example/about', text, fetched_at: '2026-11-08' }],
+    }))
+    expect(r.anchorSource).toBe('t0-rules')
+    expect(r.t0.ok).toBe(true)
+    expect(r.t0.extractor).toBe('rules')
+    expect(r.t0.anchorCount).toBeGreaterThan(0)
+    expect(text.includes(r.anchor)).toBe(true)
+    expect(r.anchor).toContain('hydraulic hose fittings')
+    expect(r.errorCodes).toContain('E6005')
+    expect(r.body).toBeNull()
+  })
+
+  it('T0 输入非法时如实回退调用方 anchor，不伪造抽取结果', async () => {
+    const g = createGateway({ env: {}, fetchImpl: async () => { throw new Error('不应发起请求') } })
+    const r = await g.writeEmail(emailInput({
+      sources: [{ url: 'not-a-url', text: 'x', fetched_at: '2026-11-08' }],
+    }))
+    expect(r.anchorSource).toBe('client')
+    expect(r.t0.ok).toBe(false)
+    expect(r.t0.code).toBe('E6004')
+    expect(r.anchor).toBe('you distribute Parker fittings across Benelux')
+  })
+
   it('含 PII 的写信请求不转发给任何 provider', async () => {
     let calls = 0
     const g = createGateway({ env: testEnv({ DEEPSEEK_API_KEY: 'k' }), fetchImpl: async () => { calls++; return okFetch(draft)() } })
@@ -553,5 +584,212 @@ describe('模型评测门禁 · PRD 9.5', () => {
     const blocked = evaluateBaseline(bad, 'baseline-2026-11')
     expect(blocked.status).toBe('BLOCKED')
     expect(blocked.p0Failures.some((x) => x.includes('可溯源率'))).toBe(true)
+  })
+})
+
+describe('T0 规则抽取 · 可核验引用 / 不补零 / 不伪造', () => {
+  const doc = (text, url = 'https://acme.example/about') => ({ url, text, fetched_at: '2026-11-08' })
+  const input = (sources, keywords = ['hydraulic hose fittings']) => ({ company_id: 'c_t0_01', sources, keywords })
+
+  it('非法输入一律 400 E6004，绝不拿缺失来源硬凑事实', () => {
+    expect(extractFacts({}).ok).toBe(false)
+    expect(extractFacts(input([])).code).toBe('E6004')
+    expect(validateT0Input(input([{ url: 'ftp://x', text: 'abc', fetched_at: '2026-11-08' }])).ok).toBe(false)
+    expect(validateT0Input(input([doc('abc')], [])).ok).toBe(true)
+    const noDate = { ...doc('some text') }
+    delete noDate.fetched_at
+    expect(validateT0Input(input([noDate])).ok).toBe(false)
+    const pii = input([doc('Authorized distributor')])
+    pii.contact_email = 'sales@acme.example'
+    expect(validateT0Input(pii).ok).toBe(false)
+    expect(extractFacts({ ...input([doc('x')]), keywords: ['sk-abcdefghijk'] }).ok).toBe(false)
+  })
+
+  it('从原文抽客户类型 / 进口信号 / 规模 / 产品词 / 锚点，且每条 quote 逐字可核验', () => {
+    const text = 'About us: Authorized distributor for Parker and Eaton across Benelux. '
+      + 'We import hydraulic hose fittings from Asia. Our team has 85 employees across Rotterdam and Antwerp.'
+    const r = extractFacts(input([doc(text)]))
+    expect(r.ok).toBe(true)
+    expect(r.extractor).toBe('rules')
+    expect(r.sourceMode).toBe('provided-text')
+    expect(r.rulesVersion).toBe(T0_RULES_VERSION)
+    expect(r.facts.customer_type.candidates.length).toBeGreaterThan(0)
+    expect(r.facts.import_signal.value).toBe('confirmed')
+    expect(r.facts.size_estimate.tier).toBe('M')
+    expect(r.facts.size_estimate.employee_count_from_text).toBe(85)
+    expect(r.facts.product_terms.some((p) => p.term === 'hydraulic hose fittings')).toBe(true)
+    expect(r.facts.anchors.length).toBeGreaterThan(0)
+    expect(r.coverage.noSignalFields).toEqual([])
+
+    const clean = sanitizeContext([text]).texts[0]
+    for (const e of r.evidence) {
+      expect(clean.includes(e.quote)).toBe(true)
+      expect(e.source_url).toMatch(/^https?:\/\//)
+      expect(e.fetched_at).toMatch(/^\d{4}-\d{2}-\d{2}/)
+    }
+  })
+
+  it('无命中维度明确 no_signal，绝不补零，且 no_signal 不等于「确认没进口」', () => {
+    const r = extractFacts(input([doc('Welcome to our website. We value long term cooperation and quality.')], []))
+    expect(r.ok).toBe(true)
+    expect(r.coverage.noSignalFields).toEqual(['customer_type', 'import_signal', 'size_estimate'])
+    expect(r.coverage.rate).toBe(0)
+    expect(r.facts.customer_type.value).toBe('unknown')
+    expect(r.facts.import_signal.value).toBe('no_signal')
+    expect(r.facts.import_signal.note).toContain('无记录 ≠ 没进口')
+    expect(r.facts.size_estimate.tier).toBe('unknown')
+    expect(r.facts.negative_flags).not.toContain('no_import_evidence')
+    expect(r.evidence).toEqual([])
+    expect(r.facts.anchors).toEqual([])
+  })
+
+  it('contradicted 优先于 confirmed；负面信号只在原文命中时出现', () => {
+    const r = extractFacts(input([doc('We import hydraulic hose fittings. We do not import any components. We manufacture our own products.')]))
+    expect(r.facts.import_signal.value).toBe('contradicted')
+    expect(r.facts.negative_flags).toContain('competitor_suspected')
+    expect(r.facts.negative_flags).not.toContain('shell_company')
+  })
+
+  it('规模分档与 PII 清洗：quote 不泄漏邮箱/电话，且仍是清洗后原文子串', () => {
+    const raw = 'Our factory has 2400 employees. Contact sales@acme.example or call +49 30 12345678. We manufacture hydraulic fittings.'
+    const r = extractFacts(input([doc(raw)], ['hydraulic fittings']))
+    expect(r.facts.size_estimate.tier).toBe('XL')
+    expect(r.piiRemoved).toBeGreaterThan(0)
+    const clean = sanitizeContext([raw]).texts[0]
+    expect(clean).not.toContain('sales@acme.example')
+    const serialized = JSON.stringify(r)
+    expect(serialized).not.toContain('sales@acme.example')
+    expect(serialized).not.toMatch(/"score"|"total_score"|"rating"|"points"/)
+    for (const e of r.evidence) expect(clean.includes(e.quote)).toBe(true)
+  })
+
+  it('HTTP /v1/t0/extract：200 返回规则事实与 t0 版本；400 拒绝非法来源', async () => {
+    const app = createApp({ store: createMemoryStore(), gateway: createGateway({ env: {}, fetchImpl: async () => { throw new Error('不应发起请求') } }) })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    try {
+      const ok = await fetch(`${base}/v1/t0/extract`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(input([doc('Authorized distributor for hydraulic hose fittings.')])),
+      })
+      expect(ok.status).toBe(200)
+      const body = await ok.json()
+      expect(body.extractor).toBe('rules')
+      expect(body.facts.customer_type.value).toBe('distributor')
+      const bad = await fetch(`${base}/v1/t0/extract`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ company_id: 'x', sources: [{ url: 'not-a-url', text: 't', fetched_at: '2026-11-08' }] }),
+      })
+      expect(bad.status).toBe(400)
+      expect((await bad.json()).code).toBe('E6004')
+      const health = await (await fetch(`${base}/health`)).json()
+      expect(health.t0.extractor).toBe('rules')
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+describe('数据源适配器注册表 · 6 类源契约 / 显式未接入 / 不伪造候选', () => {
+  it('默认 0/6 已接入，health 如实报 demo，planBatch 给占位标识且标明不代表真实采集', () => {
+    const reg = createDataSourceRegistry()
+    const h = reg.health()
+    expect(SOURCE_DEFS).toHaveLength(6)
+    expect(h.total).toBe(6)
+    expect(h.configured).toBe(0)
+    expect(h.readyCount).toBe(0)
+    expect(h.mode).toBe('demo')
+    expect(h.sources.every((s) => s.mode === 'unconfigured' && s.ok === false)).toBe(true)
+    const plan = reg.planBatch({ count: 3, cursorOffset: 10 })
+    expect(plan.sourceMode).toBe('demo')
+    expect(plan.realHits).toBe(0)
+    expect(plan.completeness).toBe(0)
+    expect(plan.domains).toEqual(['candidate-11.demo.local', 'candidate-12.demo.local', 'candidate-13.demo.local'])
+    expect(plan.note).toContain('不代表真实采集结果')
+  })
+
+  it('注入健康实现后仍显式 blocked：绝不生成「看起来像真公司」的候选', () => {
+    const reg = createDataSourceRegistry()
+    reg.register('search', {
+      search: async () => ({ hits: [{ domain: 'real.example.com', url: 'https://real.example.com' }], failures: 0 }),
+      healthCheck: () => ({ ok: true, latencyMs: 1 }),
+    })
+    const h = reg.health()
+    expect(h.configured).toBe(1)
+    expect(h.readyCount).toBe(1)
+    expect(h.mode).toBe('real')
+    const plan = reg.planBatch({ count: 3, cursorOffset: 0 })
+    expect(plan.sourceMode).toBe('blocked')
+    expect(plan.domains).toEqual([])
+    expect(plan.note).toContain('尚未接入')
+  })
+
+  it('collect() 聚合去重真实命中，单源失败显式计入，非法域名不采信', async () => {
+    const reg = createDataSourceRegistry({
+      implementations: {
+        search: {
+          healthCheck: () => ({ ok: true }),
+          search: async () => ({ hits: [{ domain: 'a.example.com' }, { domain: 'a.example.com' }, { domain: 'not a domain' }], failures: 1 }),
+        },
+        website: {
+          healthCheck: () => ({ ok: true }),
+          search: async () => { throw new Error('upstream 500') },
+        },
+      },
+    })
+    const r = await reg.collect('hydraulic fittings', { count: 10 })
+    expect(r.ok).toBe(true)
+    expect(r.sourceMode).toBe('real')
+    expect(r.hits.map((x) => x.domain)).toEqual(['a.example.com'])
+    expect(r.failures.some((f) => f.key === 'website')).toBe(true)
+    expect(r.skipped).not.toContain('search')
+
+    const empty = await createDataSourceRegistry().collect('q')
+    expect(empty.ok).toBe(false)
+    expect(empty.sourceMode).toBe('demo')
+    expect(empty.hits).toEqual([])
+  })
+
+  it('编排器消费注册表：源带 mode、事件带 sourceMode；有 ready 源时显式暂停而非假装进度', async () => {
+    const config = { keywords: ['hydraulic fittings'], markets: ['德国'], depth: 2, targetCount: 100 }
+    const reg = createDataSourceRegistry()
+    const o1 = createOrchestrator({ store: createMemoryStore(), dataSources: reg, tickMs: 10000 })
+    const t1 = o1.createTask(config)
+    expect(t1.sourceMode).toBe('demo')
+    expect(t1.dataSources).toEqual({ ready: 0, total: 6 })
+    expect(t1.progress.sources.every((s) => s.mode === 'unconfigured')).toBe(true)
+    expect(t1.progress.log[0].text).toContain('0/6 已接入')
+    const seen = []
+    o1.subscribe(t1.id, (e) => seen.push(e))
+    o1.dispose()
+
+    const ready = createDataSourceRegistry({
+      implementations: { search: { healthCheck: () => ({ ok: true }), search: async () => ({ hits: [], failures: 0 }) } },
+    })
+    const o2 = createOrchestrator({ store: createMemoryStore(), dataSources: ready, tickMs: 10 })
+    const t2 = o2.createTask(config)
+    expect(t2.sourceMode).toBe('blocked')
+    const blockedEvents = []
+    o2.subscribe(t2.id, (e) => blockedEvents.push(e))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const after = o2.getTask(t2.id)
+    expect(after.status).toBe('paused')
+    expect(after.cursor.offset).toBe(0)
+    expect(blockedEvents.some((e) => e.type === 'source_warning' && e.sourceMode === 'blocked')).toBe(true)
+    expect(after.progress.log.some((l) => l.text.includes('尚未接入'))).toBe(true)
+    o2.dispose()
+    // 显式断言 demo 分支不会误发 blocked 事件
+    expect(seen.length).toBe(0)
+  })
+
+  it('HTTP /health 与 /v1/gateway/health 如实暴露数据源接入状态', async () => {
+    const app = createApp({ store: createMemoryStore(), gateway: createGateway({ env: {}, fetchImpl: async () => { throw new Error('不应发起请求') } }) })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    try {
+      const h = await (await fetch(`${base}/health`)).json()
+      expect(h.dataSources).toMatchObject({ mode: 'demo', total: 6, configured: 0, readyCount: 0 })
+      const gh = await (await fetch(`${base}/v1/gateway/health`)).json()
+      expect(gh.dataSources.readyCount).toBe(0)
+      expect(gh.t0.extractor).toBe('rules')
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
   })
 })

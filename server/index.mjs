@@ -13,6 +13,8 @@ import { createOrchestrator } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
 import { evaluateBaseline, baselineManifest } from './eval.mjs'
 import { createStore } from './store.mjs'
+import { extractFacts, T0_RULES_VERSION } from './t0.mjs'
+import { createDataSourceRegistry } from './data-sources.mjs'
 
 const PORT = Number(process.env.LEADPILOT_PORT ?? 5181)
 const HOST = process.env.LEADPILOT_HOST ?? '127.0.0.1'
@@ -33,7 +35,8 @@ const DEFAULT_SECURITY = {
 export function createApp(opts = {}) {
   const store = opts.store ?? createStore()
   const gateway = opts.gateway ?? createGateway({ store })
-  const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store })
+  const dataSources = opts.dataSources ?? opts.orchestratorOptions?.dataSources ?? createDataSourceRegistry()
+  const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store, dataSources })
   // 允许测试注入独立的安全上下文，不污染进程级默认值
   const sec = { ...DEFAULT_SECURITY, ...(opts.security ?? {}) }
   const hits = new Map() // ip -> { count, resetAt }
@@ -155,7 +158,7 @@ export function createApp(opts = {}) {
     try {
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.3.0',
+          ok: true, service: 'leadpilot-cloud', version: '0.4.0',
           gateway: gateway.health(),
           orchestrator: { tasks: orchestrator.listTasks().length, maxConcurrent: 3 },
           protocol: { schemaVersion: protocol.schemaVersion, promptVersion: protocol.promptVersion },
@@ -165,10 +168,24 @@ export function createApp(opts = {}) {
             durable: store.mode !== 'memory',
             recoveredTasks: orchestrator.recoveredIds?.length ?? 0,
           },
+          t0: { extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text' },
+          dataSources: (() => {
+            const d = dataSources.health()
+            return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
+          })(),
           demo: gateway.health().mode === 'unconfigured-demo',
         })
       }
-      if (method === 'GET' && path === '/v1/gateway/health') return json(res, 200, { ...gateway.health(), security: securityInfo() })
+      if (method === 'GET' && path === '/v1/gateway/health') {
+        return json(res, 200, {
+          ...gateway.health(), security: securityInfo(),
+          t0: { extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text' },
+          dataSources: (() => {
+            const d = dataSources.health()
+            return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
+          })(),
+        })
+      }
       if (method === 'GET' && path === '/v1/gateway/audit') return json(res, 200, { entries: gateway.getAudit(), circuit: gateway.getCircuitState(), cache: gateway.getCacheStats() })
       if (method === 'GET' && path === '/v1/eval/gates') return json(res, 200, baselineManifest())
       if (method === 'GET' && path === '/v1/tasks') return json(res, 200, { tasks: orchestrator.listTasks() })
@@ -182,6 +199,16 @@ export function createApp(opts = {}) {
         const result = await gateway.judge(body)
         const status = result.ok ? 200 : result.needsConsent ? 403 : 503
         return json(res, status, { ok: !!result.ok, ...result })
+      }
+
+      // T0 规则抽取：不调用模型、不联网；输入必须是调用方已拿到的原文
+      if (method === 'POST' && path === '/v1/t0/extract') {
+        const body = await readBody(req)
+        const result = extractFacts(body)
+        if (!result.ok) {
+          return fail(res, 400, 'E6004', 'T0 抽取输入不合法', result.errors.join('；'), '补全 sources / url / fetched_at，并剔除个人信息后重试')
+        }
+        return json(res, 200, result)
       }
 
       if (method === 'POST' && path === '/v1/email/generate') {

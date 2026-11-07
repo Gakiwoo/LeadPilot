@@ -31,7 +31,58 @@ export interface GatewayHealth {
   cacheEntries: number
   auditEntries: number
   security?: { mode: string; loopback: boolean; cors: string[]; rateLimitPerMinute: number }
+  t0?: { extractor: 'rules'; rulesVersion: string; sourceMode: 'provided-text' }
+  dataSources?: { mode: 'demo' | 'real'; total: number; configured: number; readyCount: number }
   reason?: string
+}
+
+/** T0 规则抽取：输入必须是调用方已经拿到的原文，服务端不联网、不调模型 */
+export interface T0Source {
+  url: string
+  text: string
+  fetched_at: string
+}
+
+export interface T0ExtractInput {
+  companyId: string
+  sources: T0Source[]
+  keywords?: string[]
+  markets?: string[]
+}
+
+export interface T0ExtractResult {
+  ok: boolean
+  code?: string
+  errors?: string[]
+  extractor?: 'rules'
+  rulesVersion?: string
+  sourceMode?: 'provided-text'
+  sourceCount?: number
+  piiRemoved?: number
+  facts?: {
+    customer_type: { value: string; no_signal: boolean; evidence: unknown[]; candidates: unknown[] }
+    import_signal: { value: string; no_signal: boolean; evidence: unknown[]; note?: string }
+    size_estimate: { tier: string; no_signal: boolean; evidence: unknown[]; employee_range: unknown }
+    product_terms: unknown[]
+    negative_flags: string[]
+    anchors: { quote: string; source_url: string; fetched_at: string; tags: string[] }[]
+  }
+  evidence?: { quote: string; source_url: string; fetched_at: string; label?: string }[]
+  coverage?: { dimensions: string[]; noSignalFields: string[]; hitFields: string[]; rate: number }
+}
+
+export async function extractFactsWithGateway(input: T0ExtractInput): Promise<T0ExtractResult> {
+  try {
+    return await jsonFetch<T0ExtractResult>('/v1/t0/extract', {
+      method: 'POST',
+      body: JSON.stringify({
+        company_id: input.companyId, sources: input.sources,
+        keywords: input.keywords ?? [], markets: input.markets ?? [],
+      }),
+    }, 6000)
+  } catch {
+    return { ok: false, code: 'E6005', errors: ['T0 抽取服务不可达：请启动 npm run cloud'] }
+  }
 }
 
 export interface JudgeInput {
@@ -84,7 +135,8 @@ export async function probeGateway(): Promise<GatewayHealth> {
       ok: boolean; mode: string; configuredCount: number; pinnedCount: number; readyCount: number
       totalProviders: number;       providers: GatewayHealth['providers']
       cacheEntries: number; auditEntries: number; reason?: string
-      security?: GatewayHealth['security']
+      security?: GatewayHealth['security']; t0?: GatewayHealth['t0']
+      dataSources?: GatewayHealth['dataSources']
     }>('/v1/gateway/health', undefined, 1600)
     if (h.ok === false && (h as { code?: string }).code === 'E6009') {
       return {
@@ -101,7 +153,7 @@ export async function probeGateway(): Promise<GatewayHealth> {
       readyCount: h.readyCount ?? 0,
       totalProviders: h.totalProviders,
       providers: h.providers ?? [], cacheEntries: h.cacheEntries, auditEntries: h.auditEntries,
-      security: h.security, reason: h.reason,
+      security: h.security, t0: h.t0, dataSources: h.dataSources, reason: h.reason,
     }
   } catch {
     return {
@@ -134,6 +186,9 @@ export interface EmailGenerateInput {
   country: string
   angle?: string
   regionPolicy?: 'domestic_first' | 'quality_first'
+  /** 可选：调用方已抓取的官网原文。传入后服务端用 T0 规则抽取可核验锚点，不联网、不调模型 */
+  sources?: T0Source[]
+  companyId?: string
 }
 
 export interface EmailGenerateResponse {
@@ -148,6 +203,13 @@ export interface EmailGenerateResponse {
   wordCount?: number
   tier?: string
   note?: string
+  anchorSource?: 'client' | 't0-rules'
+  anchor?: string
+  t0?: {
+    ok: boolean; extractor?: 'rules'; rulesVersion?: string; sourceCount?: number
+    piiRemoved?: number; anchorCount?: number; anchorSource?: string; note?: string
+    code?: string; errors?: string[]
+  }
   audit?: { providerKey: string; model: string; input: number; output: number; points: number; latencyMs: number }
 }
 

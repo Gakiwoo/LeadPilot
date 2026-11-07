@@ -1,13 +1,14 @@
 {
   "name": "leadpilot",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "LeadPilot 猎客 · B2B 外贸客户开发工作台（客户端基线 + 云端网关/编排器）",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "cloud": "node server/index.mjs",
     "smoke": "node scripts/e2e-smoke.mjs",
+    "verify:restart": "bash scripts/verify-restart.sh",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",

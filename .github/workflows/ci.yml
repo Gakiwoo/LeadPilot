@@ -30,6 +30,19 @@ jobs:
       - name: Install
         run: npm ci
 
+      # 干净检出保护：.gitignore 曾因 `data/` 误排除 src/data/，本地全绿但 CI 缺模块。
+      - name: Tracked sources sanity (clean checkout)
+        run: |
+          for f in \
+            src/data/demo-data.ts src/data/repository.ts \
+            src/domain/scoring.ts src/services/gateway-client.ts \
+            shared/model-protocol.json \
+            server/index.mjs server/store.mjs server/t0.mjs server/data-sources.mjs \
+            scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh; do
+            git ls-files --error-unmatch "$f" > /dev/null || { echo "::error::关键源码未被 git 跟踪: $f"; exit 1; }
+          done
+          echo "关键源码均已纳入版本控制"
+
       - name: Typecheck (TS strict)
         run: npm run typecheck
 
@@ -59,3 +72,7 @@ jobs:
             exit 1
           fi
           npm run smoke
+
+      # AC-03：真实杀进程 → 直读 SQLite → 同库重启 → 恢复值与落盘值逐项比对 → 断点续跑
+      - name: "AC-03 process restart and cursor resume"
+        run: bash scripts/verify-restart.sh

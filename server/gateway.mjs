@@ -11,6 +11,7 @@ import {
   cacheKey, buildJudgeMessages, toClientJudgement, sanitizeContext,
   buildEmailMessages, validateEmailDraft,
 } from './protocol.mjs'
+import { extractFacts } from './t0.mjs'
 
 const EEA_UK = new Set(['德国', '法国', '荷兰', '英国', '西班牙', '意大利', '波兰', '挪威', '瑞典', '丹麦', '比利时', '奥地利', '爱尔兰'])
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -356,12 +357,45 @@ export function createGateway(opts = {}) {
       language: String(input.language ?? 'en').slice(0, 20),
       angle: String(input.angle ?? 'price_lead_time').slice(0, 40),
     }
+    // T0 规则抽取增强：调用方若传入已抓取的官网原文，个性化锚点必须来自可核验引用。
+    // 抽取层不调用模型、不联网；失败时如实回退调用方 anchor，绝不伪造抽取结果。
+    let anchorSource = 'client'
+    let t0 = null
+    if (Array.isArray(input.sources) && input.sources.length) {
+      const extracted = extractFacts({
+        company_id: String(input.companyId ?? 'email-target').slice(0, 80),
+        sources: input.sources,
+        keywords: [facts.product],
+      })
+      if (extracted.ok) {
+        const best = extracted.facts.anchors[0]
+        if (best) {
+          facts.anchor = String(best.quote).slice(0, 200)
+          anchorSource = 't0-rules'
+        }
+        t0 = {
+          ok: true, extractor: 'rules', rulesVersion: extracted.rulesVersion,
+          sourceCount: extracted.sourceCount, piiRemoved: extracted.piiRemoved,
+          coverage: extracted.coverage, anchorCount: extracted.facts.anchors.length, anchorSource,
+          note: best
+            ? '个性化锚点来自 T0 规则抽取的可核验原文引用'
+            : '原文未命中可核验锚点，已回退调用方提供的 anchor（不编造）',
+        }
+      } else {
+        t0 = {
+          ok: false, extractor: 'rules', code: extracted.code, errors: extracted.errors,
+          anchorSource: 'client', note: 'T0 输入校验未通过，如实回退调用方 anchor，不伪造抽取结果',
+        }
+      }
+    }
+    const meta = { anchorSource, anchor: facts.anchor, ...(t0 ? { t0 } : {}) }
+
     if (!facts.anchor || !facts.product) {
-      return { ok: false, degraded: true, errorCodes: ['E6004'], reason: '缺少个性化锚点或主营产品，拒绝生成无事实依据的开发信。' }
+      return { ok: false, degraded: true, errorCodes: ['E6004'], ...meta, reason: '缺少个性化锚点或主营产品，拒绝生成无事实依据的开发信。' }
     }
     const pii = assertNoPii({ facts })
     if (!pii.ok) {
-      return { ok: false, degraded: true, errorCodes: ['E6004'], reason: `写信请求含禁止字段（PRD 11.4.1）：${pii.violations.join('、')}。未向任何 provider 发送数据。` }
+      return { ok: false, degraded: true, errorCodes: ['E6004'], ...meta, reason: `写信请求含禁止字段（PRD 11.4.1）：${pii.violations.join('、')}。未向任何 provider 发送数据。` }
     }
 
     const tier = route({ type: 'write_email' })
@@ -369,14 +403,14 @@ export function createGateway(opts = {}) {
       policy: input.regionPolicy ?? 'domestic_first',
       allowOverseas: input.allowOverseas ?? false,
     })
-    if (region.needsConsent) return { ok: false, needsConsent: true, tier, region, errorCodes: [], reason: region.reason }
+    if (region.needsConsent) return { ok: false, needsConsent: true, tier, region, errorCodes: [], ...meta, reason: region.reason }
 
     const chain = chainFor(tier, region)
     if (!chain.length) {
       const down = noProviderReason()
       appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], latencyMs: nowFn() - started })
       return {
-        ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: down.codes,
+        ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: down.codes, ...meta,
         reason: down.reason + ' 本次不生成模型正文，客户端将回退本地确定性模板并明确标注 DEMO。',
       }
     }
@@ -401,7 +435,7 @@ export function createGateway(opts = {}) {
       return {
         ok: true, subject: checked.value.subject, body: checked.value.body,
         anchorUsed: checked.value.anchorUsed, wordCount: checked.value.wordCount,
-        tier, region, cached: false,
+        tier, region, cached: false, ...meta,
         audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
         note: '正文未经合规尾巴注入：真实身份 / 物理地址 / 退订说明由客户端代码追加，并通过发送前校验后才可入草稿队列。',
       }
@@ -409,7 +443,7 @@ export function createGateway(opts = {}) {
 
     appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', latencyMs: nowFn() - started })
     return {
-      ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: ['E6003', 'E6005'], trace,
+      ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: ['E6003', 'E6005'], trace, ...meta,
       reason: '降级链已耗尽（provider 故障或正文未通过 F6-2 硬约束）。不输出未校验正文，客户端回退本地模板。',
     }
   }
