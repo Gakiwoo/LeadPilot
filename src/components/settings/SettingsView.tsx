@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Activity, CloudCog, Coins, Cpu, Database, Globe2, KeyRound, LockKeyhole, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import type { CompanyProfile, Settings } from '@/types'
-import { PROVIDERS, resolveRegionPolicy, route } from '@/services/adapters'
+import {
+  PROVIDERS, resolveRegionPolicy, route, gatewayBaseUrl, getGatewayDiagnostics, runEvalGate,
+  type EvalRunResult, type GatewayDiagnostics,
+} from '@/services/adapters'
 import { minimizeForModel } from '@/domain/compliance'
-import { gatewayBaseUrl, getGatewayDiagnostics, runEvalGate, type EvalRunResult, type GatewayDiagnostics } from '@/services/gateway-client'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, DemoBanner, Field, SectionTitle, Toggle } from '@/components/ui'
 
@@ -184,6 +186,55 @@ export default function SettingsView() {
                     <span>确定性规则，不调模型、不联网、不补零</span>
                   </p>
                 )}
+              </Card>
+
+              <Card className="p-5">
+                <SectionTitle
+                  title="点数账本 · T0 事实链 · 评测契约"
+                  desc="v0.5.0 工程口径：服务端如实暴露能力边界，未标注、未扣费、未接数据源一律标出来"
+                  extra={<Badge tone={gateway?.points ? 'blue' : 'slate'}>{gateway?.points?.ledgerVersion ?? '账本离线'}</Badge>}
+                />
+                <div className="grid grid-cols-4 gap-3 text-[11px]">
+                  {[
+                    { label: '可用点数', value: gateway?.points ? `${gateway.points.available} / ${gateway.points.granted}` : '—' },
+                    { label: '预扣中 / 已结算', value: gateway?.points ? `${gateway.points.held} / ${gateway.points.spent}` : '—' },
+                    { label: '账本流水', value: gateway?.points ? `${gateway.points.entries} 条 · ${gateway.points.persistence}` : '—' },
+                    { label: '385 家基准集', value: gateway?.baseline ? `${gateway.baseline.importStatus} · ${gateway.baseline.requiredSize} 家` : '—' },
+                  ].map((x) => (
+                    <div key={x.label} className="rounded-lg border border-line bg-canvas p-3">
+                      <p className="text-[10px] text-muted">{x.label}</p>
+                      <p className="mt-1 text-[13px] font-semibold tabular-nums text-ink">{x.value}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 space-y-1.5 text-[10px] leading-5 text-muted">
+                  <p className="flex flex-wrap items-center gap-1.5">
+                    <Coins size={12} className="text-amber-600" />
+                    账本范围：
+                    <Badge tone="emerald">创建预扣</Badge><Badge tone="emerald">完成/中止结算</Badge><Badge tone="emerald">未启动全额释放</Badge>
+                    <span>同一 refId 幂等，进程重启不重复扣（AC-03）。</span>
+                  </p>
+                  <p className="flex flex-wrap items-center gap-1.5">
+                    <ShieldCheck size={12} className="text-rose-600" />
+                    <strong className="text-ink">明确边界</strong>：
+                    <span>{gateway?.points?.note ?? 'gateway 的 points 是 token 折算的审计估值，不进账本、不代表已扣点。'}</span>
+                  </p>
+                  <p className="flex flex-wrap items-center gap-1.5">
+                    <Cpu size={12} className="text-blue-600" />
+                    T0 → judge 事实链：
+                    <Badge tone={gateway?.t0?.judgeFactChain?.enabled ? 'emerald' : 'slate'}>
+                      {gateway?.t0?.judgeFactChain?.enabled ? '已接线' : '未接线'}
+                    </Badge>
+                    <span>{gateway?.t0?.judgeFactChain?.onConflict ?? '—'}</span>
+                    <span>· 仅当调用方提供可核验 sources 时启用；演示数据不伪造来源。</span>
+                  </p>
+                  <p className="flex flex-wrap items-center gap-1.5">
+                    <LockKeyhole size={12} className="text-slate-500" />
+                    基准集契约：
+                    <Badge tone="amber">{gateway?.baseline?.contractVersion ?? '—'}</Badge>
+                    <span>导入校验通过 ≠ 评测通过；releaseEligible 当前恒为 false，无标注时评测返回 NO_DATA。</span>
+                  </p>
+                </div>
               </Card>
 
               <Card className="p-5">

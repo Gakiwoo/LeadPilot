@@ -4,7 +4,7 @@ import type { Company, CompanyStatus } from '@/types'
 import { CUSTOMER_TYPES, STATUS_DEFS } from '@/domain/constants'
 import { QUICK_FILTERS, filterAndSort } from '@/domain/filters'
 import { toCsv, downloadCsv } from '@/domain/compliance'
-import { generateEmails } from '@/services/email-generator'
+import { generateEmails } from '@/services/adapters'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, EmptyState, GradeBadge, ScoreBar, SectionTitle } from '@/components/ui'
 

@@ -36,14 +36,49 @@ export const sqliteProbeError = probe.error
 
 const clone = (v) => (v === undefined || v === null ? v : structuredClone(v))
 
+/**
+ * 点数账本的通用内存实现（memory / json 共用）。
+ * state 必须是调用方持有的可变对象：{ ledgerAccounts, ledgerEntries, ledgerIdem }；
+ * json 实现把 state 直接序列化到磁盘，onWrite 传入 flush 即可获得原子写入。
+ * idem_key 唯一约束在这里以 Map/Object 查找模拟，SQLite 实现由 UNIQUE 索引保证。
+ */
+function makeLedgerTables(state, onWrite) {
+  const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+  return {
+    ledgerTransact(fn) { return fn() }, // 单进程同步执行，无并发写；SQLite 实现用 BEGIN IMMEDIATE
+    ledgerAccount(account) { return clone(state.ledgerAccounts[account] ?? null) },
+    ledgerAccountPut(account, rec) { state.ledgerAccounts[account] = clone(rec); onWrite() },
+    ledgerEntryByIdem(key) { return clone(state.ledgerIdem[key] ?? null) },
+    ledgerAppend(entry) {
+      if (hasOwn(state.ledgerIdem, entry.idem_key)) return false
+      const full = clone(entry)
+      state.ledgerEntries.push(full)
+      state.ledgerIdem[full.idem_key] = full
+      onWrite()
+      return true
+    },
+    ledgerEntries(refId, limit = 200) {
+      return state.ledgerEntries.filter((e) => e.ref_id === refId).slice(-limit).map(clone)
+    },
+    ledgerAllEntries(limit = 500) { return state.ledgerEntries.slice(-limit).map(clone) },
+    ledgerStats() {
+      return { accounts: Object.keys(state.ledgerAccounts).length, entries: state.ledgerEntries.length }
+    },
+  }
+}
+
+const emptyLedgerState = () => ({ ledgerAccounts: {}, ledgerEntries: [], ledgerIdem: {} })
+
 export function createMemoryStore(opts = {}) {
   const now = opts.now ?? (() => Date.now())
   const tasks = new Map()
   const cache = new Map()
+  const ledgerState = emptyLedgerState()
   let audit = []
   return {
     mode: 'memory',
     dbPath: null,
+    ...makeLedgerTables(ledgerState, () => {}),
     taskUpsert(id, payload) { tasks.set(id, clone(payload)) },
     taskGet(id) { return clone(tasks.get(id) ?? null) },
     taskList() { return [...tasks.values()].map(clone) },
@@ -58,7 +93,10 @@ export function createMemoryStore(opts = {}) {
     cacheStats() { return { entries: cache.size } },
     auditAppend(entry) { audit.push(clone(entry)); if (audit.length > 2000) audit.shift() },
     auditList(limit = 500) { return audit.slice(-limit).map(clone) },
-    close() { tasks.clear(); cache.clear(); audit = [] },
+    close() {
+      tasks.clear(); cache.clear(); audit = []
+      Object.assign(ledgerState, emptyLedgerState())
+    },
   }
 }
 
@@ -78,6 +116,18 @@ function createSqliteStore(opts) {
     CREATE TABLE IF NOT EXISTS audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS ledger_accounts (
+      account TEXT PRIMARY KEY, granted INTEGER NOT NULL, held INTEGER NOT NULL,
+      spent INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ledger_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idem_key TEXT NOT NULL UNIQUE, ref_id TEXT NOT NULL, account TEXT NOT NULL,
+      kind TEXT NOT NULL, amount INTEGER NOT NULL,
+      granted_after INTEGER NOT NULL, held_after INTEGER NOT NULL, spent_after INTEGER NOT NULL,
+      at INTEGER NOT NULL, meta TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_entries(ref_id);
   `)
   const q = {
     taskUpsert: db.prepare('INSERT INTO tasks(id,payload,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at'),
@@ -90,11 +140,66 @@ function createSqliteStore(opts) {
     cacheCount: db.prepare('SELECT COUNT(*) AS c FROM cache'),
     auditAdd: db.prepare('INSERT INTO audit(payload,at) VALUES(?,?)'),
     auditList: db.prepare('SELECT payload FROM audit ORDER BY id DESC LIMIT ?'),
+    ledgerAccountGet: db.prepare('SELECT granted, held, spent, updated_at FROM ledger_accounts WHERE account = ?'),
+    ledgerAccountPut: db.prepare('INSERT INTO ledger_accounts(account,granted,held,spent,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(account) DO UPDATE SET granted=excluded.granted, held=excluded.held, spent=excluded.spent, updated_at=excluded.updated_at'),
+    ledgerEntryByIdem: db.prepare('SELECT * FROM ledger_entries WHERE idem_key = ?'),
+    ledgerAppend: db.prepare('INSERT OR IGNORE INTO ledger_entries(idem_key,ref_id,account,kind,amount,granted_after,held_after,spent_after,at,meta) VALUES(?,?,?,?,?,?,?,?,?,?)'),
+    ledgerEntries: db.prepare('SELECT * FROM ledger_entries WHERE ref_id = ? ORDER BY id DESC LIMIT ?'),
+    ledgerAllEntries: db.prepare('SELECT * FROM ledger_entries ORDER BY id DESC LIMIT ?'),
+    ledgerAccountCount: db.prepare('SELECT COUNT(*) AS c FROM ledger_accounts'),
+    ledgerEntryCount: db.prepare('SELECT COUNT(*) AS c FROM ledger_entries'),
   }
   const parse = (row) => { try { return JSON.parse(row.payload) } catch { return null } }
+  const parseEntry = (row) => {
+    if (!row) return null
+    let meta = {}
+    try { meta = JSON.parse(row.meta) } catch { /* meta 损坏不影响流水主体 */ }
+    return {
+      idem_key: row.idem_key, ref_id: row.ref_id, account: row.account,
+      kind: row.kind, amount: Number(row.amount),
+      granted_after: Number(row.granted_after), held_after: Number(row.held_after),
+      spent_after: Number(row.spent_after), at: Number(row.at), meta,
+    }
+  }
+  const ledgerTables = {
+    /** 账本写操作必须原子：BEGIN IMMEDIATE 保证并发下账户余额与流水一致 */
+    ledgerTransact(fn) {
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        const result = fn()
+        db.exec('COMMIT')
+        return result
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+    ledgerAccount(account) {
+      const row = q.ledgerAccountGet.get(account)
+      return row ? { account, granted: Number(row.granted), held: Number(row.held), spent: Number(row.spent), updated_at: Number(row.updated_at) } : null
+    },
+    ledgerAccountPut(account, rec) {
+      q.ledgerAccountPut.run(account, rec.granted, rec.held, rec.spent, rec.updated_at)
+    },
+    ledgerEntryByIdem(key) { return parseEntry(q.ledgerEntryByIdem.get(key)) },
+    ledgerAppend(e) {
+      const r = q.ledgerAppend.run(e.idem_key, e.ref_id, e.account, e.kind, e.amount,
+        e.granted_after, e.held_after, e.spent_after, e.at, JSON.stringify(e.meta ?? {}))
+      return Number(r.changes) === 1
+    },
+    ledgerEntries(refId, limit = 200) { return q.ledgerEntries.all(refId, limit).map(parseEntry).reverse() },
+    ledgerAllEntries(limit = 500) { return q.ledgerAllEntries.all(limit).map(parseEntry).reverse() },
+    ledgerStats() {
+      return {
+        accounts: Number(q.ledgerAccountCount.get()?.c ?? 0),
+        entries: Number(q.ledgerEntryCount.get()?.c ?? 0),
+      }
+    },
+  }
   return {
     mode: 'sqlite',
     dbPath: abs,
+    ...ledgerTables,
     taskUpsert(id, payload) { q.taskUpsert.run(id, JSON.stringify(payload), now()) },
     taskGet(id) { const row = q.taskGet.get(id); return row ? parse(row) : null },
     taskList() { return q.taskList.all().map(parse).filter(Boolean) },
@@ -116,11 +221,17 @@ function createSqliteStore(opts) {
 function createJsonStore(opts) {
   const { filePath, now } = opts
   const abs = resolve(filePath)
-  let state = { tasks: {}, cache: {}, audit: [] }
+  let state = { tasks: {}, cache: {}, audit: [], ...emptyLedgerState() }
   if (existsSync(abs)) {
     try {
       const loaded = JSON.parse(readFileSync(abs, 'utf8'))
-      state = { tasks: loaded.tasks ?? {}, cache: loaded.cache ?? {}, audit: loaded.audit ?? [] }
+      const ledger = emptyLedgerState()
+      state = {
+        tasks: loaded.tasks ?? {}, cache: loaded.cache ?? {}, audit: loaded.audit ?? [],
+        ledgerAccounts: loaded.ledgerAccounts ?? ledger.ledgerAccounts,
+        ledgerEntries: loaded.ledgerEntries ?? ledger.ledgerEntries,
+        ledgerIdem: loaded.ledgerIdem ?? ledger.ledgerIdem,
+      }
     } catch (err) {
       // 损坏时明确告警并重建，不假装读到了历史数据
       // eslint-disable-next-line no-console
@@ -136,6 +247,7 @@ function createJsonStore(opts) {
   return {
     mode: 'json',
     dbPath: abs,
+    ...makeLedgerTables(state, flush),
     taskUpsert(id, payload) { state.tasks[id] = clone(payload); flush() },
     taskGet(id) { return clone(state.tasks[id] ?? null) },
     taskList() { return Object.values(state.tasks).map(clone) },

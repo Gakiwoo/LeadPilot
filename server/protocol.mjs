@@ -206,9 +206,34 @@ export function sanitizeContext(texts) {
   return { texts: clean, removed }
 }
 
+/**
+ * T0 → judge 事实链（ADR-016 / PRD 6.7.1）：把规则层抽取的可核验事实注入 system prompt。
+ * T0 是规则、不是模型；这里只提供 quote 与命中状态，不让模型「参考另一个模型的结论」。
+ */
+function t0FactLines(t0) {
+  if (!t0?.ok) return []
+  const lines = [
+    '',
+    `<t0_facts extractor="rules" rules_version="${t0.rulesVersion}">`,
+    '以下事实由确定性词表从 <context> 抽取，每条 quote 均可在 <context> 中逐字核验。',
+    '硬约束：不得与这些事实矛盾；标为 no_signal 的维度，除非 <context> 有直接原文证据，否则必须输出 no_signal / unknown。',
+  ]
+  for (const name of ['customer_type', 'import_signal', 'size_estimate']) {
+    const f = t0.facts?.[name]
+    if (!f) continue
+    const value = name === 'size_estimate' ? f.tier : f.value
+    const quotes = (f.evidence ?? []).slice(0, 3).map((e) => `"${e.quote}"`).join(' | ')
+    lines.push(`${name}: ${value}${f.no_signal ? ' (no_signal)' : ''} · quotes: ${quotes || 'none'}`)
+  }
+  lines.push(`no_signal_fields: ${(t0.coverage?.noSignalFields ?? []).join(',') || 'none'}`)
+  lines.push('</t0_facts>')
+  return lines
+}
+
 /** PRD 6.7.7 Prompt 层硬隔离：模型只能使用 <context> 内的内容 */
 export function buildJudgeMessages(input) {
   const context = (input.sourceTexts ?? []).map((t, i) => `[${i + 1}] ${t}`).join('\n')
+  const hasT0 = Boolean(input.t0?.ok)
   return [
     {
       role: 'system',
@@ -221,11 +246,14 @@ export function buildJudgeMessages(input) {
         `negative_flags: ${protocol.enums.negative_flags.join('|')}`,
         `禁止输出 ${protocol.forbiddenFields.join(' / ')} 字段。每条 evidence 必须包含 quote / source_url / fetched_at，quote 必须是 <context> 中的原文片段。`,
         `版本留痕固定为：model_id=<由网关注入> model_version=<由网关注入> prompt_version=${protocol.promptVersion} schema_version=${protocol.schemaVersion}`,
+        ...t0FactLines(input.t0),
       ].join('\n'),
     },
     {
       role: 'user',
-      content: `<context>\n${context}\n</context>\n\n<facts>\n${JSON.stringify(input.facts ?? {})}\n</facts>\n\ncompany_id: ${input.companyId}\n请判断这家公司的客户类型、进口信号与规模档。`,
+      content: `<context>\n${context}\n</context>\n\n<facts>\n${JSON.stringify(input.facts ?? {})}\n</facts>\n\ncompany_id: ${input.companyId}\n`
+        + (hasT0 ? '优先引用 <t0_facts> 中已核验的 quote 作为 evidence，并与规则事实保持一致。\n' : '')
+        + '请判断这家公司的客户类型、进口信号与规模档。',
     },
   ]
 }

@@ -86,6 +86,15 @@
     "productStopWords": ["company", "products", "about", "home", "contact", "service", "quality", "welcome", "有限公司", "公司"],
     "$noFabricationNote": "抽取层绝不产出公司名、域名、邮箱、联系人、营收数字或任何原文未逐字出现的实体；不做同义扩展、不做翻译补全。quote 必须是原文连续子串。"
   },
+  "judgeFactChain": {
+    "$comment": "PRD 6.7.1 / 6.7.4：T0 规则事实必须成为 T1 判断的输入，而不是并行的两套结论。T0 只提供可逐字核验的 quote，模型必须引用 <context>；冲突时代码保守取规则值并把置信度归零、标记待复议，绝不取平均、绝不静默覆盖。",
+    "enabled": true,
+    "onConflict": "rules-win-zero-confidence",
+    "dimensions": ["customer_type", "import_signal", "size_estimate"],
+    "noSignalPolicy": "T0 标 no_signal 的维度不得被模型改写成确定结论；模型若给出确定值，代码回退 no_signal/unknown 并标待复议",
+    "requireVerifiableSources": true,
+    "$scopeNote": "调用方未提供 sources 时，判断链路如实返回 t0.used=false，不拿演示文本伪造来源。"
+  },
   "downgrade": {
     "timeoutMs": 30000,
     "timeoutRetries": 1,
@@ -107,7 +116,17 @@
     "searchRateUsdPerCall": 0.001,
     "$pointValueNote": "PRD F0-6 要求折算率由运营后台配置，避免模型涨价时改代码。此值为基线默认值，生产必须外置到配置中心。",
     "depthPointsPerCompany": { "1": 1, "2": 2, "3": 4, "4": 8 },
-    "byokChargesPoints": false
+    "byokChargesPoints": false,
+    "ledger": {
+      "$comment": "v0.5.0 点数账本事务化。范围严格限定为云端任务生命周期：创建预扣 → 完成/中止结算 → 未启动释放。同一 refId + 同一操作幂等，进程重启不重复扣（AC-03）。",
+      "version": "ledger-v1",
+      "defaultAccount": "default",
+      "openingBalancePoints": 2000,
+      "allowNegative": false,
+      "scope": ["task_reserve", "task_settle", "task_release"],
+      "$auditOnlyNote": "gateway judge / write_email 的 points 目前仍是按 token 折算的审计估值，不进入账本、不代表实际扣费。health 必须如实暴露 scope，绝不把审计估值说成已扣点。",
+      "auditOnlyConsumers": ["judge", "write_email"]
+    }
   },
   "providers": [
     { "key": "deepseek-flash-valley", "name": "DeepSeek V4.1-Flash（谷时）", "vendor": "deepseek", "tier": "T0", "region": "domestic", "model": "deepseek-flash", "inUsdPerM": 0.15, "outUsdPerM": 0.60, "envKey": "DEEPSEEK_API_KEY", "baseUrl": "https://api.deepseek.com/v1" },
@@ -153,7 +172,11 @@
     "E6004": "证据校验不通过", "E6005": "全部 provider 不可用（降级模式）",
     "E6006": "BYOK Key 无效", "E6007": "内容触发 provider 安全策略拒答",
     "E6008": "模型快照未锁定（禁止浮动指针，拒绝发起真实调用）",
-    "E6009": "访问令牌缺失或无效", "E6010": "请求超过限流阈值"
+    "E6009": "访问令牌缺失或无效", "E6010": "请求超过限流阈值",
+    "E4001": "点数不足（预扣超出可用余额）",
+    "E4002": "账本幂等键冲突（同一 key 携带不同金额）",
+    "E4003": "账本状态非法（无活跃预扣却结算/重复释放）",
+    "E4004": "385 家基准集标注导入校验失败"
   },
   "piiExclusion": {
     "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",

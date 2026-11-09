@@ -295,3 +295,87 @@ export function extractFacts(raw) {
     note: 'T0 规则抽取：不调用模型、不联网、不推断；未命中维度明确标 no_signal，绝不补零。',
   }
 }
+
+const RECONCILE_DIMS = [
+  { name: 'customer_type', key: 'value', fallback: 'unknown' },
+  { name: 'import_signal', key: 'value', fallback: 'no_signal' },
+  { name: 'size_estimate', key: 'tier', fallback: 'unknown' },
+]
+
+/**
+ * PRD 6.7.4 / ADR-016：T0 规则事实与 T1 模型判断冲突时的代码级裁决。
+ *
+ *  - 规则命中、模型不同 → 保守取规则值，置信度归零，证据换成 T0 可逐字核验的引用，
+ *    并显式记 conflicts；绝不取平均、绝不静默覆盖、绝不把规则结论说成模型结论。
+ *  - 规则 no_signal、模型却给出确定结论 → 回退 no_signal / unknown，置信度归零。
+ *  - 一致时保持模型输出，只记录 t0 一致标记。
+ *
+ * 输入 judgement 来自已通过 validateSchema + verifyEvidence 的结构；本函数原地修改，
+ * 并把裁决明细返回给调用方放进响应体与审计，保证「谁改了什么」完全可追溯。
+ */
+export function reconcileWithT0(judgement, t0Result) {
+  const conflicts = []
+  const overrides = []
+  const consistent = []
+  const t0Evidence = {
+    customer_type: t0Result.facts?.customer_type?.evidence ?? [],
+    import_signal: t0Result.facts?.import_signal?.evidence ?? [],
+    size_estimate: t0Result.facts?.size_estimate?.evidence ?? [],
+  }
+  const noSignal = new Set(t0Result.coverage?.noSignalFields ?? [])
+
+  for (const dim of RECONCILE_DIMS) {
+    const holder = judgement[dim.name]
+    if (!holder) continue
+    const modelValue = holder[dim.key]
+    const f = t0Result.facts?.[dim.name]
+    const rawRuleValue = dim.key === 'tier' ? f?.tier : f?.value
+    const ruleValue = noSignal.has(dim.name) || !rawRuleValue || ['unknown', 'no_signal'].includes(rawRuleValue)
+      ? null
+      : rawRuleValue
+
+    if (!ruleValue) {
+      // 规则层无信号：模型不得凭训练记忆把它变成确定结论
+      if (modelValue && ![dim.fallback, 'no_signal', 'unknown'].includes(modelValue)) {
+        conflicts.push({
+          field: dim.name, kind: 'no_signal_overridden', t0Value: 'no_signal',
+          modelValue, resolution: dim.fallback,
+        })
+        holder[dim.key] = dim.fallback
+        holder.confidence = 0
+        overrides.push(dim.name)
+      }
+      continue
+    }
+    if (modelValue !== ruleValue) {
+      conflicts.push({
+        field: dim.name, kind: 'value_conflict', t0Value: ruleValue,
+        modelValue, resolution: 'rules-win-zero-confidence',
+      })
+      holder[dim.key] = ruleValue
+      holder.confidence = 0
+      if (t0Evidence[dim.name].length) holder.evidence = t0Evidence[dim.name]
+      overrides.push(dim.name)
+    } else {
+      consistent.push(dim.name)
+    }
+  }
+
+  if (conflicts.length) {
+    const note = `T0 规则事实与模型判断冲突，代码已保守取规则值并归零置信度：${conflicts.map((c) => c.field).join('、')}。待人工复议，不得据此直接发信。`
+    judgement.notes_for_human = [judgement.notes_for_human, note].filter(Boolean).join(' ')
+  }
+  return {
+    applied: true,
+    extractor: 'rules',
+    rulesVersion: t0Result.rulesVersion,
+    policy: protocol.judgeFactChain.onConflict,
+    noSignalFields: [...noSignal],
+    consistent,
+    conflicts,
+    overrides,
+    note: conflicts.length
+      ? '规则层与模型冲突：代码裁决已生效，模型结论未被采纳为最终结论。'
+      : '规则层与模型结论一致或规则层无信号，未发生覆盖。',
+  }
+}

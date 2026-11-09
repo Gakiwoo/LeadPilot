@@ -11,7 +11,7 @@ import {
   cacheKey, buildJudgeMessages, toClientJudgement, sanitizeContext,
   buildEmailMessages, validateEmailDraft,
 } from './protocol.mjs'
-import { extractFacts } from './t0.mjs'
+import { extractFacts, reconcileWithT0 } from './t0.mjs'
 
 const EEA_UK = new Set(['德国', '法国', '荷兰', '英国', '西班牙', '意大利', '波兰', '挪威', '瑞典', '丹麦', '比利时', '奥地利', '爱尔兰'])
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -249,12 +249,43 @@ export function createGateway(opts = {}) {
   async function judge(input = {}) {
     const started = nowFn()
     const companyId = String(input.companyId ?? 'unknown')
-    const sourceTexts = Array.isArray(input.sourceTexts) ? input.sourceTexts : []
-    const sanitized = sanitizeContext(sourceTexts)
+    const hasSources = Array.isArray(input.sources) && input.sources.length > 0
+
+    // T0 → judge 事实链：调用方给了可核验 sources 才启用；绝不拿演示文本伪造来源
+    let t0Result = null
+    let t0Meta = {
+      used: false, ok: false, extractor: 'rules',
+      reason: '调用方未提供可核验 sources：本次判断不经过 T0 事实链，不拿演示文本伪造来源。',
+    }
+    let sanitized = sanitizeContext(Array.isArray(input.sourceTexts) ? input.sourceTexts : [])
+    if (hasSources) {
+      const extracted = extractFacts({
+        company_id: companyId, sources: input.sources,
+        keywords: input.keywords ?? [], markets: input.markets ?? [],
+      })
+      if (!extracted.ok) {
+        return {
+          ok: false, degraded: true, errorCodes: ['E6004'],
+          t0: { used: true, ok: false, extractor: 'rules', code: extracted.code, errors: extracted.errors },
+          reason: `T0 事实链输入不合法：${extracted.errors.join('；')}。未向任何 provider 发送数据。`,
+        }
+      }
+      t0Result = extracted
+      t0Meta = {
+        used: true, ok: true, extractor: 'rules', rulesVersion: extracted.rulesVersion,
+        sourceCount: extracted.sourceCount, piiRemoved: extracted.piiRemoved,
+        noSignalFields: extracted.coverage.noSignalFields,
+        hitFields: extracted.coverage.hitFields,
+        coverageRate: extracted.coverage.rate,
+      }
+      // context 必须与 T0 抽取时清洗后的原文一致，否则 quote 无法逐字核验
+      sanitized = { texts: sanitizeContext(input.sources.map((s) => String(s.text ?? ''))).texts, removed: extracted.piiRemoved }
+    }
+
     const pii = assertNoPii({ facts: input.facts ?? {}, profile: input.profile ?? {} })
     if (!pii.ok) {
       return {
-        ok: false, degraded: true, errorCodes: ['E6004'],
+        ok: false, degraded: true, errorCodes: ['E6004'], t0: t0Meta,
         reason: `请求体含禁止字段（PRD 11.4.1 数据最小化）：${pii.violations.join('、')}。未向任何 provider 发送数据。`,
       }
     }
@@ -265,27 +296,33 @@ export function createGateway(opts = {}) {
       allowOverseas: input.allowOverseas ?? false,
     })
     if (region.needsConsent) {
-      return { ok: false, needsConsent: true, tier, region, errorCodes: [], reason: region.reason }
+      return { ok: false, needsConsent: true, tier, region, errorCodes: [], t0: t0Meta, reason: region.reason }
     }
 
+    // 命中 T0 事实链的判断与未命中的不能共用缓存，避免规则层版本升级后读到旧结论
     const key = cacheKey(input.domain ?? companyId, sanitized.texts)
+      + (t0Result ? `:t0:${t0Result.rulesVersion}` : '')
     const hit = cache.get(key)
     if (hit && nowFn() - hit.at < protocol.rules.cacheTtlDays * 86400000) {
-      appendAudit({ taskType: 'judge', tier, providerKey: hit.providerKey, cached: true, input: 0, output: 0, points: 0, latencyMs: nowFn() - started })
-      return { ok: true, judgement: hit.judgement, cached: true, tier, region, provenanceRate: hit.provenanceRate, audit: { cached: true } }
+      appendAudit({ taskType: 'judge', tier, providerKey: hit.providerKey, cached: true, input: 0, output: 0, points: 0, t0Used: t0Meta.used, latencyMs: nowFn() - started })
+      return {
+        ok: true, judgement: hit.judgement, cached: true, tier, region,
+        provenanceRate: hit.provenanceRate, t0: { ...t0Meta, reconciliation: hit.reconciliation ?? null },
+        audit: { cached: true },
+      }
     }
 
     const chain = chainFor(tier, region)
     if (!chain.length) {
       const down = noProviderReason()
-      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], latencyMs: nowFn() - started })
+      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], t0Used: t0Meta.used, latencyMs: nowFn() - started })
       return {
-        ok: false, degraded: true, judgement: null, tier, region,
+        ok: false, degraded: true, judgement: null, tier, region, t0: t0Meta,
         errorCodes: down.codes, reason: down.reason,
       }
     }
 
-    const baseMessages = buildJudgeMessages({ companyId, sourceTexts: sanitized.texts, facts: input.facts })
+    const baseMessages = buildJudgeMessages({ companyId, sourceTexts: sanitized.texts, facts: input.facts, t0: t0Result })
     const trace = []
     for (const p of chain) {
       let messages = baseMessages
@@ -302,11 +339,14 @@ export function createGateway(opts = {}) {
       }
 
       const verified = verifyEvidence(checked.value, sanitized.texts)
+      // 证据校验之后再做规则层裁决：代码保守覆盖模型结论，全程留痕，不静默改写
+      const reconciliation = t0Result ? reconcileWithT0(checked.value, t0Result) : null
       const points = pointCost(result.usage, tier, 0, p)
       appendAudit({
         taskType: 'judge', tier, providerKey: p.key, model: p.modelVersion, cached: false,
         input: result.usage.input, output: result.usage.output, points,
-        piiRemoved: sanitized.removed,
+        piiRemoved: sanitized.removed, t0Used: t0Meta.used,
+        t0Conflicts: reconciliation?.conflicts?.length ?? 0,
         provenanceRate: Number(verified.provenanceRate.toFixed(3)),
         passesGate: verified.passesGate, latencyMs: nowFn() - started,
       })
@@ -326,16 +366,21 @@ export function createGateway(opts = {}) {
         evidenceFields: verified.fields,
         errorCodes: verified.passesGate ? [] : ['E6004'],
         tier, region, cached: false,
+        t0: { ...t0Meta, reconciliation },
         audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
+        billing: { charged: false, scope: 'audit-only', note: 'gateway 的 points 为 token 折算审计估值，v0.5.0 账本只覆盖云端任务预扣/结算（见 /health.points.scope）' },
       }
       payload.clientJudgement = toClientJudgement(payload.judgement)
-      cache.set(key, { at: nowFn(), judgement: payload.judgement, providerKey: p.key, provenanceRate: verified.provenanceRate })
+      cache.set(key, {
+        at: nowFn(), judgement: payload.judgement, providerKey: p.key,
+        provenanceRate: verified.provenanceRate, reconciliation,
+      })
       return payload
     }
 
-    appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', latencyMs: nowFn() - started })
+    appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', t0Used: t0Meta.used, latencyMs: nowFn() - started })
     return {
-      ok: false, degraded: true, judgement: null, tier, region, errorCodes: ['E6003', 'E6005'], trace,
+      ok: false, degraded: true, judgement: null, tier, region, errorCodes: ['E6003', 'E6005'], trace, t0: t0Meta,
       reason: '降级链已耗尽（provider 故障或 schema/证据校验全部失败）。本次为规则估算，未经模型校验。',
     }
   }

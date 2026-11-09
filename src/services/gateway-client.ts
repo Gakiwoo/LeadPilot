@@ -31,8 +31,19 @@ export interface GatewayHealth {
   cacheEntries: number
   auditEntries: number
   security?: { mode: string; loopback: boolean; cors: string[]; rateLimitPerMinute: number }
-  t0?: { extractor: 'rules'; rulesVersion: string; sourceMode: 'provided-text' }
+  t0?: {
+    extractor: 'rules'; rulesVersion: string; sourceMode: 'provided-text'
+    judgeFactChain?: { enabled: boolean; onConflict: string }
+  }
   dataSources?: { mode: 'demo' | 'real'; total: number; configured: number; readyCount: number }
+  /** v0.5.0 服务端账本：只覆盖云端任务预扣/结算/释放，gateway points 为审计估值 */
+  points?: {
+    account: string; granted: number; held: number; spent: number; available: number
+    ledgerVersion: string; persistence: string; accounts: number; entries: number
+    scope: string[]; auditOnlyConsumers: string[]; note: string
+  }
+  billing?: { mode: string; scope: string[]; auditOnlyConsumers: string[] }
+  baseline?: { contractVersion: string; importStatus: string; requiredSize: number; releaseEligible: boolean }
   reason?: string
 }
 
@@ -96,9 +107,37 @@ export interface JudgeInput {
   depth?: number
   regionPolicy?: 'domestic_first' | 'quality_first'
   allowOverseas?: boolean
+  /**
+   * v0.5.0 T0 → judge 事实链：只有调用方已真实抓取到原文时才传。
+   * 演示数据没有可核验来源，前端不得拿 demo 文本伪造 sources。
+   */
+  sources?: T0Source[]
+  keywords?: string[]
+  markets?: string[]
 }
 
 export interface JudgeResponse {
+  t0?: {
+    used: boolean
+    ok: boolean
+    extractor: 'rules'
+    rulesVersion?: string
+    sourceCount?: number
+    piiRemoved?: number
+    noSignalFields?: string[]
+    hitFields?: string[]
+    coverageRate?: number
+    reconciliation?: {
+      applied: boolean; extractor: 'rules'; rulesVersion: string; policy: string
+      noSignalFields: string[]; consistent: string[]; overrides: string[]
+      conflicts: { field: string; kind: string; t0Value?: string; modelValue?: string; resolution: string }[]
+      note: string
+    } | null
+    code?: string
+    errors?: string[]
+    reason?: string
+  }
+  billing?: { charged: boolean; scope: string; note: string }
   ok: boolean
   degraded?: boolean
   needsConsent?: boolean
@@ -137,6 +176,8 @@ export async function probeGateway(): Promise<GatewayHealth> {
       cacheEntries: number; auditEntries: number; reason?: string
       security?: GatewayHealth['security']; t0?: GatewayHealth['t0']
       dataSources?: GatewayHealth['dataSources']
+      points?: GatewayHealth['points']; billing?: GatewayHealth['billing']
+      baseline?: GatewayHealth['baseline']
     }>('/v1/gateway/health', undefined, 1600)
     if (h.ok === false && (h as { code?: string }).code === 'E6009') {
       return {
@@ -154,6 +195,7 @@ export async function probeGateway(): Promise<GatewayHealth> {
       totalProviders: h.totalProviders,
       providers: h.providers ?? [], cacheEntries: h.cacheEntries, auditEntries: h.auditEntries,
       security: h.security, t0: h.t0, dataSources: h.dataSources, reason: h.reason,
+      points: h.points, billing: h.billing, baseline: h.baseline,
     }
   } catch {
     return {

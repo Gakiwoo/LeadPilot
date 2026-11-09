@@ -5,10 +5,14 @@
  * NO_DATA，绝不编造「通过」。385 家基准集需要 2 名外贸背景标注员 + 第 3 人裁决。
  */
 import { protocol } from './protocol.mjs'
+import {
+  contract as baselineContract, BASELINE_CONTRACT_VERSION, checkLabeledBaseline,
+} from './baseline.mjs'
 
 const G = protocol.evalGates
 
 export function baselineManifest() {
+  const imported = checkLabeledBaseline()
   return {
     baselineSize: G.baselineSize,
     composition: G.baselineComposition,
@@ -17,7 +21,19 @@ export function baselineManifest() {
     metrics: G.metrics,
     releaseRule: '任一 P0 指标不达标即阻断发布；换模型 / 换版本 / 改 prompt / 改 schema / 改类目树 / 每季度例行必须重跑',
     status: 'NOT_LABELED',
-    note: '本服务不提供标注数据。M0 需先完成 385 家基准集标注，CI 才能执行全量评测。',
+    contractVersion: BASELINE_CONTRACT_VERSION,
+    importStatus: imported.status,
+    contract: {
+      acceptedFormats: baselineContract.acceptedFormats,
+      requiredFields: Object.entries(baselineContract.fields).filter(([, f]) => f.required).map(([k]) => k),
+      compositionRules: baselineContract.compositionRules.map((r) => r.id),
+      annotatorPolicy: baselineContract.annotatorPolicy,
+      forbiddenFields: baselineContract.forbiddenFields,
+    },
+    validateEndpoint: 'POST /v1/eval/baseline/validate',
+    contractEndpoint: 'GET /v1/eval/baseline/contract',
+    releaseEligible: false,
+    note: '本服务不提供标注数据。M0 需先完成 385 家基准集标注并通过导入校验，CI 才能执行全量评测。导入校验通过 ≠ 评测通过。',
   }
 }
 

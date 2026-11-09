@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.4.0 · 2026-11-08（ADR-016–018 为本次新增）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.5.0 · 2026-11-08（ADR-019–022 为本次新增）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -206,6 +206,53 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **理由**：跨 3 个 major 会同时改动 Vite 插件 API、Vitest 配置格式与 TS 构建链，回归面远大于「本机开发服务器被局域网访问」这一实际风险。安全修复应先把暴露面关掉，再择期做有完整回归保障的版本升级，而不是为了把 audit 数字清零引入不可控变更。
 
 **升级条件（单独分支，勿与功能改动混做）**：确认 `@vitejs/plugin-react` / Tailwind / PostCSS 兼容 Vite 8 → 升级 → 回归 `typecheck / test / build / smoke / verify:restart` → 人工核对前端 dev 启动与 HMR → 复核 `npm audit`。每季度或 Vite/Vitest 发布安全补丁时重跑审计。
+
+## ADR-019 · 前端服务层单一入口，业务代码不得直连实现
+
+**现状**：v0.4.0 之前，`useAppStore.ts` / `SettingsView.tsx` / `EmailComposer.tsx` 直接 import `@/services/gateway-client`，`CompanyList.tsx` 直连 `email-generator`，`useAppStore.ts` 直连 `task-runner`。`adapters.ts` 虽定义了 `LLMAdapter` / `DataSourceAdapter` / `GmailAdapter`，但并未成为真正的边界，替换实现要改多个组件。
+
+**决策**：`src/services/adapters.ts` 作为唯一入口，`export *` re-export `gateway-client` / `task-runner` / `email-generator`；组件、store、`App.tsx` 一律只从 `@/services/adapters` 取能力。`scripts/check-release-gates.mjs` 静态扫描 `src/components` / `src/store` / `src/App.tsx`，发现直连具体实现的 import 即在 CI 报错。
+
+**理由**：PRD F0-3 要求「业务代码只依赖接口」。纯靠文档约定会被下一次快速改动破坏，必须做成可执行门禁。re-export 而不是重命名包装，避免引入一层无意义的转发函数与类型漂移。
+
+**后果**：新增服务实现时，必须在 `adapters.ts` 加一行 re-export；CI 同时断言这三个 re-export 存在。`src/services/` 内部仍可互相 import（无循环依赖），边界只约束业务侧。测试文件不在扫描范围内，允许直接测具体实现。
+
+## ADR-020 · 385 家标注契约先落地，标注数据绝不合成
+
+**现状**：`eval.mjs` 的八项指标与 P0 门禁已真实实现，但 `baselineManifest().status` 恒为 `NOT_LABELED`，`evaluateBaseline([])` 返回 `NO_DATA`。研发很容易为了「让 CI 变绿」生成一批合成标注。
+
+**决策**：新增 `shared/baseline-contract.json`（字段、枚举、构成比例、双标独立性、禁用评分字段与 PII）与 `server/baseline.mjs`（json / jsonl / csv 解析 + 导入校验）。`POST /v1/eval/baseline/validate` 只校验不落库、不返回样本；`GET /v1/eval/baseline/contract` 只返回口径。仓库只保留 `scripts/fixtures/invalid-baseline-sample.json`，每条 id 带 `INVALID-FIXTURE` 前缀，专门用来证明校验器会拒绝。`npm run validate:baseline -- --self-test` 与 `npm run gate` 都会断言这个反例被拒。
+
+**硬约束**：导入校验通过 ≠ 评测通过。响应体 `releaseEligible` 恒为 `false`；`manifest.releaseEligible` 同样恒假，直到模型预测与真实人工标注配对跑过 `/v1/eval/run` 且三项 P0 全部达标才允许改。`LEADPILOT_BASELINE_FILE` 只在显式配置时读取，不扫描目录「找」标注集。
+
+**理由**：标注集是外部人力产物，不是代码可生产的。把契约与校验器先做出来，能让 M0 拿到标注数据时立刻可导入，同时把「用假数据凑数」这条路在 CI 里堵死。
+
+## ADR-021 · 点数账本事务化，范围严格限定为云端任务生命周期
+
+**现状**：`pointsUsed` 只在 `orchestrator.finish()` 里赋值，创建任务时 `pointsUsed: 0`；前端另有本地 `pointsBalance: 2000` 自行扣减/退还。服务端没有账本，AC-03 只保证任务游标不重复推进，不保证额度不重复冻结。
+
+**决策**：新增 `server/ledger.mjs` 与 `store.mjs` 的 `ledger_accounts` / `ledger_entries` 表。`available = granted - held - spent` 恒等式不允许为负。四类操作全部幂等：`reserve`（创建任务前预扣）、`settle`（完成/中止按达成比例实扣并退还差额）、`release`（未启动全额退还）、`charge`（保留给未来的单次计费）。SQLite 用 `BEGIN IMMEDIATE` 包住每次写，json/memory 用同步单线程写入；`idem_key` 由 UNIQUE 索引 / 内存映射保证唯一，同 key 不同金额返回 `E4002`。预扣不足返回 `402 E4001` 且**不创建任务**，绝不「先跑起来再补扣」。
+
+**范围边界**：账本只覆盖 `task_reserve / task_settle / task_release`。`gateway` 的 `judge` / `write_email` 审计里的 `points` 仍按 `pointCost()` 折算，是**估值**，不进账本：成功响应带 `billing: { charged:false, scope:'audit-only' }`，`/health.billing.auditOnlyConsumers` 与 `/v1/points` 同步说明，`npm run gate` 会断言 `scope` 没被悄悄扩大。把审计估值扩成真实扣费需单独评审（涉及预扣额度上界、provider 失败退款、缓存命中计费口径）。
+
+**理由**：账本一旦被半接入，最难查的不是「少扣了」，而是「界面显示扣了、账本没扣」这类口径漂移。宁可把范围写窄并显式标注，也不做看起来全覆盖的假账。
+
+**后果**：`scripts/verify-restart.mjs` 新增三条断言：预扣已落盘且只有一条 `reserve` 流水、跨进程 `held/available` 不变、续跑后冻结额不变。前端本地 `pointsBalance` 仍是**演示计数器**，只服务本地运行器，与服务端账本不是同一账本，文档中不得混称。
+
+## ADR-022 · T0 → judge 事实链，规则与模型冲突由代码裁决
+
+**现状**：v0.4.0 的 T0 抽取只服务写信锚点；`judge()` 的 `<facts>` 仍是客户端手填的规则特征，`<context>` 依赖 `sourceTexts`（无 URL / 无抓取时间）。T0 与 judge 是两条平行链路，规则事实没有成为模型判断的输入。
+
+**决策**：`POST /v1/judge` 新增可选 `sources`（`{url,text,fetched_at}`）。传入时：
+1. `extractFacts()` 先跑规则抽取；非法来源直接 `E6004`，不向任何 provider 发请求；
+2. `<context>` 由 `sources` 清洗后的原文构成，保证 T0 的 `quote` 逐字可核验；
+3. `buildJudgeMessages()` 注入 `<t0_facts extractor="rules">`，明确要求模型不得与规则事实矛盾、不得把 `no_signal` 维度改写成确定结论；缓存键加 `:t0:<rulesVersion>` 后缀；
+4. 模型返回并通过 `validateSchema` + `verifyEvidence` 后，`reconcileWithT0()` 做代码级裁决：冲突取规则值、置信度归零、证据换成 T0 引用，`notes_for_human` 标待复议；`no_signal` 维度被模型改成确定值时回退 `no_signal` / `unknown`；
+5. 所有返回路径带 `t0.used` / `t0.ok` / `t0.reconciliation`，降级时不伪造 `reconciliation`。
+
+**边界**：调用方未提供 `sources` 时如实返回 `t0.used=false`。**前端演示数据的 `sourceTexts` 没有真实 URL 与抓取时间，绝不拿来伪造 `sources`**；「云端判断」按钮保持无事实链，设置页明确显示「已接线，但需调用方提供可核验来源」。真实数据源接入后，由采集层产出 `sources` 再打开这条链。
+
+**理由**：PRD 6.7.1 的 T0 是「检索供事实」，不是与 T1 并行的第二套结论。规则层与模型层必须串成一条可追溯链，且冲突处理必须由代码决定（与 6.7.4 的 α 冲突纪律一致），不能让模型自己解释掉矛盾。
 
 ---
 

@@ -1,8 +1,15 @@
 /**
- * PRD F0 / 9.3：统一适配器与三级路由
+ * PRD F0 / 9.3：统一适配器与三级路由 · 前端服务层唯一入口（v0.5.0）
  *
- * 本基线全部为 MOCK 实现：不发起任何真实网络请求、不调用任何 provider、
- * 不接触 Gmail 凭据。上层业务只依赖接口，接入真实实现时替换此处即可。
+ * 本文件同时是业务代码的唯一 import 边界：组件、store、App 一律从这里取能力，
+ * 不得直接 import gateway-client / task-runner / email-generator 的具体实现，
+ * 由 scripts/check-release-gates.mjs 在 CI 中强制校验（ADR-019）。
+ *
+ * 真实 / MOCK 边界：
+ *  - gateway-client 的 probeGateway / judgeCompany / startCloudTask / T0 抽取 / 写信
+ *    是真实 HTTP 调用；服务不可达或未配 Key 时返回显式降级，不伪造结果。
+ *  - 下方 mockLlmAdapter / mockDataSourceAdapter / mockGmailAdapter 仍是 MOCK，
+ *    不发起任何真实网络请求、不接触任何凭据。
  */
 import type { Depth } from '@/types'
 import protocol from '../../shared/model-protocol.json'
@@ -141,3 +148,11 @@ export function resolveRegionPolicy(country: string, tier: ModelTier, policy: 'd
   if (policy === 'domestic_first' && tier !== 'T2') return { group: 'domestic', needsConsent: false, reason: '默认境内组' }
   return { group: 'overseas', needsConsent: false, reason: '按质量最优路由（非 EU 客户）' }
 }
+
+/**
+ * 服务层统一 re-export：真实云端网关客户端的全部类型与函数。
+ * 业务侧只依赖 '@/services/adapters'，替换实现时无需改动任何组件。
+ */
+export * from './gateway-client'
+export * from './task-runner'
+export * from './email-generator'

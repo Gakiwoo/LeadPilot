@@ -35,16 +35,26 @@ jobs:
         run: |
           for f in \
             src/data/demo-data.ts src/data/repository.ts \
-            src/domain/scoring.ts src/services/gateway-client.ts \
-            shared/model-protocol.json \
+            src/domain/scoring.ts src/services/adapters.ts src/services/gateway-client.ts \
+            shared/model-protocol.json shared/baseline-contract.json \
             server/index.mjs server/store.mjs server/t0.mjs server/data-sources.mjs \
-            scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh; do
+            server/ledger.mjs server/baseline.mjs server/eval.mjs server/protocol.mjs \
+            scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh \
+            scripts/check-release-gates.mjs scripts/validate-baseline.mjs \
+            scripts/fixtures/invalid-baseline-sample.json; do
             git ls-files --error-unmatch "$f" > /dev/null || { echo "::error::关键源码未被 git 跟踪: $f"; exit 1; }
           done
           echo "关键源码均已纳入版本控制"
 
       - name: Typecheck (TS strict)
         run: npm run typecheck
+
+      # v0.5.0：把「未标注 / 未接数据源 / 审计估值不等于扣点」变成可执行断言
+      - name: Release gate self-check
+        run: npm run gate
+
+      - name: Baseline import validator self-test
+        run: npm run validate:baseline -- --self-test
 
       - name: Unit tests
         run: npm test

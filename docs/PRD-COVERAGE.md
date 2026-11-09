@@ -1,8 +1,10 @@
 # PRD v1.1 兑现度对照 · F0–F10 / AC-01–16
 
-> 基线 v0.4.0 · 2026-11-08 · 图例：✅ 真实实现且可验证 · 🟡 界面/规则/网关真实、外部依赖未接 · ⚠️ 部分实现 · ❌ 未实现
+> 基线 v0.5.0 · 2026-11-08 · 图例：✅ 真实实现且可验证 · 🟡 界面/规则/网关真实、外部依赖未接 · ⚠️ 部分实现 · ❌ 未实现
 >
-> v0.4.0 变更：**T0 规则事实抽取**（`server/t0.mjs` + `/v1/t0/extract`，写信锚点可核验）、**6 类数据源适配器注册表**（`server/data-sources.mjs`，逐源 health 与显式 `demo` / `blocked`）、**CI 加固**（干净检出检查 + 真实杀进程重启验证）、依赖暴露面隔离（ADR-018）。六类数据源的**真实实现**、Gmail OAuth、Tauri 外壳仍未接入。
+> v0.5.0 变更：**点数账本事务化**（`server/ledger.mjs` + `store.mjs` 账户/流水表，预扣 / 结算 / 释放 / 幂等 / 跨进程不重复扣，ADR-021）、**T0 → judge 事实链**（规则事实进 Prompt、冲突由代码保守裁决，ADR-022）、**385 家标注契约与导入校验器**（`shared/baseline-contract.json` + `server/baseline.mjs`，只校验不合成，ADR-020）、**前端服务层单一入口 + 发布门禁脚本**（`adapters.ts` re-export + `npm run gate`，ADR-019）。六类数据源的**真实实现**、385 家人工标注、Gmail OAuth、Tauri 外壳仍未接入；`releaseEligible` 恒 `false`。
+>
+> v0.4.0 变更：**T0 规则事实抽取**（`server/t0.mjs` + `/v1/t0/extract`，写信锚点可核验）、**6 类数据源适配器注册表**（`server/data-sources.mjs`，逐源 health 与显式 `demo` / `blocked`）、**CI 加固**（干净检出检查 + 真实杀进程重启验证）、依赖暴露面隔离（ADR-018）。
 >
 > v0.3.0 变更：**AC-03 闭环**（`server/store.mjs` 让任务游标 / 缓存 / 审计跨进程恢复）、服务端鉴权 + CORS + 限流、模型快照锁定（`E6008`）、GitHub 仓库与 CI 全链路。
 >
@@ -30,9 +32,9 @@
 
 | 编号 | 验收口径 | 状态 | 基线可验证到什么程度 |
 |---|---|---|---|
-| AC-01 | 任务配置 + 额度预扣一致 | 🟡 | 预扣点数 = 数量 × 深度系数（L3×200 = 800 点），界面预估与实际一致；额度为本地演示数字 |
+| AC-01 | 任务配置 + 额度预扣一致 | 🟡 | 预扣点数 = 数量 × `billing.depthPointsPerCompany[depth]`，界面预估与服务端一致；**云端任务创建前由 `ledger.reserve()` 真实幂等预扣，不足返回 402 `E4001` 且不创建任务**，收尾按达成结算并退还差额（ADR-021）。前端本地 `pointsBalance` 仍是演示计数器，与服务端账本不是同一账本，故未升 ✅ |
 | AC-02 | 40s 首条 / 12min 完成 / 可暂停继续中止 | 🟡 | 暂停/继续/中止在**云端编排器**真实生效并保留游标，SSE 事件可核验；游标已落盘可跨进程恢复；耗时由演示 tick 驱动，不代表真实性能，硬超时按 L1–L4 分别 10/25/50/90 分钟 |
-| AC-03 | 杀进程后断点续跑、额度不重复扣 | ✅（单实例） | `server/store.mjs` 落 `tasks/cache/audit` 到 SQLite（或 JSON 兜底）。`hydrate()` 把重启前活跃任务降为 `paused`，保留 `cursor / pointsUsed / progress` 并追加恢复日志；显式点击继续才断点续跑，额度不重复扣。4 个单测 + sqlite 文件双实例恢复用例覆盖。**多实例部署仍需共享库 + 租约，见 ADR-013** |
+| AC-03 | 杀进程后断点续跑、额度不重复扣 | ✅（单实例） | `server/store.mjs` 落 `tasks/cache/audit/ledger_accounts/ledger_entries` 到 SQLite（或 JSON 兜底）。`hydrate()` 把重启前活跃任务降为 `paused`，保留 `cursor / pointsUsed / progress / ledger` 并追加恢复日志；显式点击继续才断点续跑。**v0.5.0 新增账本断言**：预扣已落盘且只有一条 `reserve` 流水、跨进程 `held/available` 不变、续跑后冻结额不变。单测 + sqlite 双实例 + `verify:restart` 活体全链路覆盖。**多实例部署仍需共享库 + 租约，见 ADR-013** |
 | AC-04 | 抽检 50 家：真实率/类型准确率/邮箱有效率 | ❌ | 演示数据不适用；且口径需先修正（见 PM-REVIEW 二.2）。评测代码已就绪（8 项指标 + P0 门禁），缺的是 385 家人工标注集 |
 | AC-05 | 任务内无重复域名 / 跨任务去重 | ⚠️ | 演示运行器按已有域名过滤新结果；三重指纹（域名 + 公司名归一化 + 国家）未实现 |
 | AC-06 | 五维证据链可追溯原始来源 | ✅ | 详情抽屉逐维展开，每条证据含原文、URL、抓取时间；证据伪造会被丢弃 |
@@ -47,7 +49,7 @@
 | AC-15 | Win10/11 安装、无 SmartScreen、自动更新 | ❌ | 需 EV 签名 + Tauri updater |
 | AC-16 | 离线看详情 / 编辑开发信存待发队列 / 联网同步 | ⚠️ | localStorage 保证刷新后数据仍在；「待发队列」在 MVP 无发送能力时无意义（见 PM-REVIEW 二.3） |
 
-**统计（AC-01–16）**：✅ 6 项 · 🟡 3 项 · ⚠️ 4 项 · ❌ 3 项。版本演进：v0.1.0 ✅5 / 🟡2 / ⚠️5 / ❌4 → v0.2.0 ✅5 / 🟡3 / ⚠️5 / ❌3（AC-02 ⚠️→🟡、AC-03 ❌→⚠️，F0 🟡→✅）→ v0.3.0 **AC-03 ⚠️→✅**。功能表 F0 由 🟡 升 ✅。
+**统计（AC-01–16）**：✅ 6 项 · 🟡 3 项 · ⚠️ 4 项 · ❌ 3 项。版本演进：v0.1.0 ✅5 / 🟡2 / ⚠️5 / ❌4 → v0.2.0 ✅5 / 🟡3 / ⚠️5 / ❌3（AC-02 ⚠️→🟡、AC-03 ❌→⚠️，F0 🟡→✅）→ v0.3.0 **AC-03 ⚠️→✅** → v0.4.0 / v0.5.0 统计不变：本轮补的是工程正确性（账本、事实链、契约、边界），**没有让任何一条 AC 从 🟡 变 ✅**，这是刻意的。
 
 ## 二·补、v0.3.0 工程化基线（非 PRD 功能项，但影响可交付性）
 
@@ -60,7 +62,12 @@
 | 模型快照锁定 | ✅ | `E6008` + `-latest` 拒绝 + health 暴露 `pinned`，2 个单测覆盖 |
 | 持久化与 AC-03 | ✅ | sqlite / json / memory 三实现，4 个单测覆盖（含 sqlite 文件双实例恢复）；另有**真实杀进程 → 重启**活体验证 11/11 PASS（恢复游标/点数与 SQLite 落盘值逐项一致，resume 从原游标续跑） |
 | 安全边界活体验证 | ✅ | 两种不安全启动组合各 exit 1；Bearer 401 / 200、非白名单 Origin 不回显均实测通过 |
-| 版本号一致性 | ✅ | `package.json` / `package-lock.json` / `/health` / README / 三份 docs 统一 v0.4.0 |
+| 版本号一致性 | ✅ | `package.json` / `package-lock.json` / `/health` / README / 三份 docs 统一 v0.5.0 |
+| 点数账本（v0.5.0） | ✅ | `server/ledger.mjs` + 三实现 store 的账户表/流水表；12 个单测（含 SQLite 双实例）+ 3 项冒烟 + 3 条 AC-03 断言；`E4001/E4002/E4003` 分层错误码（ADR-021） |
+| T0 → judge 事实链（v0.5.0） | ✅ | `<t0_facts>` 注入 Prompt、冲突代码裁决、缓存键带规则版本、全路径带 `t0.used`；5 个单测 + 2 项冒烟（ADR-022）。**前端演示数据不伪造 sources** |
+| 385 家标注契约（v0.5.0） | ✅（契约/校验器） | `shared/baseline-contract.json` + `server/baseline.mjs`；`GET /v1/eval/baseline/contract`、`POST /v1/eval/baseline/validate`；反例夹具 + CLI 自检 + 门禁断言。**标注数据仍为 0，评测仍 `NO_DATA`**（ADR-020） |
+| 前端服务层边界（v0.5.0） | ✅ | `adapters.ts` 唯一 re-export 入口；`npm run gate` 静态扫描组件/store/App 禁止直连实现，CI 强制执行（ADR-019） |
+| 发布门禁脚本（v0.5.0） | ✅ | `scripts/check-release-gates.mjs` 23 项自检，覆盖账本幂等、跨进程恢复、T0 冲突裁决、基准反例、适配器边界、数据源 0/6；输出 `releaseBlocked=true` 与四项阻断，`LEADPILOT_REQUIRE_BASELINE=1` 时才真正卡 CI |
 | CI 加固（v0.4.0） | ✅ | `Tracked sources sanity` 防止 `.gitignore` 再次误伤；`AC-03 process restart` 用 `scripts/verify-restart.sh` 真实杀进程 → 直读 SQLite → 同库重启 → 恢复值逐项比对 → 断点续跑 |
 | T0 规则事实抽取 | ✅ | `server/t0.mjs` + 共享协议 `t0Extraction` 词表；8 个单测 + 3 项冒烟覆盖可核验引用 / 不补零 / PII 清洗 / 写信锚点接入（ADR-016） |
 | 数据源适配器注册表 | ✅（契约） | `server/data-sources.mjs`：6 类源 health、显式 `demo` / `blocked`、`collect()` 聚合去重；5 个单测 + 2 项冒烟。**真实实现仍未接入**（ADR-017） |
@@ -86,8 +93,8 @@
 ### P0 · 阻塞发布
 
 1. **数据源接入**：编排器、SSE、游标、并发、硬超时、**单实例持久化（AC-03 已闭环）**与**6 类源注册契约**均已真实实现；仍缺 6 类 `DataSourceAdapter` 的真实实现、代理池与 Playwright 集群、页面快照对象存储、客户端写入契约（ADR-017 的 `blocked` 放行条件），以及多实例部署时的共享库 / 任务租约。
-2. **网关生产化**：路由、降级链、熔断、schema/证据校验、缓存、点数折算、审计、PII 与地域策略、**快照锁定**已真实实现；仍缺 DPA / ZDR 签署、BYOK 的 DPAPI 存储、跨任务的点数账本事务、按 385 家基准集跑分后冻结 provider 组合与具体快照 ID（基线不预置猜测版本号）。
-3. **评测数据**：8 项 Eval、P0 门禁与 `NO_DATA` 保护已真实实现；仍缺 **385 家人工标注基准集**（2 名外贸背景标注员 + 第三人裁决）、CI 门禁接线、线上分布漂移监控；**T0 抽取词表也须在该基准集上校准 `extraction_recall ≥ 0.70` 后冻结**。**这是人力关键路径，不是代码任务**。
+2. **网关生产化**：路由、降级链、熔断、schema/证据校验、缓存、点数折算、审计、PII 与地域策略、**快照锁定**、**云端任务点数账本事务**已真实实现；仍缺 DPA / ZDR 签署、BYOK 的 DPAPI 存储、**把 `judge` / `write_email` 的审计估值接入账本**（需先定义预扣上界、失败退款、缓存命中口径，ADR-021 明确列为独立任务）、按 385 家基准集跑分后冻结 provider 组合与具体快照 ID。
+3. **评测数据**：8 项 Eval、P0 门禁、`NO_DATA` 保护、**385 家标注导入契约与校验器**已真实实现；仍缺 **385 家人工标注基准集**（2 名外贸背景标注员 + 第三人裁决）、把真实预测与标注配对跑全量评测、线上分布漂移监控；**T0 抽取词表也须在该基准集上校准 `extraction_recall ≥ 0.70` 后冻结**。**这是人力关键路径，不是代码任务**。
 4. **Gmail 接入**：OAuth 2.0 + PKCE loopback、`gmail.compose` 草稿、refresh_token 的 DPAPI 加密、账号体检。
 5. **桌面外壳与发布**：Tauri 2、SQLite 与 migration、DPAPI、托盘通知、EV 代码签名、增量自动更新。
 6. **合规前置**：数据源授权合同、Google OAuth 验证申请、DPA / ZDR、PIPL 与 GDPR 专项法律意见。

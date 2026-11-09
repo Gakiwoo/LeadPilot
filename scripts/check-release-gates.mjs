@@ -1,0 +1,201 @@
+/**
+ * 发布门禁自检 · v0.5.0
+ *
+ * 目的：把「哪些能力已真实实现、哪些还没达标」变成可执行的断言，而不是文档里的一句话。
+ * 这个脚本只做确定性本地检查，不启动服务、不联网、不调用任何 provider、不生成标注数据。
+ *
+ * 退出码：
+ *  - 任何自检断言失败 → 1（CI 必须红）
+ *  - 断言全绿但发布条件未满足 → 0，并明确打印 releaseBlocked=true 与阻断项
+ *  - LEADPILOT_REQUIRE_BASELINE=1 时，发布条件未满足也 → 1（用于真正卡发布）
+ */
+import { readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { protocol } from '../server/protocol.mjs'
+import { createLedger } from '../server/ledger.mjs'
+import { createMemoryStore, createStore } from '../server/store.mjs'
+import { evaluateBaseline, baselineManifest } from '../server/eval.mjs'
+import { validateBaselineImport } from '../server/baseline.mjs'
+import { extractFacts, reconcileWithT0 } from '../server/t0.mjs'
+import { createDataSourceRegistry } from '../server/data-sources.mjs'
+
+const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const results = []
+let failed = 0
+
+function check(name, ok, detail = '') {
+  results.push({ name, ok: Boolean(ok), detail })
+  if (!ok) failed++
+}
+
+function walkTs(dir, out = []) {
+  if (!existsSync(dir)) return out
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name)
+    if (entry.isDirectory()) walkTs(p, out)
+    else if (/\.(ts|tsx)$/.test(entry.name)) out.push(p)
+  }
+  return out
+}
+
+// 1. 前端服务层边界：业务代码只能从 adapters.ts 取能力
+{
+  const files = [
+    ...walkTs(join(ROOT, 'src/components')),
+    ...walkTs(join(ROOT, 'src/store')),
+    join(ROOT, 'src/App.tsx'),
+  ].filter(existsSync)
+  const direct = /from\s+['"]@\/services\/(gateway-client|task-runner|email-generator)['"]/g
+  const offenders = []
+  for (const f of files) {
+    const text = readFileSync(f, 'utf8')
+    if (direct.test(text)) offenders.push(f.slice(ROOT.length + 1))
+    direct.lastIndex = 0
+  }
+  check('业务层不直接 import 具体服务实现（统一走 adapters）', offenders.length === 0,
+    offenders.length ? `违规：${offenders.join(', ')}` : `${files.length} 个文件已检查`)
+
+  const adapters = readFileSync(join(ROOT, 'src/services/adapters.ts'), 'utf8')
+  const reExports = ['./gateway-client', './task-runner', './email-generator']
+    .every((m) => adapters.includes(`export * from '${m}'`))
+  check('adapters.ts 统一 re-export 三个服务实现', reExports)
+}
+
+// 2. 基准集契约：校验器必须拒绝反例、拒绝空集，评测无数据必须 NO_DATA
+{
+  const fixture = JSON.parse(readFileSync(join(ROOT, 'scripts/fixtures/invalid-baseline-sample.json'), 'utf8'))
+  const invalid = validateBaselineImport(fixture)
+  check('导入校验器拒绝非法反例（E4004）',
+    !invalid.ok && invalid.code === 'E4004' && invalid.errorCount > 0,
+    `errors=${invalid.errorCount}`)
+  check('导入校验器拒绝空基准集', validateBaselineImport({ samples: [] }).ok === false)
+  check('导入校验器拒绝合成/凑数的 385 行占位数据',
+    invalid.errors.some((e) => /样本数/.test(e)), '样本数不符必须报错')
+
+  const evalEmpty = evaluateBaseline([])
+  check('无标注样本时评测返回 NO_DATA 且 ok=false',
+    evalEmpty.status === 'NO_DATA' && evalEmpty.ok === false)
+  const manifest = baselineManifest()
+  check('基准集 manifest 如实标注 NOT_LABELED / 不可发布',
+    manifest.status === 'NOT_LABELED' && manifest.releaseEligible === false && manifest.contractVersion === 'baseline-contract-v1',
+    `importStatus=${manifest.importStatus}`)
+  const contract = JSON.parse(readFileSync(join(ROOT, 'shared/baseline-contract.json'), 'utf8'))
+  check('契约要求 385 家且禁止研发兼任标注',
+    contract.baselineSize === 385 && contract.annotatorPolicy.developerMayAnnotate === false)
+}
+
+// 3. 点数账本：幂等 / 余额守恒 / 不足拒绝 / 结算释放互斥 / 跨进程恢复
+{
+  const ledger = createLedger({ store: createMemoryStore(), openingBalance: 100 })
+  const initial = ledger.state()
+  const r1 = ledger.reserve({ refId: 't1', amount: 40 })
+  const r2 = ledger.reserve({ refId: 't1', amount: 40 })
+  const conflict = ledger.reserve({ refId: 't1', amount: 41 })
+  const insufficient = ledger.reserve({ refId: 't2', amount: 61 })
+  check('预扣扣的是冻结额，可用额同步下降',
+    r1.ok && r1.held === 40 && initial.available - r1.available === 40)
+  check('同一 refId 重复预扣幂等，不二次冻结',
+    r2.ok && r2.idempotent === true && ledger.state().held === 40)
+  check('同 key 不同金额被 E4002 拒绝', conflict.ok === false && conflict.code === 'E4002')
+  check('余额不足被 E4001 拒绝且不产生冻结',
+    insufficient.ok === false && insufficient.code === 'E4001' && ledger.state().held === 40)
+
+  const s1 = ledger.settle({ refId: 't1', amount: 25 })
+  const s2 = ledger.settle({ refId: 't1', amount: 25 })
+  check('结算实扣 25 / 退还 15，且幂等',
+    s1.ok && s1.charged === 25 && s1.refunded === 15 && s2.idempotent === true)
+  check('已结算任务不允许重复释放', ledger.release({ refId: 't1' }).code === 'E4003')
+  check('无预扣任务不允许结算', ledger.settle({ refId: 'never', amount: 1 }).code === 'E4003')
+
+  ledger.reserve({ refId: 't3', amount: 10 })
+  const rel = ledger.release({ refId: 't3' })
+  check('未启动任务全额释放且幂等',
+    rel.ok && rel.refunded === 10 && ledger.release({ refId: 't3' }).idempotent === true)
+
+  const st = ledger.state()
+  check('账本恒等式 available + held + spent = granted',
+    st.available + st.held + st.spent === st.granted && st.available >= 0,
+    `${st.available}+${st.held}+${st.spent}=${st.granted}`)
+
+  const tmpRoot = join(ROOT, '.tmp')
+  mkdirSync(tmpRoot, { recursive: true })
+  const dir = mkdtempSync(join(tmpRoot, 'gate-ledger-'))
+  const dbPath = join(dir, 'ledger.json')
+  try {
+    const l1 = createLedger({ store: createStore({ mode: 'json', dbPath }), openingBalance: 80 })
+    l1.reserve({ refId: 'restart-1', amount: 30 })
+    const before = l1.state()
+    const l2 = createLedger({ store: createStore({ mode: 'json', dbPath }), openingBalance: 80 })
+    const after = l2.state()
+    const again = l2.reserve({ refId: 'restart-1', amount: 30 })
+    check('账本跨「进程重启」不丢预扣、不重复扣',
+      after.held === before.held && after.available === before.available && again.idempotent === true,
+      `held=${after.held} available=${after.available}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+
+  check('账本 scope 与审计估值边界未被悄悄扩大',
+    protocol.billing.ledger.scope.length === 3
+    && protocol.billing.ledger.auditOnlyConsumers.includes('judge')
+    && protocol.billing.ledger.auditOnlyConsumers.includes('write_email'))
+}
+
+// 4. T0 → judge 事实链：引用逐字可核验，冲突由代码保守裁决
+{
+  const text = 'Authorized distributor for Parker fittings across Benelux. We import hydraulic hose fittings from Asia. Team of 23 employees supports local stock.'
+  const doc = { url: 'https://gate.example/about', text, fetched_at: '2026-11-08' }
+  const t0 = extractFacts({ company_id: 'gate_1', sources: [doc], keywords: ['hydraulic hose fittings'] })
+  check('T0 抽取只产出原文连续子串引用',
+    t0.ok && t0.extractor === 'rules' && t0.evidence.length > 0 && t0.evidence.every((e) => text.includes(e.quote)),
+    `evidence=${t0.evidence?.length ?? 0} coverage=${t0.coverage?.rate ?? 0}`)
+
+  const judgement = {
+    company_id: 'gate_1',
+    customer_type: { value: 'retailer', confidence: 0.9, evidence: [{ quote: text.slice(0, 40), source_url: doc.url, fetched_at: doc.fetched_at }] },
+    import_signal: { value: 'contradicted', confidence: 0.9, evidence: [{ quote: text.slice(0, 40), source_url: doc.url, fetched_at: doc.fetched_at }] },
+    size_estimate: { tier: 'XL', confidence: 0.9, evidence: [{ quote: text.slice(0, 40), source_url: doc.url, fetched_at: doc.fetched_at }] },
+    negative_flags: [],
+  }
+  const rec = reconcileWithT0(judgement, t0)
+  check('规则/模型冲突时代码保守取规则值且置信度归零',
+    rec.applied && rec.conflicts.length > 0
+    && Object.values(judgement).every((v) => typeof v !== 'object' || v === null || !('confidence' in v) || v.confidence === 0),
+    `conflicts=${rec.conflicts.length} overrides=${rec.overrides.join(',')}`)
+  check('T0 事实链开关与冲突策略已固化',
+    protocol.judgeFactChain.enabled === true && protocol.judgeFactChain.onConflict === 'rules-win-zero-confidence')
+}
+
+// 5. 数据源注册表：如实报告未接入，绝不半接入
+{
+  const ds = createDataSourceRegistry().health()
+  check('数据源注册表如实报告 0/6 已接入',
+    ds.total === 6 && ds.readyCount === 0 && ds.mode === 'demo',
+    `${ds.readyCount}/${ds.total} · ${ds.mode}`)
+}
+
+const width = Math.max(...results.map((r) => r.name.length))
+for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)
+console.log(`\n${results.length - failed}/${results.length} gate self-checks passed`)
+
+const ds = createDataSourceRegistry().health()
+const blockers = [
+  `385 家人工标注基准集：${baselineManifest().importStatus}（releaseEligible=false）`,
+  `真实数据源：${ds.readyCount}/${ds.total} 已接入`,
+  'provider 模型快照需运行时注入 LEADPILOT_MODEL_VERSION_*（未锁即 E6008）',
+  'Google OAuth / CASA Tier 2 / 数据源采购 / 30 封真实开发信人工复核：未开始',
+]
+console.log('\n发布门禁状态：releaseBlocked = true')
+for (const b of blockers) console.log(`  BLOCKED  ${b}`)
+console.log('说明：以上为「尚未达标」，不是失败。自检全绿只证明边界没被伪造，不证明产品可发布。')
+
+if (failed) {
+  console.error(`\nGATE FAILED：${failed} 项自检断言失败，CI 必须红。`)
+  process.exit(1)
+}
+if (process.env.LEADPILOT_REQUIRE_BASELINE === '1') {
+  console.error('\nGATE FAILED：LEADPILOT_REQUIRE_BASELINE=1 但发布阻断项未解除。')
+  process.exit(1)
+}
+console.log('\nGATE OK：自检断言全绿；发布仍被上述阻断项明确卡住（符合预期）。')

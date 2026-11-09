@@ -63,8 +63,42 @@ async function sseProbe(taskId, maxEvents = 4) {
 
 async function main() {
   const health = await req('/health')
-  check('云端服务健康检查', health.status === 200 && health.body.ok === true,
-    `status=${health.status} mode=${health.body?.gateway?.mode ?? 'n/a'}`)
+  check('云端服务健康检查', health.status === 200 && health.body.ok === true && health.body.version === '0.5.0',
+    `status=${health.status} version=${health.body?.version} mode=${health.body?.gateway?.mode ?? 'n/a'}`)
+
+  const points = health.body?.points
+  check('点数账本健康如实暴露余额恒等式与范围',
+    points && points.available + points.held + points.spent === points.granted
+    && points.scope?.includes('task_reserve')
+    && points.auditOnlyConsumers?.includes('judge'),
+    `available=${points?.available} held=${points?.held} spent=${points?.spent} scope=${points?.scope?.length ?? 0}`)
+  check('评测契约如实标注不可发布，T0 → judge 事实链已接线',
+    health.body?.baseline?.releaseEligible === false
+    && health.body?.t0?.judgeFactChain?.enabled === true,
+    `import=${health.body?.baseline?.importStatus} chain=${health.body?.t0?.judgeFactChain?.onConflict}`)
+  check('billing 明确区分账本扣点与 gateway 审计估值',
+    health.body?.billing?.auditOnlyConsumers?.includes('write_email') === true,
+    `mode=${health.body?.billing?.mode}`)
+
+  const pointsApi = await req('/v1/points')
+  check('点数账本只读接口可用（不暴露充值写接口）',
+    pointsApi.status === 200 && pointsApi.body?.account === 'default'
+    && Array.isArray(pointsApi.body?.entries),
+    `status=${pointsApi.status} entries=${pointsApi.body?.entries?.length ?? 0}`)
+
+  const contract = await req('/v1/eval/baseline/contract')
+  check('385 家基准集契约可读且只返回口径',
+    contract.status === 200 && contract.body?.baselineSize === 385
+    && Array.isArray(contract.body?.fields ? Object.keys(contract.body.fields) : null),
+    `status=${contract.status} size=${contract.body?.baselineSize}`)
+
+  const badBaseline = await post('/v1/eval/baseline/validate', {
+    samples: [{ sample_id: 'INVALID-FIXTURE-SMOKE', score: 99 }],
+  })
+  check('非法标注导入被 400 E6004 拒绝（校验通过 ≠ 评测通过）',
+    badBaseline.status === 400 && badBaseline.body?.code === 'E4004'
+    && badBaseline.body?.releaseEligible === false,
+    `status=${badBaseline.status} errors=${badBaseline.body?.errorCount ?? 0}`)
 
   const ds = health.body?.dataSources
   check('数据源注册表如实报告 0/6 已接入（不制造「已接入」假象）',
@@ -84,6 +118,31 @@ async function main() {
   const judgeReal = judge.status === 200 && judge.body.ok === true
   check('判断请求：真实调用或明确 E6005 降级', judgeDegraded || judgeReal,
     `status=${judge.status} codes=${JSON.stringify(judge.body?.errorCodes ?? [])} ok=${judge.body?.ok}`)
+
+  const chainDoc = {
+    url: 'https://smoke-chain.example/about',
+    text: 'Authorized distributor for Parker fittings across Benelux. We import hydraulic hose fittings from Asia. Our team has 85 employees.',
+    fetched_at: '2026-11-08',
+  }
+  const chain = await post('/v1/judge', {
+    companyId: 'c_smoke_chain', domain: 'smoke-chain.example', country: '美国',
+    sources: [chainDoc], keywords: ['hydraulic hose fittings'], facts: { keywordHits: 2 },
+  })
+  check('T0 → judge 事实链：提供可核验 sources 时启用，降级也不伪造规则来源',
+    chain.body?.t0?.used === true && chain.body?.t0?.ok === true
+    && chain.body?.t0?.rulesVersion === health.body?.t0?.rulesVersion
+    && (chain.status === 503
+      ? chain.body?.errorCodes?.includes('E6005') && !chain.body?.t0?.reconciliation
+      : chain.body?.ok === true && Boolean(chain.body?.t0?.reconciliation)),
+    `status=${chain.status} used=${chain.body?.t0?.used} conflicts=${chain.body?.t0?.reconciliation?.conflicts?.length ?? 0}`)
+
+  const badChain = await post('/v1/judge', {
+    companyId: 'c_smoke_chain', domain: 'smoke-chain.example', country: '美国',
+    sources: [{ url: 'not-a-url', text: 'x', fetched_at: '2026-11-08' }], facts: {},
+  })
+  check('T0 事实链非法来源被拒，不向任何 provider 发请求',
+    badChain.body?.t0?.ok === false && badChain.body?.errorCodes?.includes('E6004'),
+    `status=${badChain.status} errors=${badChain.body?.t0?.errors?.length ?? 0}`)
 
   const email = await post('/v1/email/generate', {
     anchor: 'you distribute Parker fittings across Benelux', product: 'hydraulic hose fittings',
@@ -151,8 +210,16 @@ async function main() {
     keywords: ['hydraulic fittings'], markets: ['德国'], customerTypes: ['distributor'],
     depth: 2, targetCount: 20,
   })
-  check('云端任务创建成功', created.status === 201 && created.body?.task?.id,
-    `status=${created.status} id=${created.body?.task?.id}`)
+  check('云端任务创建成功且已幂等预扣点数',
+    created.status === 201 && created.body?.task?.id && created.body?.task?.ledger?.reserved > 0,
+    `status=${created.status} id=${created.body?.task?.id} reserved=${created.body?.task?.ledger?.reserved ?? 0}`)
+
+  const noPoints = await post('/v1/tasks', {
+    keywords: ['hydraulic fittings'], markets: ['德国'], depth: 4, targetCount: 1000,
+  })
+  check('点数不足时 402 E4001 拒绝创建，绝不先跑再补扣',
+    noPoints.status === 402 && noPoints.body?.code === 'E4001',
+    `status=${noPoints.status} code=${noPoints.body?.code}`)
 
   const taskId = created.body?.task?.id
   if (taskId) {
@@ -168,7 +235,17 @@ async function main() {
       && aborted.body?.task?.dataSources?.ready === 0
       && aborted.body?.task?.progress?.sources?.every((s) => s.mode === 'unconfigured'),
       `sourceMode=${aborted.body?.task?.sourceMode} ready=${aborted.body?.task?.dataSources?.ready}`)
+    check('中止后账本完成结算/释放并留痕，不重复扣点',
+      ['settled', 'released'].includes(aborted.body?.task?.ledger?.settled)
+      && aborted.body?.task?.progress?.log?.some((l) => l.text.includes('点数账本')),
+      `settled=${aborted.body?.task?.ledger?.settled} used=${aborted.body?.task?.pointsUsed}`)
   }
+
+  const pointsAfter = await req('/v1/points')
+  check('任务收尾后账本余额恒等式仍成立',
+    pointsAfter.status === 200
+    && pointsAfter.body?.available + pointsAfter.body?.held + pointsAfter.body?.spent === pointsAfter.body?.granted,
+    `available=${pointsAfter.body?.available} held=${pointsAfter.body?.held} spent=${pointsAfter.body?.spent}`)
 
   const audit = await req('/v1/gateway/audit')
   const entries = Array.isArray(audit.body?.entries) ? audit.body.entries : []

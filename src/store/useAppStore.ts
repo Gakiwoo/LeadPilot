@@ -8,11 +8,11 @@ import { DEPTH_CONFIG } from '@/domain/constants'
 import { applyTransition, canTransition } from '@/domain/state-machine'
 import { acceptModelJudgement } from '@/domain/llm-judgement'
 import { buildScoreCard } from '@/domain/scoring'
-import { createTaskRunner, type TaskRunner } from '@/services/task-runner'
 import {
+  createTaskRunner, type TaskRunner,
   probeGateway, judgeCompany, startCloudTask, controlCloudTask,
   type GatewayHealth,
-} from '@/services/gateway-client'
+} from '@/services/adapters'
 
 export type ViewKey = 'developer' | 'crm' | 'outreach' | 'settings'
 export type SortKey = 'default' | 'total' | 'propensity' | 'import' | 'name' | 'discovered'

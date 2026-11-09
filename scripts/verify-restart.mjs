@@ -47,12 +47,23 @@ if (mode === 'create') {
   const { DatabaseSync } = process.getBuiltinModule('node:sqlite')
   const db = new DatabaseSync(DB, { readOnly: true })
   const rows = db.prepare('SELECT payload FROM tasks').all()
+  const ledgerAccount = db.prepare('SELECT granted, held, spent FROM ledger_accounts WHERE account = ?').get('default')
+  const s0 = readState()
+  const reserveCount = db.prepare("SELECT COUNT(*) AS c FROM ledger_entries WHERE ref_id = ? AND kind = 'reserve'").get(s0.id)
   db.close()
   const p = rows.length ? JSON.parse(rows.at(-1).payload) : null
   check('SQLite 中存在任务记录', !!p, `rows=${rows.length}`)
   if (!p) process.exit(1)
-  const s = readState()
-  s.persisted = { status: p.status, offset: p.cursor?.offset ?? 0, pointsUsed: p.pointsUsed ?? 0 }
+  const s = s0
+  s.persisted = {
+    status: p.status, offset: p.cursor?.offset ?? 0, pointsUsed: p.pointsUsed ?? 0,
+    ledgerHeld: Number(ledgerAccount?.held ?? -1),
+    ledgerAvailable: Number(ledgerAccount?.granted ?? 0) - Number(ledgerAccount?.held ?? 0) - Number(ledgerAccount?.spent ?? 0),
+    reserveCount: Number(reserveCount?.c ?? -1),
+  }
+  check('账本预扣已落盘且只有一条 reserve 流水',
+    s.persisted.ledgerHeld > 0 && s.persisted.reserveCount === 1,
+    `held=${s.persisted.ledgerHeld} reserveCount=${s.persisted.reserveCount}`)
   saveState(s)
   console.log(`PERSISTED ${JSON.stringify(s.persisted)}`)
   check('被杀瞬间落盘状态为 running（IPC 未收尾）', s.persisted.status === 'running', `status=${s.persisted.status}`)
@@ -78,10 +89,22 @@ if (mode === 'create') {
   check('已用点数与落盘值一致、不重复扣', t?.pointsUsed === p.pointsUsed, `persisted=${p.pointsUsed} restored=${t?.pointsUsed}`)
   check('恢复日志可核验', (t?.progress?.log ?? []).some((l) => l.text.includes('额度不重复扣减')))
 
+  const pts = (await api('/v1/points')).body
+  check('账本预扣跨进程保留，额度没有被重新冻结或凭空消失',
+    pts?.held === p.ledgerHeld && pts?.available === p.ledgerAvailable,
+    `persisted held=${p.ledgerHeld}/available=${p.ledgerAvailable} restored held=${pts?.held}/available=${pts?.available}`)
+  const taskPoints = (await api(`/v1/points?refId=${encodeURIComponent(s.id)}`)).body
+  const reserves = (taskPoints?.entries ?? []).filter((e) => e.kind === 'reserve')
+  check('该任务只有一条预扣流水（AC-03 不重复扣点）', reserves.length === 1,
+    `reserves=${reserves.length}`)
+
   const rr = await post(`/v1/tasks/${s.id}/resume`, { cursor: t?.cursor })
   check('显式点击继续即断点续跑', rr.status === 200 && rr.body?.task?.status === 'running', `status=${rr.body?.task?.status}`)
   check('续跑瞬间点数未重复扣', rr.body?.task?.pointsUsed === p.pointsUsed, `pointsUsed=${rr.body?.task?.pointsUsed}`)
   check('续跑从原游标继续', (rr.body?.task?.cursor?.offset ?? 0) >= p.offset, `offset=${rr.body?.task?.cursor?.offset}`)
+  const afterResume = (await api('/v1/points')).body
+  check('续跑后账本冻结额不变', afterResume?.held === p.ledgerHeld,
+    `held=${afterResume?.held} expected=${p.ledgerHeld}`)
   await post(`/v1/tasks/${s.id}/abort`, {})
 } else {
   console.error(`未知 mode：${mode}`)

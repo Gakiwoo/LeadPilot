@@ -13,8 +13,13 @@ import { createOrchestrator } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
 import { evaluateBaseline, baselineManifest } from './eval.mjs'
 import { createStore } from './store.mjs'
+import { createLedger, LEDGER_VERSION } from './ledger.mjs'
 import { extractFacts, T0_RULES_VERSION } from './t0.mjs'
 import { createDataSourceRegistry } from './data-sources.mjs'
+import {
+  contract as baselineContract, BASELINE_CONTRACT_VERSION,
+  validateBaselineImport, checkLabeledBaseline,
+} from './baseline.mjs'
 
 const PORT = Number(process.env.LEADPILOT_PORT ?? 5181)
 const HOST = process.env.LEADPILOT_HOST ?? '127.0.0.1'
@@ -34,9 +39,10 @@ const DEFAULT_SECURITY = {
 
 export function createApp(opts = {}) {
   const store = opts.store ?? createStore()
+  const ledger = opts.ledger ?? createLedger({ store })
   const gateway = opts.gateway ?? createGateway({ store })
   const dataSources = opts.dataSources ?? opts.orchestratorOptions?.dataSources ?? createDataSourceRegistry()
-  const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store, dataSources })
+  const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store, ledger, dataSources })
   // 允许测试注入独立的安全上下文，不污染进程级默认值
   const sec = { ...DEFAULT_SECURITY, ...(opts.security ?? {}) }
   const hits = new Map() // ip -> { count, resetAt }
@@ -158,7 +164,7 @@ export function createApp(opts = {}) {
     try {
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.4.0',
+          ok: true, service: 'leadpilot-cloud', version: '0.5.0',
           gateway: gateway.health(),
           orchestrator: { tasks: orchestrator.listTasks().length, maxConcurrent: 3 },
           protocol: { schemaVersion: protocol.schemaVersion, promptVersion: protocol.promptVersion },
@@ -168,7 +174,28 @@ export function createApp(opts = {}) {
             durable: store.mode !== 'memory',
             recoveredTasks: orchestrator.recoveredIds?.length ?? 0,
           },
-          t0: { extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text' },
+          points: ledger.health(),
+          billing: {
+            ledgerVersion: LEDGER_VERSION,
+            mode: 'task-ledger-v1',
+            scope: protocol.billing.ledger.scope,
+            auditOnlyConsumers: protocol.billing.ledger.auditOnlyConsumers,
+            note: 'gateway judge / write_email 的 points 是按 token 折算的审计估值，不进账本、不代表已扣点。',
+          },
+          baseline: {
+            contractVersion: BASELINE_CONTRACT_VERSION,
+            importStatus: checkLabeledBaseline().status,
+            requiredSize: baselineContract.baselineSize,
+            releaseEligible: false,
+          },
+          t0: {
+            extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text',
+            judgeFactChain: {
+              enabled: protocol.judgeFactChain.enabled,
+              onConflict: protocol.judgeFactChain.onConflict,
+              note: '调用方提供可核验 sources 时，T0 规则事实进入 judge Prompt；冲突由代码保守裁决，未命中维度不补零。',
+            },
+          },
           dataSources: (() => {
             const d = dataSources.health()
             return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
@@ -179,7 +206,18 @@ export function createApp(opts = {}) {
       if (method === 'GET' && path === '/v1/gateway/health') {
         return json(res, 200, {
           ...gateway.health(), security: securityInfo(),
-          t0: { extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text' },
+          points: ledger.health(),
+          billing: { mode: 'task-ledger-v1', scope: protocol.billing.ledger.scope, auditOnlyConsumers: protocol.billing.ledger.auditOnlyConsumers },
+          baseline: {
+            contractVersion: BASELINE_CONTRACT_VERSION,
+            importStatus: checkLabeledBaseline().status,
+            requiredSize: baselineContract.baselineSize,
+            releaseEligible: false,
+          },
+          t0: {
+            extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text',
+            judgeFactChain: { enabled: protocol.judgeFactChain.enabled, onConflict: protocol.judgeFactChain.onConflict },
+          },
           dataSources: (() => {
             const d = dataSources.health()
             return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
@@ -188,6 +226,26 @@ export function createApp(opts = {}) {
       }
       if (method === 'GET' && path === '/v1/gateway/audit') return json(res, 200, { entries: gateway.getAudit(), circuit: gateway.getCircuitState(), cache: gateway.getCacheStats() })
       if (method === 'GET' && path === '/v1/eval/gates') return json(res, 200, baselineManifest())
+      if (method === 'GET' && path === '/v1/eval/baseline/contract') {
+        return json(res, 200, { contractVersion: BASELINE_CONTRACT_VERSION, ...baselineContract, note: '本接口只返回契约，不返回任何标注样本。' })
+      }
+      if (method === 'POST' && path === '/v1/eval/baseline/validate') {
+        const body = await readBody(req)
+        const result = validateBaselineImport(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+      if (method === 'GET' && path === '/v1/points') {
+        const account = url.searchParams.get('account') ?? undefined
+        const refId = url.searchParams.get('refId') ?? undefined
+        const state = ledger.state(account)
+        const entries = refId ? ledger.entries(refId, 50) : ledger.allEntries(50)
+        return json(res, 200, {
+          ...state,
+          entries,
+          scope: protocol.billing.ledger.scope,
+          note: '只读接口。账本只覆盖云端任务预扣/结算/释放；gateway 的 points 为审计估值，不进账本。',
+        })
+      }
       if (method === 'GET' && path === '/v1/tasks') return json(res, 200, { tasks: orchestrator.listTasks() })
 
       if (method === 'POST' && path === '/v1/judge') {
@@ -235,7 +293,15 @@ export function createApp(opts = {}) {
         if (!body.keywords?.length || !body.markets?.length) {
           return fail(res, 400, 'E1003', '任务参数不完整', '关键词与目标市场为必填项', '补全参数后重新提交')
         }
-        return json(res, 201, { ok: true, task: orchestrator.createTask(body), demo: true })
+        const created = orchestrator.createTask(body)
+        if (created?.ok === false) {
+          // 预扣失败：不创建任务、不扣点、不伪造 201
+          return fail(res, 402, created.code ?? 'E4001',
+            '点数预扣失败，任务未创建',
+            created.reason ?? '账本拒绝预扣',
+            created.action ?? '降低目标数量或采集深度后重试')
+        }
+        return json(res, 201, { ok: true, task: created, demo: true })
       }
 
       const taskMatch = path.match(/^\/v1\/tasks\/([^/]+)(?:\/(events|pause|resume|abort))?$/)
@@ -264,7 +330,7 @@ export function createApp(opts = {}) {
     }
   })
 
-  return { server, gateway, orchestrator, store }
+  return { server, gateway, orchestrator, store, ledger }
 }
 
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -280,11 +346,12 @@ if (isDirectRun) {
     console.error('[LeadPilot] SECURITY_CONFIG: 非本机监听禁止 CORS 通配 *，请显式列出允许的前端来源。')
     process.exit(1)
   }
-  const { server, gateway, store } = createApp()
+  const { server, gateway, store, ledger } = createApp()
   server.listen(PORT, HOST, () => {
     const h = gateway.health()
+    const p = ledger.health()
     // eslint-disable-next-line no-console
-    console.log(`[LeadPilot] cloud API http://${HOST}:${PORT} · providers ${h.readyCount}/${h.totalProviders} ready (${h.configuredCount} keys / ${h.pinnedCount} pinned) · mode=${h.mode} · security=${API_TOKEN ? 'token' : 'local-open'} · persistence=${store.mode}`)
+    console.log(`[LeadPilot] cloud API http://${HOST}:${PORT} · providers ${h.readyCount}/${h.totalProviders} ready (${h.configuredCount} keys / ${h.pinnedCount} pinned) · mode=${h.mode} · security=${API_TOKEN ? 'token' : 'local-open'} · persistence=${store.mode} · ledger=${p.available}/${p.granted} available (${p.held} held / ${p.spent} spent)`)
   })
   const shutdown = () => server.close(() => { store.close(); process.exit(0) })
   process.on('SIGINT', shutdown)

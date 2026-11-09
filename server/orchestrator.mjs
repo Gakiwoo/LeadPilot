@@ -10,6 +10,7 @@
  *         编排器不再硬编码源名；注册表如实报告 0/6 已接入，绝不制造「已接入」假象。
  */
 import { createDataSourceRegistry } from './data-sources.mjs'
+import { protocol } from './protocol.mjs'
 
 export const STAGES = ['检索候选', '规范化', '去重', '抓取详情', '验证邮箱', '模型判断与评分']
 const HARD_TIMEOUT_MIN = { 1: 10, 2: 25, 3: 50, 4: 90 }
@@ -20,6 +21,7 @@ export function createOrchestrator(opts = {}) {
   const now = opts.now ?? (() => Date.now())
   const tickMs = opts.tickMs ?? 400
   const store = opts.store ?? null // 传入持久化存储后，任务游标跨进程可恢复（AC-03）
+  const ledger = opts.ledger ?? null // 点数账本：预扣/结算/释放全部幂等，跨进程不重复扣
   const dataSources = opts.dataSources ?? createDataSourceRegistry()
   const tasks = new Map()
   const subscribers = new Map()
@@ -33,6 +35,7 @@ export function createOrchestrator(opts = {}) {
       createdAt: task.createdAt, finishedAt: task.finishedAt ?? null,
       startedMs: task.startedMs ?? null, tick: task.tick ?? 0,
       cursor: task.cursor, progress: task.progress,
+      ledger: task.ledger ?? null, ledgerSettled: Boolean(task.ledgerSettled),
       sourceMode: task.sourceMode ?? 'demo', demo: true,
     }
   }
@@ -59,6 +62,9 @@ export function createOrchestrator(opts = {}) {
         tick: raw.tick ?? 0,
         startedMs: now(),
         recovered: true,
+        // 旧版本任务没有账本预扣记录：绝不补扣，按只读方式记录历史消耗
+        ledger: raw.ledger ?? null,
+        ledgerSettled: Boolean(raw.ledgerSettled),
         progress: {
           ...raw.progress,
           log: [...(raw.progress.log ?? []), {
@@ -101,23 +107,70 @@ export function createOrchestrator(opts = {}) {
       createdAt: task.createdAt, finishedAt: task.finishedAt,
       recovered: Boolean(task.recovered),
       persistence: store?.mode ?? 'memory',
+      ledger: task.ledger ?? null,
       sourceMode: task.sourceMode ?? 'demo',
       dataSources: { ready: ds.readyCount, total: ds.total },
       demo: true,
     }
   }
 
-  function finish(task, status, reason) {
+  /**
+   * 收尾。点数账本在这里结算/释放，且只做一次：
+   *  - 正常完成：按全额结算
+   *  - 硬超时 / 中止：按已达成比例结算，差额退还
+   *  - 创建后未启动即废弃：release 全额退还，不产生任何消耗
+   * 幂等由 ledger 的 idem_key 保证；进程重启后再次收尾也不会重复扣点。
+   */
+  function finish(task, status, reason, opts = {}) {
     clearInterval(timers.get(task.id))
     timers.delete(task.id)
     task.status = status
     task.finishedAt = new Date(now()).toISOString()
-    task.pointsUsed = status === 'aborted' ? Math.round(task.pointsEstimated * task.progress.qualified / Math.max(1, task.config.targetCount)) : task.pointsEstimated
+    const prorated = Math.round(task.pointsEstimated * task.progress.qualified / Math.max(1, task.config.targetCount))
+    const requested = Math.max(0, Math.min(task.pointsEstimated, Math.round(opts.actualPoints ?? task.pointsEstimated)))
+    task.pointsUsed = requested
+    const neverStarted = task.tick === 0 && task.progress.qualified === 0
+    let pointsRefunded = 0
+
+    if (ledger && task.ledger?.refId && !task.ledgerSettled) {
+      const refId = task.ledger.refId
+      const shouldRelease = status !== 'done' && neverStarted && requested === 0
+      const r = shouldRelease
+        ? ledger.release({ refId, reason: '任务未启动即废弃：全额退还预扣点数' })
+        : ledger.settle({ refId, amount: requested, reason: `任务${status === 'done' ? '完成' : '中止'}结算` })
+      if (r.ok) {
+        task.pointsUsed = r.charged ?? 0
+        pointsRefunded = r.refunded ?? 0
+        task.ledger = {
+          ...task.ledger, settled: shouldRelease ? 'released' : 'settled',
+          charged: task.pointsUsed, refunded: pointsRefunded, idempotent: Boolean(r.idempotent),
+        }
+        task.progress.log.push({
+          at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: 'info',
+          text: shouldRelease
+            ? `点数账本：已全额释放 ${pointsRefunded} 点预扣，本次消耗 0 点`
+            : `点数账本：预扣 ${task.ledger.reserved} 点 → 实扣 ${task.pointsUsed} 点 / 退还 ${pointsRefunded} 点${r.idempotent ? '（幂等命中，不重复扣）' : ''}`,
+        })
+      } else {
+        // E4003（历史任务无预扣）不补扣、不假装成功；其余错误必须可见
+        task.ledger = { ...task.ledger, settled: 'failed', code: r.code, error: r.reason }
+        task.progress.log.push({
+          at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: 'error',
+          text: `点数账本结算失败（${r.code}）：${r.reason} · 本次未扣点`,
+        })
+      }
+      task.ledgerSettled = true
+    }
+
     task.progress.log.push({ at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }), level: status === 'done' ? 'info' : 'warn', text: reason })
     task.progress.stage = status === 'done' ? '完成' : task.progress.stage
     task.progress.etaRange = [0, 0]
+    task.progress.log = task.progress.log.slice(-80)
     persist(task)
-    emit(task.id, status === 'done' ? 'done' : 'aborted', { progress: task.progress, cursor: task.cursor, pointsUsed: task.pointsUsed, reason })
+    emit(task.id, status === 'done' ? 'done' : 'aborted', {
+      progress: task.progress, cursor: task.cursor,
+      pointsUsed: task.pointsUsed, pointsRefunded, ledger: task.ledger, reason,
+    })
   }
 
   function tick(task) {
@@ -183,8 +236,9 @@ export function createOrchestrator(opts = {}) {
     })
 
     const elapsedMin = (now() - task.startedMs) / 60000
-    if (p.qualified >= target) finish(task, 'done', `任务完成 · 目标 ${target} / 达成 ${p.qualified}（演示编排）`)
-    else if (elapsedMin >= (HARD_TIMEOUT_MIN[depth] ?? 25)) finish(task, 'done', `硬超时 ${HARD_TIMEOUT_MIN[depth]} 分钟自动收尾，返回已有结果并标注未完成全量采集`)
+    const prorated = Math.round(task.pointsEstimated * p.qualified / Math.max(1, target))
+    if (p.qualified >= target) finish(task, 'done', `任务完成 · 目标 ${target} / 达成 ${p.qualified}（演示编排）`, { actualPoints: task.pointsEstimated })
+    else if (elapsedMin >= (HARD_TIMEOUT_MIN[depth] ?? 25)) finish(task, 'done', `硬超时 ${HARD_TIMEOUT_MIN[depth]} 分钟自动收尾，返回已有结果并标注未完成全量采集`, { actualPoints: prorated })
   }
 
   function start(task) {
@@ -201,13 +255,28 @@ export function createOrchestrator(opts = {}) {
     const depth = [1, 2, 3, 4].includes(Number(config.depth)) ? Number(config.depth) : 2
     const target = Math.max(10, Math.min(1000, Number(config.targetCount) || 100))
     const id = `task_${now()}_${Math.random().toString(36).slice(2, 8)}`
+    const pointsEstimated = target * (protocol.billing.depthPointsPerCompany[depth] ?? 2)
+    // 先预扣再建任务：余额不足直接拒绝，绝不「先跑起来再补扣」
+    let hold = null
+    if (ledger) {
+      hold = ledger.reserve({ refId: id, amount: pointsEstimated, reason: '云端采集任务预扣' })
+      if (!hold.ok) {
+        return {
+          ok: false, code: hold.code, reason: hold.reason,
+          pointsEstimated, available: hold.available ?? null,
+          action: hold.code === 'E4001' ? '降低目标数量 / 采集深度，或充值后重试' : '检查任务 ID 是否重复',
+        }
+      }
+    }
     const ds = dataSources.health()
     const shownSources = ds.sources.slice(0, SOURCES_BY_DEPTH[depth] ?? 5)
     const task = {
       id, config: { ...config, depth, targetCount: target },
       status: running >= MAX_CONCURRENT ? 'queued' : 'running',
-      pointsEstimated: target * ({ 1: 1, 2: 2, 3: 4, 4: 8 }[depth] ?? 2),
+      pointsEstimated,
       pointsUsed: 0,
+      ledger: hold ? { refId: id, reserved: hold.held, settled: null } : null,
+      ledgerSettled: false,
       createdAt: new Date(now()).toISOString(),
       finishedAt: undefined,
       startedMs: now(),
@@ -224,6 +293,12 @@ export function createOrchestrator(opts = {}) {
           at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }),
           level: 'warn',
           text: `数据源 ${ds.readyCount}/${ds.total} 已接入：${ds.note}；本任务不产生真实采集结果、不写入客户记录`,
+        }, {
+          at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }),
+          level: 'info',
+          text: hold
+            ? `点数账本：已幂等预扣 ${hold.held} 点（refId=${id}），任务收尾时按实际达成结算并退还差额`
+            : '未注入点数账本：本任务点数仅为估算值，不产生真实扣费',
         }],
       },
     }
@@ -257,7 +332,8 @@ export function createOrchestrator(opts = {}) {
 
   function abort(id) {
     const t = tasks.get(id); if (!t || ['done', 'aborted', 'failed'].includes(t.status)) return null
-    finish(t, 'aborted', '用户中止：已采集结果全部保留，游标已持久化，可断点续跑')
+    const prorated = Math.round(t.pointsEstimated * t.progress.qualified / Math.max(1, t.config.targetCount))
+    finish(t, 'aborted', '用户中止：已采集结果全部保留，游标已持久化，可断点续跑', { actualPoints: prorated })
     return snapshot(t)
   }
 

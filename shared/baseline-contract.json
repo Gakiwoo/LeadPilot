@@ -1,0 +1,64 @@
+{
+  "$comment": "PRD 9.5 / 9.5.3 · 385 家人工标注基准集的导入契约。本仓库不提供、也不得生成任何标注样本：标注必须由 2 名外贸业务背景标注员独立完成 + 第 3 人裁决，研发不得兼任。此文件只约束格式与构成，评测在未导入真实标注前恒定返回 NO_DATA。",
+  "contractVersion": "baseline-contract-v1",
+  "baselineSize": 385,
+  "baselineComposition": "8 种客户类型全覆盖 · 有/无海关数据市场各半 · S/M/L/XL 各档 · 15% 疑似同行 + 10% 空壳负样本",
+  "annotatorPolicy": {
+    "independentAnnotators": 2,
+    "adjudicators": 1,
+    "developerMayAnnotate": false,
+    "background": "外贸业务背景",
+    "onDisagreement": "第 3 人裁决，裁决结果写入 adjudicated_by / adjudicated=true",
+    "$note": "annotator_a 与 annotator_b 必须不同且不得等于 adjudicator；标注员 ID 不得含 dev/engineer/研发 字样。"
+  },
+  "acceptedFormats": ["json", "jsonl", "csv"],
+  "topLevelKeys": ["samples", "results"],
+  "fields": {
+    "sample_id": { "type": "string", "required": true, "unique": true, "minLength": 3, "note": "稳定标识，禁止含邮箱/电话" },
+    "customer_type": { "type": "enum", "required": true, "values": ["importer", "distributor", "wholesaler", "brand_owner", "retailer", "factory", "epc", "trader", "unknown"] },
+    "size_tier": { "type": "enum", "required": true, "values": ["S", "M", "L", "XL", "unknown"] },
+    "import_signal": { "type": "enum", "required": true, "values": ["confirmed", "inferred", "no_signal", "contradicted"] },
+    "match_rank": { "type": "integer", "required": true, "min": 1, "max": 385 },
+    "propensity_rank": { "type": "integer", "required": true, "min": 1, "max": 385 },
+    "customs_data_available": { "type": "boolean", "required": true },
+    "negative_case": { "type": "enum", "required": true, "values": ["none", "competitor", "shell"] },
+    "annotator_a": { "type": "string", "required": true },
+    "annotator_b": { "type": "string", "required": true },
+    "adjudicated": { "type": "boolean", "required": false },
+    "adjudicated_by": { "type": "string", "required": false },
+    "source_url": { "type": "url", "required": true },
+    "quote": { "type": "string", "required": true, "minLength": 8, "note": "标注员判定所依据的原文片段，必须可在抓取原文中逐字核验" },
+    "fetched_at": { "type": "date", "required": true },
+    "provenance_matched": { "type": "number", "required": true, "min": 0 },
+    "provenance_total": { "type": "number", "required": true, "min": 1 },
+    "signals_true": { "type": "number", "required": true, "min": 0 },
+    "signals_false": { "type": "number", "required": true, "min": 0 },
+    "signals_found": { "type": "number", "required": true, "min": 0 },
+    "signals_actual": { "type": "number", "required": true, "min": 0 },
+    "rules_passed": { "type": "number", "required": true, "min": 0 },
+    "rules_total": { "type": "number", "required": true, "min": 1 },
+    "schema_pass": { "type": "boolean", "required": true },
+    "refused": { "type": "boolean", "required": true }
+  },
+  "forbiddenFields": ["score", "total_score", "rating", "points", "email", "phone", "contact_name", "contact_email", "api_key", "access_token", "refresh_token"],
+  "forbiddenValuePatterns": ["@", "+86", "Bearer ", "sk-"],
+  "compositionRules": [
+    { "id": "all_customer_types", "field": "customer_type", "require": "allEnumValues", "values": ["importer", "distributor", "wholesaler", "brand_owner", "retailer", "factory", "epc", "trader"], "minPerValue": 1 },
+    { "id": "all_size_tiers", "field": "size_tier", "require": "allEnumValues", "values": ["S", "M", "L", "XL"], "minPerValue": 1 },
+    { "id": "customs_split", "field": "customs_data_available", "require": "balanced", "trueMinRatio": 0.45, "trueMaxRatio": 0.55 },
+    { "id": "competitor_negative", "field": "negative_case", "require": "minRatio", "value": "competitor", "minRatio": 0.15 },
+    { "id": "shell_negative", "field": "negative_case", "require": "minRatio", "value": "shell", "minRatio": 0.10 }
+  ],
+  "numericRules": [
+    "provenance_matched <= provenance_total",
+    "signals_found <= signals_actual",
+    "rules_passed <= rules_total",
+    "signals_true + signals_false > 0"
+  ],
+  "releaseGates": {
+    "p0": ["provenance_rate", "signal_precision", "rule_compliance"],
+    "rule": "任一 P0 指标不达标即阻断发布；导入校验通过 ≠ 评测通过",
+    "$note": "导入校验只保证格式、构成与标注独立性；真实评测必须把模型预测与人工标注配对后调用 evaluateBaseline()，无 385 家真实标注时恒定 NO_DATA。"
+  },
+  "$noFabricationNote": "严禁提交合成/占位/由模型生成的标注样本。CI 中只允许出现明确标记 INVALID-FIXTURE 的反例用于验证校验器会拒绝，不得作为评测输入。"
+}

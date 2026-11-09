@@ -3,8 +3,10 @@ import { AlertTriangle, CheckCircle2, CloudCog, RefreshCw, ShieldCheck, Sparkles
 import type { Company } from '@/types'
 import { EMAIL_LENGTH_LIMIT, EMAIL_PURPOSES } from '@/domain/constants'
 import { injectComplianceFooter, validateEmail } from '@/domain/compliance'
-import { generateEmails, pickAnchor, type GeneratedEmail } from '@/services/email-generator'
-import { generateEmailWithGateway, type EmailGenerateResponse } from '@/services/gateway-client'
+import {
+  generateEmails, pickAnchor, type GeneratedEmail,
+  generateEmailWithGateway, type EmailGenerateResponse,
+} from '@/services/adapters'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Field, Modal } from '@/components/ui'
 

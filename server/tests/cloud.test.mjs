@@ -2,15 +2,18 @@ import { describe, expect, it } from 'vitest'
 import { createGateway, route, regionDecision } from '../gateway.mjs'
 import { createOrchestrator } from '../orchestrator.mjs'
 import { evaluateBaseline, baselineManifest } from '../eval.mjs'
-import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft } from '../protocol.mjs'
+import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft, buildJudgeMessages } from '../protocol.mjs'
 import { createApp } from '../index.mjs'
 import { createStore, createMemoryStore, sqliteAvailable } from '../store.mjs'
 import { extractFacts, validateT0Input, T0_RULES_VERSION } from '../t0.mjs'
 import { createDataSourceRegistry, SOURCE_DEFS } from '../data-sources.mjs'
 import { sanitizeContext } from '../protocol.mjs'
+import { createLedger, LEDGER_VERSION } from '../ledger.mjs'
+import { validateBaselineImport, BASELINE_CONTRACT_VERSION } from '../baseline.mjs'
+import { reconcileWithT0 } from '../t0.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rmSync } from 'node:fs'
+import { rmSync, readFileSync } from 'node:fs'
 
 const SOURCES = [
   'About: Authorized distributor for Parker and Eaton across Benelux.',
@@ -790,6 +793,258 @@ describe('数据源适配器注册表 · 6 类源契约 / 显式未接入 / 不�
       const gh = await (await fetch(`${base}/v1/gateway/health`)).json()
       expect(gh.dataSources.readyCount).toBe(0)
       expect(gh.t0.extractor).toBe('rules')
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+describe('点数账本事务化 · 预扣 / 结算 / 释放 / 幂等', () => {
+  const make = (openingBalance = 100) => {
+    const store = createMemoryStore()
+    return { store, ledger: createLedger({ store, openingBalance }) }
+  }
+
+  it('开户额度、余额恒等式与版本如实暴露', () => {
+    const { ledger } = make()
+    const s = ledger.state()
+    expect(s.granted).toBe(100)
+    expect(s.available).toBe(100)
+    expect(s.ledgerVersion).toBe(LEDGER_VERSION)
+    expect(s.available + s.held + s.spent).toBe(s.granted)
+    expect(ledger.health().auditOnlyConsumers).toContain('judge')
+  })
+
+  it('同一 refId 预扣幂等，金额不同报 E4002，余额不足报 E4001', () => {
+    const { ledger } = make()
+    const a = ledger.reserve({ refId: 'task_a', amount: 40 })
+    const b = ledger.reserve({ refId: 'task_a', amount: 40 })
+    const c = ledger.reserve({ refId: 'task_a', amount: 41 })
+    const d = ledger.reserve({ refId: 'task_b', amount: 61 })
+    expect(a.ok && a.held === 40).toBe(true)
+    expect(b.ok && b.idempotent === true).toBe(true)
+    expect(ledger.state().held).toBe(40)
+    expect(c.code).toBe('E4002')
+    expect(d.code).toBe('E4001')
+    expect(ledger.state().held).toBe(40)
+  })
+
+  it('结算实扣 + 退还差额且幂等；已结算不得重复释放；无预扣不得结算', () => {
+    const { ledger } = make()
+    ledger.reserve({ refId: 'task_a', amount: 40 })
+    const s1 = ledger.settle({ refId: 'task_a', amount: 25 })
+    const s2 = ledger.settle({ refId: 'task_a', amount: 25 })
+    expect(s1.charged).toBe(25)
+    expect(s1.refunded).toBe(15)
+    expect(s2.idempotent).toBe(true)
+    expect(ledger.state()).toMatchObject({ held: 0, spent: 25, available: 75 })
+    expect(ledger.release({ refId: 'task_a' }).code).toBe('E4003')
+    expect(ledger.settle({ refId: 'task_c', amount: 1 }).code).toBe('E4003')
+    // 同一个已结算 refId 换成不同金额 → 幂等键冲突（E4002），不是重新结算
+    expect(ledger.settle({ refId: 'task_a', amount: 99 }).code).toBe('E4002')
+    ledger.reserve({ refId: 'task_d', amount: 10 })
+    expect(ledger.settle({ refId: 'task_d', amount: 11 }).code).toBe('E4003')
+  })
+
+  it('未启动任务全额释放，账本流水完整可追溯', () => {
+    const { ledger } = make()
+    ledger.reserve({ refId: 'task_x', amount: 30 })
+    const r = ledger.release({ refId: 'task_x' })
+    expect(r.ok && r.refunded === 30 && ledger.release({ refId: 'task_x' }).idempotent).toBe(true)
+    expect(ledger.state().available).toBe(100)
+    const kinds = ledger.entries('task_x').map((e) => e.kind)
+    expect(kinds).toEqual(['reserve', 'release'])
+  })
+
+  it.skipIf(!sqliteAvailable)('SQLite 账本在两个独立 store 实例之间恢复，重启不重复扣', () => {
+    const dir = join(tmpdir(), `leadpilot-ledger-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    const dbPath = join(dir, 'ledger.db')
+    const stores = []
+    try {
+      const s1 = createStore({ mode: 'sqlite', dbPath }); stores.push(s1)
+      const l1 = createLedger({ store: s1, openingBalance: 80 })
+      l1.reserve({ refId: 'persisted', amount: 30 })
+      s1.close()
+
+      const s2 = createStore({ mode: 'sqlite', dbPath }); stores.push(s2)
+      const l2 = createLedger({ store: s2, openingBalance: 80 })
+      expect(l2.state().held).toBe(30)
+      expect(l2.reserve({ refId: 'persisted', amount: 30 }).idempotent).toBe(true)
+      expect(l2.settle({ refId: 'persisted', amount: 12 }).charged).toBe(12)
+      expect(l2.state()).toMatchObject({ held: 0, spent: 12, available: 68 })
+    } finally {
+      // Windows 上 SQLite 句柄未关闭会导致 unlink EBUSY
+      for (const s of stores) { try { s.close() } catch { /* 已关闭 */ } }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('编排器：创建预扣、未启动中止全额释放、点数不重复扣', () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    const o = createOrchestrator({ store, ledger, tickMs: 10000 })
+    const t = o.createTask({ keywords: ['fittings'], markets: ['德国'], depth: 2, targetCount: 20 })
+    expect(t.ledger).toMatchObject({ reserved: 40, settled: null })
+    expect(ledger.state().held).toBe(40)
+    const aborted = o.abort(t.id)
+    expect(aborted.pointsUsed).toBe(0)
+    expect(aborted.ledger.settled).toBe('released')
+    expect(ledger.state()).toMatchObject({ held: 0, spent: 0, available: 200 })
+    o.dispose()
+  })
+
+  it('编排器：余额不足时拒绝创建任务，绝不先跑再补扣', () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 10 })
+    const o = createOrchestrator({ store, ledger, tickMs: 10000 })
+    const r = o.createTask({ keywords: ['fittings'], markets: ['德国'], depth: 2, targetCount: 20 })
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('E4001')
+    expect(o.listTasks()).toHaveLength(0)
+    expect(ledger.state().held).toBe(0)
+    o.dispose()
+  })
+
+  it('AC-03：重启恢复的任务从持久化游标续跑，不再二次预扣', () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    const o1 = createOrchestrator({ store, ledger, tickMs: 10000 })
+    const t = o1.createTask({ keywords: ['fittings'], markets: ['德国'], depth: 2, targetCount: 20 })
+    o1.pause(t.id)
+    o1.dispose()
+    const o2 = createOrchestrator({ store, ledger, tickMs: 10000 })
+    expect(o2.recoveredIds).toContain(t.id)
+    expect(o2.getTask(t.id).status).toBe('paused')
+    expect(ledger.state().held).toBe(40)
+    const resumed = o2.resume(t.id)
+    expect(resumed.status).toBe('running')
+    expect(ledger.state().held).toBe(40)
+    expect(ledger.entries(t.id).filter((e) => e.kind === 'reserve')).toHaveLength(1)
+    o2.dispose()
+  })
+})
+
+describe('T0 → judge 事实链 · 规则事实进 Prompt / 冲突代码裁决', () => {
+  const doc = (text) => ({ url: 'https://chain.example/about', text, fetched_at: '2026-11-08' })
+  const rich = 'About us: Authorized distributor for Parker and Eaton across Benelux. '
+    + 'We import hydraulic hose fittings from Asia. Our team has 85 employees across Rotterdam and Antwerp.'
+  const blind = 'Welcome to our website. We value long term cooperation and quality service for every partner.'
+
+  it('buildJudgeMessages 只在提供 T0 结果时注入 <t0_facts>，绝不伪装规则事实', () => {
+    const t0 = extractFacts({ company_id: 'c_chain', sources: [doc(rich)], keywords: ['hydraulic hose fittings'] })
+    const withT0 = buildJudgeMessages({ companyId: 'c_chain', sourceTexts: [rich], facts: {}, t0 })
+    const without = buildJudgeMessages({ companyId: 'c_chain', sourceTexts: [rich], facts: {} })
+    expect(withT0[0].content).toContain('<t0_facts')
+    expect(withT0[0].content).toContain(t0.rulesVersion)
+    expect(withT0[1].content).toContain('优先引用 <t0_facts>')
+    expect(without[0].content).not.toContain('<t0_facts')
+  })
+
+  it('未提供 sources 时 judge 如实返回 t0.used=false', async () => {
+    const g = createGateway({ env: {}, fetchImpl: async () => { throw new Error('不应发起请求') } })
+    const r = await g.judge(judgeInput())
+    expect(r.t0.used).toBe(false)
+    expect(r.t0.reason).toContain('不拿演示文本伪造来源')
+    expect(r.errorCodes).toContain('E6005')
+  })
+
+  it('非法 sources 一律 E6004，且不向任何 provider 发请求', async () => {
+    let calls = 0
+    const g = createGateway({ env: testEnv({ DEEPSEEK_API_KEY: 'k' }), fetchImpl: async () => { calls++; return okFetch(wire())() } })
+    const r = await g.judge(judgeInput({ sources: [{ url: 'not-a-url', text: 'x', fetched_at: '2026-11-08' }] }))
+    expect(r.errorCodes).toContain('E6004')
+    expect(r.t0.used).toBe(true)
+    expect(r.t0.ok).toBe(false)
+    expect(calls).toBe(0)
+  })
+
+  it('规则与模型冲突时代码保守取规则值、置信度归零、全程留痕', async () => {
+    const raw = wire({ customer_type: { ...wire().customer_type, value: 'retailer' } })
+    const g = createGateway({
+      env: testEnv({ DEEPSEEK_API_KEY: 'k' }), fetchImpl: okFetch(raw),
+      sleep: async () => {}, now: () => 1_700_000_000_000,
+    })
+    const r = await g.judge(judgeInput({ sources: [doc(rich)], sourceTexts: [], keywords: ['hydraulic hose fittings'] }))
+    expect(r.ok).toBe(true)
+    expect(r.t0.used).toBe(true)
+    expect(r.t0.reconciliation.conflicts.some((c) => c.field === 'customer_type')).toBe(true)
+    expect(r.judgement.customer_type.value).toBe('distributor')
+    expect(r.judgement.customer_type.confidence).toBe(0)
+    expect(r.judgement.notes_for_human).toContain('待人工复议')
+    expect(r.billing).toMatchObject({ charged: false, scope: 'audit-only' })
+  })
+
+  it('T0 标 no_signal 的维度，模型给出确定结论也被代码回退', () => {
+    const t0 = extractFacts({ company_id: 'c_chain', sources: [doc(blind)], keywords: [] })
+    expect(t0.coverage.noSignalFields).toHaveLength(3)
+    const j = wire({
+      customer_type: { ...wire().customer_type, evidence: [{ quote: blind.slice(9), source_url: 'https://chain.example/about', fetched_at: '2026-11-08' }] },
+      import_signal: { ...wire().import_signal, evidence: [{ quote: blind.slice(9), source_url: 'https://chain.example/about', fetched_at: '2026-11-08' }] },
+      size_estimate: { ...wire().size_estimate, evidence: [{ quote: blind.slice(9), source_url: 'https://chain.example/about', fetched_at: '2026-11-08' }] },
+    })
+    const rec = reconcileWithT0(j, t0)
+    expect(rec.conflicts.every((c) => c.kind === 'no_signal_overridden')).toBe(true)
+    expect(j.customer_type.value).toBe('unknown')
+    expect(j.import_signal.value).toBe('no_signal')
+    expect(j.size_estimate.tier).toBe('unknown')
+  })
+})
+
+describe('385 家基准集标注契约 · 只校验不伪造', () => {
+  const fixture = JSON.parse(readFileSync(new URL('../../scripts/fixtures/invalid-baseline-sample.json', import.meta.url), 'utf8'))
+
+  it('导入校验器拒绝非法反例，且导入校验通过 ≠ 评测通过', () => {
+    const r = validateBaselineImport(fixture)
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('E4004')
+    expect(r.releaseEligible).toBe(false)
+    expect(r.note).toContain('导入校验通过 ≠ 评测通过')
+    expect(r.errors.some((e) => e.includes('独立双标'))).toBe(true)
+  })
+
+  it('manifest 暴露契约与导入状态，评测无数据仍为 NO_DATA', () => {
+    const m = baselineManifest()
+    expect(m.contractVersion).toBe(BASELINE_CONTRACT_VERSION)
+    expect(m.status).toBe('NOT_LABELED')
+    expect(m.releaseEligible).toBe(false)
+    expect(m.contract.requiredFields).toContain('sample_id')
+    expect(evaluateBaseline([]).status).toBe('NO_DATA')
+  })
+
+  it('HTTP：契约可读、非法导入 400、点数账本只读', async () => {
+    const store = createMemoryStore()
+    const app = createApp({ store, ledger: createLedger({ store, openingBalance: 60 }), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    const post = (path, body) => fetch(`${base}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    try {
+      const contract = await (await fetch(`${base}/v1/eval/baseline/contract`)).json()
+      expect(contract.baselineSize).toBe(385)
+      const bad = await post('/v1/eval/baseline/validate', fixture)
+      expect(bad.status).toBe(400)
+      expect(bad.body.code).toBe('E4004')
+      const points = await (await fetch(`${base}/v1/points`)).json()
+      expect(points.available).toBe(60)
+      expect(points.scope).toContain('task_reserve')
+
+      const tooBig = await post('/v1/tasks', { keywords: ['fittings'], markets: ['德国'], depth: 4, targetCount: 100 })
+      expect(tooBig.status).toBe(402)
+      expect(tooBig.body.code).toBe('E4001')
+
+      const created = await post('/v1/tasks', { keywords: ['fittings'], markets: ['德国'], depth: 1, targetCount: 10 })
+      expect(created.status).toBe(201)
+      expect(created.body.task.ledger.reserved).toBe(10)
+      const aborted = await post(`/v1/tasks/${created.body.task.id}/abort`, {})
+      expect(aborted.body.task.ledger.settled).toBe('released')
+      const after = await (await fetch(`${base}/v1/points`)).json()
+      expect(after.available).toBe(60)
+
+      const health = await (await fetch(`${base}/health`)).json()
+      expect(health.version).toBe('0.5.0')
+      expect(health.points.ledgerVersion).toBe(LEDGER_VERSION)
+      expect(health.billing.auditOnlyConsumers).toContain('judge')
+      expect(health.baseline.releaseEligible).toBe(false)
+      expect(health.t0.judgeFactChain.enabled).toBe(true)
     } finally { await new Promise((resolve) => app.server.close(resolve)) }
   })
 })
