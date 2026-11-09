@@ -11,9 +11,16 @@ import { sanitizeContext } from '../protocol.mjs'
 import { createLedger, LEDGER_VERSION } from '../ledger.mjs'
 import { validateBaselineImport, BASELINE_CONTRACT_VERSION } from '../baseline.mjs'
 import { reconcileWithT0 } from '../t0.mjs'
+import {
+  createBatchPipeline, normalizeDomain, isDomain, parseCsv, validateRows,
+  buildMbox, checkExportGates, computeBounceRate, BATCH_VERSION,
+} from '../batch.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync, readFileSync } from 'node:fs'
+
+/** 版本号统一从 package.json 读取，避免每次发版漏改测试里的硬编码 */
+const PKG_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 
 const SOURCES = [
   'About: Authorized distributor for Parker and Eaton across Benelux.',
@@ -1165,7 +1172,7 @@ describe('385 家基准集标注契约 · 只校验不伪造', () => {
       expect(after.available).toBe(60)
 
       const health = await (await fetch(`${base}/health`)).json()
-      expect(health.version).toBe('0.6.0')
+      expect(health.version).toBe(PKG_VERSION)
       expect(health.points.ledgerVersion).toBe(LEDGER_VERSION)
       expect(health.billing.ledgerConsumers).toContain('judge')
       expect(health.billing.ledgerConsumers).toContain('write_email')
@@ -1426,6 +1433,189 @@ describe('评测版本 diff · v0.6.0 纯函数 / 去掉占位字符串', () => 
       const gates = await (await fetch(`${base}/v1/eval/gates`)).json()
       expect(gates.diffEndpoint).toBe('POST /v1/eval/diff')
       expect(gates.diffVersion).toBe(EVAL_DIFF_VERSION)
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+/* ================================================================= v0.7.0 批量 SDR 管道 */
+const BATCH_SENDER = {
+  name: 'Wu Jiaqi', email: 'sales@example.com', company: 'Example Trading Co',
+  postalAddress: 'Room 301, 12 Industrial Road, Shenzhen, China',
+  unsubscribe: 'Reply STOP to unsubscribe / 退订',
+}
+const batchFooter = () => [BATCH_SENDER.name, BATCH_SENDER.company, BATCH_SENDER.postalAddress, BATCH_SENDER.unsubscribe].join(' | ')
+const validDraft = (over = {}) => ({
+  domain: 'acme.example', to: 'buyer@acme.example',
+  subject: 'Hydraulic fittings supply',
+  body: 'We noticed your company distributes industrial fittings across Benelux. We manufacture hydraulic hose fittings and can share our current catalogue and lead times. Would a short specification sheet be useful for your team this quarter?',
+  grade: 'B', sender: BATCH_SENDER, footer: batchFooter(), ...over,
+})
+const csvSample = () => [
+  'company_name,domain,source_url,fetched_at,raw_text,country,product_hint,contact_email',
+  'Acme Trading,https://WWW.Acme.example:443/about,https://acme.example/about,2026-11-09,"We import hydraulic hose fittings from Asia, Benelux stock.",Germany,hydraulic fittings,buyer@acme.example',
+  'Beta GmbH,beta.example,,,,, buyer@beta.example',
+].join('\n')
+
+describe('v0.7.0 · 批量 SDR 管道（定位不变：自动获客）', () => {
+  it('共享契约显式锁定定位与目标用户，origin 绝不写成系统采集', () => {
+    const cfg = protocol.batchPipeline
+    expect(cfg.version).toBe('batch-pipeline-v1')
+    expect(BATCH_VERSION).toBe(cfg.version)
+    expect(cfg.positioning).toBe('auto_prospecting')
+    expect(cfg.targetUser).toBe('bulk_sdr')
+    expect(cfg.stage).toBe('internal_preview')
+    expect(cfg.import.origin).toBe('user_imported')
+    expect(cfg.import.forbiddenOrigins).toContain('system_collected')
+    expect(cfg.export.exportedIsNotSent).toBe(true)
+    expect(cfg.export.forbidDirectSend).toBe(true)
+  })
+
+  it('域名规范化、CSV 引号解析与逐行校验：不静默丢数据', () => {
+    expect(normalizeDomain('https://WWW.Acme.example:443/about?x=1')).toBe('acme.example')
+    expect(isDomain('acme.example')).toBe(true)
+    expect(isDomain('not-a-domain')).toBe(false)
+    const matrix = parseCsv('a,b\n"x, y","He said ""hi"""\n')
+    expect(matrix[1]).toEqual(['x, y', 'He said "hi"'])
+
+    const v = validateRows([
+      { company_name: 'Acme', domain: 'acme.example', contact_email: 'a@acme.example' },
+      { company_name: 'Acme again', domain: 'https://www.acme.example/' },
+      { company_name: 'Fake', domain: 'fake.example', origin: 'system_collected' },
+      { company_name: 'Bad', domain: 'nope' },
+    ], { existingDomains: new Set() })
+    expect(v.summary).toEqual({ received: 4, accepted: 1, rejected: 2, duplicates: 1 })
+    expect(v.accepted[0].origin).toBe('user_imported')
+    expect(v.accepted[0].piiFields).toEqual(['contact_email'])
+    expect(v.rejected.some((r) => r.reason.includes('伪称系统采集'))).toBe(true)
+  })
+
+  it('导入 ≠ 采集：逐行结果、缺失原文标记、PII 登记，且跨实例持久化', () => {
+    const store = createMemoryStore()
+    const p = createBatchPipeline({ store, gateway: null })
+    const r = p.importCompanies({ csv: csvSample() })
+    expect(r.ok).toBe(true)
+    expect(r.origin).toBe('user_imported')
+    expect(r.summary.accepted).toBe(2)
+    const list = p.listCompanies()
+    expect(list.companies.find((c) => c.domain === 'acme.example').missingSource).toBe(false)
+    expect(list.companies.find((c) => c.domain === 'beta.example').missingSource).toBe(true)
+    expect(list.companies.find((c) => c.domain === 'acme.example').piiFields).toContain('contact_email')
+    expect(list.note).toContain('不代表系统采集结果')
+    const again = createBatchPipeline({ store, gateway: null })
+    expect(again.state().companies).toBe(2)
+  })
+
+  it('批量研判：无 provider 时 T0 真实执行但降级 E6005，不写回 judgement', async () => {
+    const store = createMemoryStore()
+    const p = createBatchPipeline({ store, gateway: null })
+    p.importCompanies({ csv: csvSample() })
+    const r = await p.runJudgeBatch({ batchSize: 5 })
+    expect(r.ok).toBe(true)
+    expect(r.summary.total).toBe(2)
+    expect(r.summary.succeeded).toBe(0)
+    expect(r.summary.degraded).toBe(2)
+    expect(r.allSucceeded).toBe(false)
+    expect(r.releaseEligible).toBe(false)
+    const acme = r.items.find((i) => i.domain === 'acme.example')
+    expect(acme.t0.used).toBe(true)
+    expect(acme.t0.extractor).toBe('rules')
+    expect(acme.modelJudgement).toBeNull()
+    expect(acme.codes).toContain('E6005')
+    expect(p.listCompanies().companies.every((c) => !c.hasJudgement)).toBe(true)
+  })
+
+  it('批量研判：注入可用 provider 才计入 succeeded 并写回判断', async () => {
+    const store = createMemoryStore()
+    const fake = { judge: async () => ({ ok: true, clientJudgement: { company_id: 'x' }, judgement: { company_id: 'x' }, billing: { charged: true } }) }
+    const p = createBatchPipeline({ store, gateway: fake })
+    p.importCompanies({ rows: [{ company_name: 'Acme', domain: 'acme.example' }] })
+    const r = await p.runJudgeBatch({})
+    expect(r.summary.succeeded).toBe(1)
+    expect(r.allSucceeded).toBe(true)
+    expect(p.listCompanies().companies[0].hasJudgement).toBe(true)
+  })
+
+  it('导出合规闸门：D 级禁发 / C 级需确认 / 尾巴缺失 / 熔断，mbox 明确未发送', () => {
+    const gates = checkExportGates([
+      validDraft({ grade: 'D' }),
+      validDraft({ grade: 'C' }),
+      validDraft({ footer: '' }),
+      validDraft(),
+    ])
+    expect(gates.allowed).toHaveLength(1)
+    expect(gates.blocked).toHaveLength(3)
+    expect(gates.blocked[0].reasons.join()).toContain('D 级')
+    expect(gates.blocked[1].reasons.join()).toContain('人工确认')
+    expect(gates.blocked[2].reasons.join()).toContain('footer')
+    const mbox = buildMbox(gates.allowed, { now: Date.UTC(2026, 10, 9) })
+    expect(mbox).toContain('X-LeadPilot-Status: drafted')
+    expect(mbox).toContain('X-LeadPilot-Origin: user_imported')
+    expect(mbox).toContain('exported-not-sent')
+    expect(mbox).toContain('unsubscribe')
+    const circuit = checkExportGates([validDraft()], { circuitOpen: true })
+    expect(circuit.allowed).toHaveLength(0)
+    expect(circuit.blocked[0].reasons.join()).toContain('熔断')
+  })
+
+  it('结果回写：不可逆终态需确认，退信率触发熔断后导出被 E4010 阻断', () => {
+    expect(computeBounceRate([]).rate).toBeNull()
+    const store = createMemoryStore()
+    const p = createBatchPipeline({ store, gateway: null })
+    p.importCompanies({ rows: [{ company_name: 'Acme', domain: 'acme.example' }] })
+    const first = p.exportDrafts({ items: [validDraft()] })
+    expect(first.ok).toBe(true)
+    expect(first.exportedIsNotSent).toBe(true)
+    expect(first.statusAfterExport).toBe('drafted')
+    expect(p.state().exportedToday).toBe(1)
+    expect(p.state().circuitOpen).toBe(false) // 导出不是发送，不进退信率
+
+    const out = p.importOutcomes({ events: [
+      { domain: 'acme.example', event: 'sent' },
+      { domain: 'acme.example', event: 'bounced' },
+      { domain: 'acme.example', event: 'unsubscribed' },
+    ] })
+    expect(out.applied).toHaveLength(2)
+    expect(out.rejected[0].reasons.join()).toContain('人工确认')
+    expect(out.state.bounce.rate).toBe(0.5)
+    expect(out.state.circuitOpen).toBe(true)
+    expect(p.exportDrafts({ items: [validDraft()] }).code).toBe('E4010')
+    expect(p.state().releaseEligible).toBe(false)
+  })
+
+  it('HTTP：导入 / 研判 / 导出 / 回写全链路，/health 如实标 releaseEligible=false', async () => {
+    const app = createApp({ store: createMemoryStore(), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    const post = (path, body) => fetch(`${base}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    try {
+      const health = await (await fetch(`${base}/health`)).json()
+      expect(health.batch.positioning).toBe('auto_prospecting')
+      expect(health.batch.releaseEligible).toBe(false)
+      expect(health.dataSources.readyCount).toBe(0)
+
+      const imp = await post('/v1/import/companies', { csv: csvSample() })
+      expect(imp.status).toBe(200)
+      expect(imp.body.origin).toBe('user_imported')
+      const judge = await post('/v1/batch/judge', { batchSize: 5 })
+      expect(judge.status).toBe(200)
+      expect(judge.body.summary.succeeded).toBe(0) // 未配 Key，绝不伪造
+      const badImport = await post('/v1/import/companies', { rows: [{ company_name: 'X', domain: 'bad' }] })
+      expect(badImport.status).toBe(400)
+      expect(badImport.body.code).toBe('E4007')
+
+      const exp = await post('/v1/export/eml', { items: [validDraft()] })
+      expect(exp.status).toBe(200)
+      expect(exp.body.exportedIsNotSent).toBe(true)
+      expect(exp.body.content).toContain('X-LeadPilot-Status: drafted')
+
+      await post('/v1/import/outcomes', { events: [
+        { domain: 'acme.example', event: 'sent' }, { domain: 'acme.example', event: 'bounced' },
+      ] })
+      const blocked = await post('/v1/export/eml', { items: [validDraft()] })
+      expect(blocked.status).toBe(423)
+      expect(blocked.body.code).toBe('E4010')
     } finally { await new Promise((resolve) => app.server.close(resolve)) }
   })
 })

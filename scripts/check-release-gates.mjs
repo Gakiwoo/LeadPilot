@@ -1,5 +1,5 @@
 /**
- * 发布门禁自检 · v0.6.0
+ * 发布门禁自检 · v0.7.0
  *
  * 目的：把「哪些能力已真实实现、哪些还没达标」变成可执行的断言，而不是文档里的一句话。
  * 这个脚本只做确定性本地检查，不启动服务、不联网、不调用任何 provider、不生成标注数据。
@@ -20,6 +20,10 @@ import { createOrchestrator } from '../server/orchestrator.mjs'
 import { validateBaselineImport } from '../server/baseline.mjs'
 import { extractFacts, reconcileWithT0 } from '../server/t0.mjs'
 import { createDataSourceRegistry } from '../server/data-sources.mjs'
+import {
+  createBatchPipeline, validateRows, checkExportGates, buildMbox,
+  computeBounceRate, normalizeDomain, BATCH_VERSION,
+} from '../server/batch.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const results = []
@@ -219,6 +223,99 @@ function walkTs(dir, out = []) {
   o.dispose()
 }
 
+// 7. v0.7.0：批量 SDR 管道不得改定位、不得伪造采集/发送，且发布门禁一条不撤
+{
+  const bp = protocol.batchPipeline
+  check('v0.7.0 产品定位锁定自动获客 / 批量 SDR，内测阶段不等于可发布',
+    BATCH_VERSION === 'batch-pipeline-v1'
+    && bp.positioning === 'auto_prospecting' && bp.targetUser === 'bulk_sdr'
+    && bp.stage === 'internal_preview' && baselineManifest().releaseEligible === false,
+    `${bp.positioning}/${bp.targetUser}/${bp.stage}`)
+
+  const rows = validateRows([
+    { company_name: 'Acme', domain: 'https://WWW.Acme.example:443/about', contact_email: 'a@acme.example' },
+    { company_name: 'Acme dup', domain: 'acme.example' },
+    { company_name: 'Fake', domain: 'fake.example', origin: 'system_collected' },
+    { company_name: 'Bad', domain: 'not-a-domain' },
+  ], { existingDomains: new Set() })
+  check('批量导入：origin 恒 user_imported，伪称系统采集与非法行被逐条拒绝且不留沉默丢弃',
+    rows.accepted.length === 1 && rows.accepted[0].origin === bp.import.origin
+    && rows.accepted[0].piiFields.includes('contact_email')
+    && rows.rejected.some((r) => r.reason.includes('伪称系统采集'))
+    && rows.duplicates.length === 1,
+    `accepted=${rows.accepted.length} rejected=${rows.rejected.length} dup=${rows.duplicates.length}`)
+  check('域名规范化去 scheme / www / 端口 / 路径',
+    normalizeDomain('https://WWW.Acme.example:443/about?x=1') === 'acme.example')
+
+  const store = createMemoryStore()
+  const pipeline = createBatchPipeline({ store, gateway: null })
+  const imported = pipeline.importCompanies({ rows: [{ company_name: 'Acme', domain: 'acme.example' }] })
+  check('导入 ≠ 采集：响应带 origin 与明确说明，客户库不宣称系统抓取',
+    imported.ok && imported.origin === 'user_imported' && /导入 ≠ 采集/.test(imported.note))
+
+  const judged = await pipeline.runJudgeBatch({ batchSize: 1 })
+  check('无 provider 时批量研判如实降级，T0 规则结果不伪装成模型判断',
+    judged.ok && judged.summary.succeeded === 0 && judged.items[0].codes.includes('E6005')
+    && judged.items[0].modelJudgement === null
+    && pipeline.state().judged === 0,
+    `succeeded=${judged.summary?.succeeded} degraded=${judged.summary?.degraded}`)
+
+  const sender = {
+    name: 'Wu Jiaqi', email: 'sales@example.com', company: 'Example Trading Co',
+    postalAddress: 'Room 301, 12 Industrial Road, Shenzhen, China',
+    unsubscribe: 'Reply STOP to unsubscribe / 退订',
+  }
+  const footer = [sender.name, sender.company, sender.postalAddress, sender.unsubscribe].join(' | ')
+  const draft = (over = {}) => ({
+    domain: 'acme.example', to: 'buyer@acme.example', subject: 'Hydraulic fittings supply',
+    body: 'We noticed your company distributes industrial fittings across Benelux. We manufacture hydraulic hose fittings and can share our current catalogue and lead times. Would a short specification sheet be useful for your team this quarter?',
+    grade: 'B', sender, footer, ...over,
+  })
+  const gates = checkExportGates([draft({ grade: 'D' }), draft({ grade: 'C' }), draft({ footer: '' }), draft()])
+  check('导出闸门：D 级禁发 / C 级需逐条确认 / 合规尾巴缺失，且只放行合规草稿',
+    gates.allowed.length === 1 && gates.blocked.length === 3
+    && /D 级/.test(gates.blocked[0].reasons.join())
+    && /人工确认/.test(gates.blocked[1].reasons.join()),
+    `allowed=${gates.allowed.length} blocked=${gates.blocked.length}`)
+  const mbox = buildMbox(gates.allowed, { now: Date.UTC(2026, 10, 9) })
+  check('mbox 显式标注 drafted / user_imported / exported-not-sent，绝不冒充已发送',
+    mbox.includes('X-LeadPilot-Status: drafted')
+    && mbox.includes('X-LeadPilot-Origin: user_imported')
+    && mbox.includes('exported-not-sent'))
+
+  const exported = pipeline.exportDrafts({ items: [draft()] })
+  const outcomes = pipeline.importOutcomes({ events: [
+    { domain: 'acme.example', event: 'sent' }, { domain: 'acme.example', event: 'bounced' },
+  ] })
+  check('导出 ≠ 发送：导出不进退信率，结果回写超 3% 立即熔断并阻断后续导出',
+    exported.ok && exported.exportedIsNotSent === true
+    && pipeline.state().exportedToday === 1
+    && computeBounceRate([]).rate === null
+    && outcomes.state.bounce.rate === 0.5 && outcomes.state.circuitOpen === true
+    && pipeline.exportDrafts({ items: [draft()] }).code === 'E4010',
+    `bounce=${outcomes.state.bounce.rate} circuit=${outcomes.state.circuitOpen}`)
+
+  // 前后端白名单必须同源，避免服务端悄悄放开自动流转
+  const constants = readFileSync(join(ROOT, 'src/domain/constants.ts'), 'utf8')
+  const stateMachine = readFileSync(join(ROOT, 'src/domain/state-machine.ts'), 'utf8')
+  const autoList = constants.match(/AUTOMATIC_TRANSITIONS[^=]*=\s*\[([^\]]+)\]/)?.[1]
+    ?.split(',').map((s) => s.replace(/['"\s]/g, '')).filter(Boolean) ?? []
+  const autoEvent = Object.fromEntries(
+    [...stateMachine.matchAll(/^\s*(\w+):\s*'(\w+)'/gm)].map((m) => [m[1], m[2]]),
+  )
+  const serverMap = bp.outcomes.autoTransitions
+  check('服务端自动流转白名单与前端 state-machine / constants 完全一致',
+    autoList.length === 4 && autoList.every((s) => Object.values(serverMap).includes(s))
+    && Object.entries(serverMap).every(([k, v]) => autoEvent[k] === v),
+    `front=[${autoList.join(',')}] server=[${Object.values(serverMap).join(',')}]`)
+
+  const pm = readFileSync(join(ROOT, 'docs/PM-REVIEW.md'), 'utf8')
+  check('Go / No-Go 四条外部判据一条未撤（标注员 / OAuth / 数据源合同 / EV 签名）',
+    /385 家基准集标注启动/.test(pm) && /OAuth/.test(pm)
+    && /数据源合同/.test(pm) && /EV 签名/.test(pm)
+    && bp.export.forbidDirectSend === true)
+}
+
 const width = Math.max(...results.map((r) => r.name.length))
 for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)
 console.log(`\n${results.length - failed}/${results.length} gate self-checks passed`)
@@ -233,6 +330,7 @@ const blockers = [
 console.log('\n发布门禁状态：releaseBlocked = true')
 for (const b of blockers) console.log(`  BLOCKED  ${b}`)
 console.log('说明：以上为「尚未达标」，不是失败。自检全绿只证明边界没被伪造，不证明产品可发布。')
+console.log('v0.7.0 补充：批量 SDR 管道定位仍为 auto_prospecting，当前阶段 internal_preview（内测可跑）。四项外部依赖从「阻塞研发」重分类为「发布门禁」，判据本身一条未撤。')
 
 if (failed) {
   console.error(`\nGATE FAILED：${failed} 项自检断言失败，CI 必须红。`)

@@ -16,6 +16,7 @@ import { createStore } from './store.mjs'
 import { createLedger, LEDGER_VERSION } from './ledger.mjs'
 import { extractFacts, T0_RULES_VERSION } from './t0.mjs'
 import { createDataSourceRegistry } from './data-sources.mjs'
+import { createBatchPipeline, BATCH_VERSION } from './batch.mjs'
 import {
   contract as baselineContract, BASELINE_CONTRACT_VERSION,
   validateBaselineImport, checkLabeledBaseline,
@@ -45,6 +46,8 @@ export function createApp(opts = {}) {
   const gateway = opts.gateway ?? createGateway({ store, ledger })
   const dataSources = opts.dataSources ?? opts.orchestratorOptions?.dataSources ?? createDataSourceRegistry()
   const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store, ledger, dataSources })
+  // v0.7.0 批量 SDR 管道：与编排器共用同一 store / gateway / ledger，避免两本账
+  const batch = opts.batch ?? createBatchPipeline({ store, gateway })
   // 允许测试注入独立的安全上下文，不污染进程级默认值
   const sec = { ...DEFAULT_SECURITY, ...(opts.security ?? {}) }
   const hits = new Map() // ip -> { count, resetAt }
@@ -166,7 +169,7 @@ export function createApp(opts = {}) {
     try {
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.6.0',
+          ok: true, service: 'leadpilot-cloud', version: '0.7.0',
           gateway: gateway.health(),
           orchestrator: (() => {
             const list = orchestrator.listTasks()
@@ -218,6 +221,16 @@ export function createApp(opts = {}) {
           dataSources: (() => {
             const d = dataSources.health()
             return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
+          })(),
+          batch: (() => {
+            const b = batch.state()
+            return {
+              version: BATCH_VERSION, positioning: b.positioning, targetUser: b.targetUser,
+              stage: b.stage, companies: b.companies, judged: b.judged,
+              exportedToday: b.exportedToday, circuitOpen: b.circuitOpen,
+              bounce: b.bounce, releaseEligible: false,
+              note: '定位仍为自动获客；批量导入是批量 SDR 的线索投喂通道，origin=user_imported，导入≠采集。外部依赖重分类为发布门禁，releaseEligible 恒 false。',
+            }
           })(),
           demo: gateway.health().mode === 'unconfigured-demo',
         })
@@ -276,6 +289,37 @@ export function createApp(opts = {}) {
           note: '只读接口。账本覆盖云端任务与网关真实调用的预扣/结算/释放；未注入账本的独立网关才只产出审计估值。',
         })
       }
+      // ---- v0.7.0 批量 SDR 管道 ------------------------------------------------
+      // 定位仍为「自动获客」：导入是批量 SDR 的线索投喂通道，绝不写成系统采集。
+      if (method === 'GET' && path === '/v1/batch/health') return json(res, 200, batch.state())
+      if (method === 'GET' && path === '/v1/import/companies') return json(res, 200, batch.listCompanies())
+
+      if (method === 'POST' && path === '/v1/import/companies') {
+        const body = await readBody(req)
+        const result = batch.importCompanies(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+
+      if (method === 'POST' && path === '/v1/batch/judge') {
+        const body = await readBody(req)
+        const result = await batch.runJudgeBatch(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+
+      if (method === 'POST' && path === '/v1/export/eml') {
+        const body = await readBody(req)
+        const result = batch.exportDrafts(body)
+        const status = result.ok ? 200 : result.code === 'E4010' ? 423 : 400
+        return json(res, status, result)
+      }
+
+      if (method === 'POST' && path === '/v1/import/outcomes') {
+        const body = await readBody(req)
+        const result = batch.importOutcomes(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+      // -------------------------------------------------------------------------
+
       if (method === 'GET' && path === '/v1/tasks') return json(res, 200, { tasks: orchestrator.listTasks() })
 
       if (method === 'POST' && path === '/v1/judge') {
@@ -370,7 +414,7 @@ export function createApp(opts = {}) {
     }
   })
 
-  return { server, gateway, orchestrator, store, ledger }
+  return { server, gateway, orchestrator, store, ledger, batch }
 }
 
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

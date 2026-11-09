@@ -190,6 +190,59 @@
     "measurementLossIsRegression": true,
     "$releaseNote": "diff 通过 ≠ 可发布。385 家人工标注集、双标独立与数据源沙箱仍为外部阻断项，releaseEligible 恒为 false。"
   },
+  "batchPipeline": {
+    "$comment": "v0.7.0 产品定位仍为「自动获客」，目标用户为批量 SDR。批量导入是这类用户既有的线索投喂通道（展会名录 / 海关导出 / CRM 存量），不是把产品降为「研判提效」，也绝不能说成系统自动采集。自动化的对象是批量补全 → 批量研判 → 批量出信 → 批量触达与回写，而非凭空发现公司。",
+    "version": "batch-pipeline-v1",
+    "positioning": "auto_prospecting",
+    "targetUser": "bulk_sdr",
+    "stage": "internal_preview",
+    "$stageNote": "内测可跑 ≠ 可正式发布。四项外部依赖从「阻塞研发」重分类为「发布门禁」：385 家标注集、数据源合同/沙箱、Google OAuth / CASA Tier 2、EV 代码签名。releaseEligible 恒为 false，Go / No-Go 四条判据一条不撤。",
+    "import": {
+      "endpoint": "POST /v1/import/companies",
+      "origin": "user_imported",
+      "forbiddenOrigins": ["system_collected", "auto_collected", "scraped", "crawled"],
+      "maxRows": 500,
+      "maxTextChars": 20000,
+      "maxRequestBytes": 262144,
+      "requiredFields": ["company_name", "domain"],
+      "sourceEvidence": "source_url + fetched_at + raw_text 三件套齐备才进入 T0 事实链；缺失时显式标 missing_source，不拿演示文本补齐",
+      "piiPolicy": "联系人邮箱 / 姓名允许本地持久化（客户库本来就存），但必须登记在 piiFields 并在发往模型前剥离；assertNoPii 是硬闸门",
+      "dedupe": "规范化域名（去 scheme / userinfo / www / 端口 / 路径 / 尾点，小写）后去重；批内与库内重复都计入 duplicates",
+      "noSilentDrop": "逐行返回 rowIndex + reason，单行失败不影响整批，绝不静默丢数据"
+    },
+    "judge": {
+      "endpoint": "POST /v1/batch/judge",
+      "batchSizeDefault": 20,
+      "batchSizeMax": 50,
+      "t0First": true,
+      "piiStripBeforeModel": true,
+      "modelRequired": "未配 provider / 未锁快照时如实返回 E6005 / E6008；T0 规则事实可以产出，但不得伪装成模型判断，也不得计入 succeeded",
+      "aggregation": "succeeded / degraded / failed 分桶，逐条带 code 与 reason；degraded 一律不写回 judgement",
+      "idempotency": "requestId = batchId:domain，复用网关计费幂等键，重复调用不二次扣点"
+    },
+    "export": {
+      "endpoint": "POST /v1/export/eml",
+      "format": "mbox",
+      "exportedIsNotSent": true,
+      "statusAfterExport": "drafted",
+      "forbidDirectSend": true,
+      "grades": { "A": "allowed", "B": "allowed", "C": "requires_single_confirmation", "D": "forbidden" },
+      "footerPolicy": "调用方提供结构化身份（name / email / company / postalAddress / unsubscribe）与 footer 文本；email 进 From 头，其余四项必须出现在 footer 中。服务端只校验存在性，绝不代生成、绝不代存身份信息",
+      "draftExportDailyLimit": 100,
+      "bounceCircuitThreshold": 0.03,
+      "$limitNote": "100 封/日沿用 PRD 的个人邮箱安全余量；此处约束的是「草稿导出」而非「发送」，不得把导出计数说成已发送量。"
+    },
+    "outcomes": {
+      "endpoint": "POST /v1/import/outcomes",
+      "autoTransitions": { "draft_created": "drafted", "email_sent": "sent", "hard_bounce": "bounced", "reply_detected": "replied" },
+      "allowedEvents": ["sent", "bounced", "replied", "unsubscribed", "invalid"],
+      "terminalStatuses": ["unsubscribed", "invalid"],
+      "requiresConfirmation": ["unsubscribed", "invalid"],
+      "bounceWindow": 100,
+      "bounceFormula": "bounced / (sent + bounced)，窗口内累计；样本为 0 时 rate=null，不伪造 0%",
+      "releaseGate": "bounceRate > 0.03 → circuitOpen=true，后续草稿导出返回 423 E4010"
+    }
+  },
   "errorCodes": {
     "E6001": "provider 超时", "E6002": "限流", "E6003": "schema 校验失败",
     "E6004": "证据校验不通过", "E6005": "全部 provider 不可用（降级模式）",
@@ -201,7 +254,11 @@
     "E4003": "账本状态非法（无活跃预扣却结算/重复释放）",
     "E4004": "385 家基准集标注导入校验失败",
     "E4005": "网关调用计费幂等键已结算，拒绝重复调用与重复扣点",
-    "E4006": "评测版本 diff 输入非法（缺少有效的两次评测归档）"
+    "E4006": "评测版本 diff 输入非法（缺少有效的两次评测归档）",
+    "E4007": "批量线索导入校验失败（无可接受行 / 行数据不合法 / 伪称系统采集）",
+    "E4008": "批量研判输入非法（批次大小越界 / 无待研判公司）",
+    "E4009": "草稿导出被合规闸门拒绝（D 级禁发 / C 级未确认 / 正文或尾巴不合规 / 超额）",
+    "E4010": "发送结果回写非法或熔断中（状态流转不允许 / 不可逆终态 / 退信率超阈值）"
   },
   "piiExclusion": {
     "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",

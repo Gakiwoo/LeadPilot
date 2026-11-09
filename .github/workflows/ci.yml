@@ -38,10 +38,11 @@ jobs:
             src/domain/scoring.ts src/services/adapters.ts src/services/gateway-client.ts \
             src/store/useAppStore.ts src/types/index.ts \
             src/components/developer/ExecutionView.tsx src/components/settings/SettingsView.tsx \
+            src/components/outreach/OutreachView.tsx src/components/outreach/BatchPipelinePanel.tsx \
             shared/model-protocol.json shared/baseline-contract.json \
             server/index.mjs server/store.mjs server/t0.mjs server/data-sources.mjs \
             server/ledger.mjs server/baseline.mjs server/eval.mjs server/protocol.mjs \
-            server/gateway.mjs server/orchestrator.mjs \
+            server/gateway.mjs server/orchestrator.mjs server/batch.mjs \
             scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh \
             scripts/check-release-gates.mjs scripts/validate-baseline.mjs \
             scripts/fixtures/invalid-baseline-sample.json; do

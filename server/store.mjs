@@ -74,6 +74,8 @@ export function createMemoryStore(opts = {}) {
   const tasks = new Map()
   const cache = new Map()
   const ledgerState = emptyLedgerState()
+  const companyRecords = new Map()
+  let outcomes = []
   let audit = []
   return {
     mode: 'memory',
@@ -93,8 +95,15 @@ export function createMemoryStore(opts = {}) {
     cacheStats() { return { entries: cache.size } },
     auditAppend(entry) { audit.push(clone(entry)); if (audit.length > 2000) audit.shift() },
     auditList(limit = 500) { return audit.slice(-limit).map(clone) },
+    // v0.7.0 批量 SDR 管道：导入的客户库与发送结果事件
+    companyUpsert(domain, payload) { companyRecords.set(domain, clone(payload)) },
+    companyGet(domain) { return clone(companyRecords.get(domain) ?? null) },
+    companyList() { return [...companyRecords.values()].map(clone) },
+    companyDelete(domain) { companyRecords.delete(domain) },
+    outcomeAppend(entry) { outcomes.push(clone(entry)); if (outcomes.length > 10000) outcomes.shift() },
+    outcomeList(limit = 500) { return outcomes.slice(-limit).map(clone) },
     close() {
-      tasks.clear(); cache.clear(); audit = []
+      tasks.clear(); cache.clear(); audit = []; outcomes = []; companyRecords.clear()
       Object.assign(ledgerState, emptyLedgerState())
     },
   }
@@ -128,6 +137,14 @@ function createSqliteStore(opts) {
       at INTEGER NOT NULL, meta TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_entries(ref_id);
+    CREATE TABLE IF NOT EXISTS companies (
+      domain TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL,
+      event TEXT NOT NULL, payload TEXT NOT NULL, at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_outcomes_at ON outcomes(at);
   `)
   const q = {
     taskUpsert: db.prepare('INSERT INTO tasks(id,payload,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at'),
@@ -148,6 +165,12 @@ function createSqliteStore(opts) {
     ledgerAllEntries: db.prepare('SELECT * FROM ledger_entries ORDER BY id DESC LIMIT ?'),
     ledgerAccountCount: db.prepare('SELECT COUNT(*) AS c FROM ledger_accounts'),
     ledgerEntryCount: db.prepare('SELECT COUNT(*) AS c FROM ledger_entries'),
+    companyUpsert: db.prepare('INSERT INTO companies(domain,payload,updated_at) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at'),
+    companyGet: db.prepare('SELECT payload FROM companies WHERE domain = ?'),
+    companyList: db.prepare('SELECT payload FROM companies ORDER BY updated_at ASC'),
+    companyDelete: db.prepare('DELETE FROM companies WHERE domain = ?'),
+    outcomeAdd: db.prepare('INSERT INTO outcomes(domain,event,payload,at) VALUES(?,?,?,?)'),
+    outcomeList: db.prepare('SELECT payload FROM outcomes ORDER BY id DESC LIMIT ?'),
   }
   const parse = (row) => { try { return JSON.parse(row.payload) } catch { return null } }
   const parseEntry = (row) => {
@@ -214,6 +237,14 @@ function createSqliteStore(opts) {
     cacheStats() { return { entries: Number(q.cacheCount.get()?.c ?? 0) } },
     auditAppend(entry) { q.auditAdd.run(JSON.stringify(entry), now()) },
     auditList(limit = 500) { return q.auditList.all(limit).map(parse).filter(Boolean).reverse() },
+    companyUpsert(domain, payload) { q.companyUpsert.run(domain, JSON.stringify(payload), now()) },
+    companyGet(domain) { const row = q.companyGet.get(domain); return row ? parse(row) : null },
+    companyList() { return q.companyList.all().map(parse).filter(Boolean) },
+    companyDelete(domain) { q.companyDelete.run(domain) },
+    outcomeAppend(entry) {
+      q.outcomeAdd.run(String(entry.domain ?? ''), String(entry.event ?? ''), JSON.stringify(entry), Number(entry.at ?? now()))
+    },
+    outcomeList(limit = 500) { return q.outcomeList.all(limit).map(parse).filter(Boolean).reverse() },
     close() { db.close() },
   }
 }
@@ -221,13 +252,14 @@ function createSqliteStore(opts) {
 function createJsonStore(opts) {
   const { filePath, now } = opts
   const abs = resolve(filePath)
-  let state = { tasks: {}, cache: {}, audit: [], ...emptyLedgerState() }
+  let state = { tasks: {}, cache: {}, audit: [], companies: {}, outcomes: [], ...emptyLedgerState() }
   if (existsSync(abs)) {
     try {
       const loaded = JSON.parse(readFileSync(abs, 'utf8'))
       const ledger = emptyLedgerState()
       state = {
         tasks: loaded.tasks ?? {}, cache: loaded.cache ?? {}, audit: loaded.audit ?? [],
+        companies: loaded.companies ?? {}, outcomes: loaded.outcomes ?? [],
         ledgerAccounts: loaded.ledgerAccounts ?? ledger.ledgerAccounts,
         ledgerEntries: loaded.ledgerEntries ?? ledger.ledgerEntries,
         ledgerIdem: loaded.ledgerIdem ?? ledger.ledgerIdem,
@@ -266,6 +298,16 @@ function createJsonStore(opts) {
       flush()
     },
     auditList(limit = 500) { return state.audit.slice(-limit).map(clone) },
+    companyUpsert(domain, payload) { state.companies[domain] = clone(payload); flush() },
+    companyGet(domain) { return clone(state.companies[domain] ?? null) },
+    companyList() { return Object.values(state.companies).map(clone) },
+    companyDelete(domain) { delete state.companies[domain]; flush() },
+    outcomeAppend(entry) {
+      state.outcomes.push(clone(entry))
+      if (state.outcomes.length > 10000) state.outcomes.shift()
+      flush()
+    },
+    outcomeList(limit = 500) { return state.outcomes.slice(-limit).map(clone) },
     close() { flush() },
   }
 }

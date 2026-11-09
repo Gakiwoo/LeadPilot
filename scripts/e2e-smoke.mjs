@@ -337,6 +337,72 @@ async function main() {
   check('调用审计记录元数据（含降级）', entries.length > 0 && entries.every((e) => !('prompt' in e)),
     `entries=${entries.length} last=${entries.at(-1)?.taskType ?? 'n/a'}/${entries.at(-1)?.code ?? 'ok'}`)
 
+  // ---- v0.7.0 批量 SDR 管道（定位仍为自动获客）--------------------------------
+  const batchHealth = await req('/v1/batch/health')
+  check('/health 与 /v1/batch/health 如实暴露内测定位，且 releaseEligible 恒 false',
+    batchHealth.status === 200
+    && health.body?.batch?.positioning === 'auto_prospecting'
+    && health.body?.batch?.releaseEligible === false
+    && batchHealth.body?.stage === 'internal_preview'
+    && batchHealth.body?.releaseEligible === false,
+    `companies=${batchHealth.body?.companies} circuit=${batchHealth.body?.circuitOpen}`)
+
+  const smokeDomain = `smoke-${Date.now()}.example`
+  const imp = await post('/v1/import/companies', { rows: [
+    { company_name: 'Smoke Trading', domain: smokeDomain, source_url: `https://${smokeDomain}/about`, fetched_at: '2026-11-09', raw_text: 'We import hydraulic hose fittings from Asia.' },
+    { company_name: 'Bad row', domain: 'not-a-domain' },
+  ] })
+  check('批量导入：origin=user_imported，坏行逐条拒绝且不影响整批',
+    imp.status === 200 && imp.body?.origin === 'user_imported'
+    && imp.body?.summary?.accepted === 1 && imp.body?.summary?.rejected === 1
+    && /导入 ≠ 采集/.test(imp.body?.note ?? ''),
+    `status=${imp.status} accepted=${imp.body?.summary?.accepted} rejected=${imp.body?.summary?.rejected}`)
+
+  const listed = await req('/v1/import/companies')
+  check('导入清单可查且明确声明「不代表系统采集结果」',
+    listed.status === 200 && listed.body?.companies?.some((c) => c.domain === smokeDomain)
+    && /不代表系统采集结果/.test(listed.body?.note ?? ''),
+    `count=${listed.body?.count}`)
+
+  const batchJudge = await post('/v1/batch/judge', { domains: [smokeDomain] })
+  check('批量研判端点返回逐条分桶，T0 规则事实链已执行且不解除发布门禁',
+    batchJudge.status === 200 && batchJudge.body?.summary?.total === 1
+    && batchJudge.body?.items?.[0]?.t0?.used === true
+    && batchJudge.body?.releaseEligible === false,
+    `succeeded=${batchJudge.body?.summary?.succeeded} degraded=${batchJudge.body?.summary?.degraded}`)
+
+  const sender = {
+    name: 'Smoke Sender', email: 'smoke@example.com', company: 'Smoke Trading Co',
+    postalAddress: '1 Industrial Road, Shenzhen, China',
+    unsubscribe: 'Reply STOP to unsubscribe / 退订',
+  }
+  const footer = [sender.name, sender.company, sender.postalAddress, sender.unsubscribe].join(' | ')
+  const draftItem = {
+    domain: smokeDomain, to: `buyer@${smokeDomain}`, subject: 'Hydraulic fittings supply',
+    body: 'We noticed your company distributes industrial fittings across Benelux. We manufacture hydraulic hose fittings and can share our current catalogue and lead times. Would a short specification sheet be useful for your team this quarter?',
+    grade: 'B', sender, footer,
+  }
+  const exp = await post('/v1/export/eml', { items: [draftItem, { ...draftItem, grade: 'D' }] })
+  const circuitWasOpen = batchHealth.body?.circuitOpen === true
+  check('草稿导出：合规草稿放行 / D 级禁发，导出 ≠ 发送（熔断时如实 423 E4010）',
+    circuitWasOpen
+      ? exp.status === 423 && exp.body?.code === 'E4010'
+      : exp.status === 200 && exp.body?.count === 1 && exp.body?.blocked?.length === 1
+        && exp.body?.exportedIsNotSent === true && exp.body?.statusAfterExport === 'drafted'
+        && /X-LeadPilot-Status: drafted/.test(exp.body?.content ?? '')
+        && /D 级/.test(exp.body?.blocked?.[0]?.reasons?.join('') ?? ''),
+    `status=${exp.status} count=${exp.body?.count ?? 0} circuit=${circuitWasOpen}`)
+
+  const outcomes = await post('/v1/import/outcomes', { events: [
+    { domain: smokeDomain, event: 'replied' },
+    { domain: smokeDomain, event: 'unsubscribed' },
+  ] })
+  check('结果回写：自动白名单放行，不可逆终态未确认时明确拒绝',
+    outcomes.status === 200 && outcomes.body?.applied?.length === 1
+    && outcomes.body?.applied?.[0]?.event === 'replied'
+    && outcomes.body?.rejected?.[0]?.reasons?.join('')?.includes('人工确认') === true,
+    `applied=${outcomes.body?.applied?.length} rejected=${outcomes.body?.rejected?.length}`)
+
   const width = Math.max(...results.map((r) => r.name.length))
   for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)
   console.log(`\n${results.length - failures}/${results.length} checks passed · base=${BASE}`)

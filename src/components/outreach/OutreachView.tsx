@@ -3,6 +3,7 @@ import { AlertTriangle, FileText, Gauge, Mail, ShieldAlert, ShieldCheck } from '
 import { assertNoBatchSend, checkSendGates, type SendGateResult } from '@/domain/compliance'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, DemoBanner, EmptyState, SectionTitle, StatTile, StatusBadge } from '@/components/ui'
+import BatchPipelinePanel from './BatchPipelinePanel'
 
 export default function OutreachView() {
   const companies = useAppStore((s) => s.companies)
@@ -31,7 +32,9 @@ export default function OutreachView() {
 
   return (
     <div className="space-y-3">
-      <DemoBanner text="草稿队列保存在本地，未调用 Gmail API；直接发送属 V1 范围（需 CASA Tier 2 与 gmail.send restricted scope）。" />
+      <DemoBanner text="草稿队列保存在本地，未调用 Gmail API；直接发送属 V1 范围（需 CASA Tier 2 与 gmail.send restricted scope）。内测期用下方批量管道导出 mbox 草稿，导出 ≠ 发送。" />
+
+      <BatchPipelinePanel />
 
       <div className="grid grid-cols-4 gap-3">
         <StatTile label="今日已发 / 额度" value={`${settings.gmail.sentToday} / ${settings.gmail.dailyLimit}`} sub="个人 Gmail 上限 500，产品默认 100 留安全余量" />
@@ -48,7 +51,7 @@ export default function OutreachView() {
             <p><strong>为什么 MVP 不直接发送：</strong>gmail.send 属 restricted scope，需通过 CASA Tier 2 年度安全评估（4–8 周、数千美元/年）；新账号直接自动发信会打穿域名信誉。MVP 交付「一键建好草稿，用户点开 Gmail 自己按发送」。</p>
           </div>
           <div className="mt-3 flex items-center gap-1.5">
-            <Button size="sm" onClick={() => showToast('演示模式：OAuth PKCE + loopback 回调待接入真实 Google 凭据', 'warn')}>模拟接入 Gmail</Button>
+            <Button size="sm" onClick={() => showToast('内测期请用上方「批量 SDR 管道」导出 mbox 草稿；OAuth PKCE / CASA Tier 2 仍是正式发布门禁，未接入', 'warn')}>内测导出通道说明</Button>
             <Button size="sm" variant="soft" onClick={() => openComposer(companies[0]?.id ?? null)}>先看草稿，暂不授权</Button>
             <span className="ml-auto text-[10px] text-muted">F5 · P0</span>
           </div>

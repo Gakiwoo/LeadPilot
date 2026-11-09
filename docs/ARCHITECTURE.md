@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.6.0 · 2026-11-08（ADR-023–026 为本次新增）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.7.0 · 2026-11-09（ADR-027–030 为本次新增）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -304,6 +304,43 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **决策**：`actions/checkout@v4 → v5`、`actions/setup-node@v4 → v5`，消除 Node 20 弃用提示；`node-version: '22'` 保持不变，与 `node:sqlite` 持久化基线一致。干净检出清单补入此前漏列的 `server/gateway.mjs` / `server/orchestrator.mjs` / `src/store/useAppStore.ts` / `src/types/index.ts` 与两个关键视图组件——v0.3.0 的 `data/` 教训说明「本地全绿」不等于「仓库可构建」，清单必须覆盖所有会被 import 的关键源码。
 
 **边界**：`ubuntu-latest` 的镜像迁移属于 GitHub 平台侧，不锁定镜像版本；依赖漏洞分级维持 ADR-018 结论，不在本轮跨 major 升级 Vite / Vitest。
+
+## ADR-027 · 定位锁定「自动获客」，批量导入是投喂通道而非形态降级
+
+**背景**：v0.6.0 后曾评估用「用户自带 CSV / 官网原文」替代数据源采购，并把产品降为「研判提效」以绕开 4 项外部依赖。用户拍板：**定位不变，目标用户为批量 SDR**。
+
+**决策**：
+- `shared/model-protocol.json` 顶层新增 `batchPipeline`，显式固化 `positioning: "auto_prospecting"`、`targetUser: "bulk_sdr"`、`stage: "internal_preview"`，并由 `npm run gate` 断言，防止后续迭代悄悄漂移到另一个产品。
+- 批量 SDR 手上的展会名录 / 海关导出 / CRM 存量本来就是线索来源，**导入是标准入口，不是「替我找」的替代品**。自动化对象是「批量补全 → 批量研判 → 批量出信 → 批量触达与回写」。
+- `origin` 恒为 `user_imported`；出现 `system_collected` / `auto_collected` / `scraped` / `crawled` 的行直接拒绝（400 `E4007`）。`GET /v1/import/companies` 的响应固定带「不代表系统采集结果」。
+- 数据源 `0/6` 仍由 `/health.dataSources` 单独如实上报；本管道不发起任何抓取、不写 `system_collected`。
+
+**边界**：四项外部依赖（385 家标注集、数据源合同/沙箱、OAuth + CASA Tier 2、EV 签名）从「阻塞研发」重分类为**「发布门禁」**——研发可以先跑内测拿真实反馈，但判据本身一条未撤，`releaseEligible` 恒 `false`。这是**排期口径**变化，不是定位变化，也不是「可发布」。`docs/PM-REVIEW.md` 第七节 Go / No-Go 四条判据原文保留，新增第十三节说明重分类。
+
+## ADR-028 · 导入 ≠ 采集，导出 ≠ 发送；合规尾巴由调用方注入
+
+**决策**：
+- `server/batch.mjs` 的导入路径：CSV 引号/CRLF/BOM 解析 → 域名规范化（去 scheme / userinfo / www / 端口 / 路径 / 尾点）→ 批内与库内去重 → 逐行 `accepted/rejected/duplicates` 带 `rowIndex + reason`，单行失败不拖垮整批。缺少 `source_url + fetched_at + raw_text` 三件套的行标 `missingSource`，**不拿演示文本补齐、不进 T0 事实链**。
+- 联系人邮箱 / 姓名允许本地持久化（客户库本来就存），但登记 `piiFields`，且 `stripPiiForModel()` 只输出 `domain/country/productHint/sourceMode`；`assertNoPii` 仍是发往 provider 前的硬闸门。**本地存储 ≠ 外发模型**。
+- 导出选 **mbox**：零依赖、单文件、主流邮件客户端可导入，天然适合批量。响应固定带 `exportedIsNotSent: true` 与 `statusAfterExport: "drafted"`，文件头写 `X-LeadPilot-Status: drafted` / `X-LeadPilot-Origin: user_imported` / `X-LeadPilot-Note: exported-not-sent`。
+- 合规闸门：D 级禁发、C 级需逐条 `confirmed`、正文走 `validateEmailDraft`（禁词/字数/占位符）、`sender` 五项身份字段齐全且 footer 必须包含 name/company/postalAddress/unsubscribe、每日草稿导出 100 封上限。**footer 由调用方在本地注入，服务端只校验存在性，不代生成、不落库**。
+- 导出事件记 `event: 'exported'`，只用于日限计数，**不进入退信率分子/分母，绝不把导出量说成已发送量**。
+
+**边界**：不调用任何邮件 API，不提供「批量直接发送」（`forbidDirectSend: true`），状态不自动置 `sent`。OAuth / CASA 仍是正式发布门禁。
+
+## ADR-029 · 批量研判降级不进成功桶，熔断用真实事件而非估算
+
+**决策**：
+- `POST /v1/batch/judge` 对每条记录先跑 `extractFacts()`（确定性规则、不联网、不调模型），再调真实 `gateway.judge()`，`requestId = batchId:domain` 复用网关计费幂等键。
+- 结果按 `succeeded / degraded / failed` 分桶；`E6005`（无 provider）/ `E6008`（未锁快照）/ `needsConsent` 一律 `degraded`，`modelJudgement` 保持 `null`，**不写回 `companies.judgement`**。T0 事实可以交付，但响应必须写明「规则事实不是模型结论」。
+- 发送结果回写只放行 `sent / bounced / replied`，`unsubscribed / invalid` 需逐条 `confirmed` 且为不可逆终态；服务端白名单与前端 `AUTOMATIC_TRANSITIONS` / `AUTO_EVENT` 由 `npm run gate` 做静态一致性断言，杜绝两端漂移。
+- 退信率取最近 100 条 `sent/bounced` 事件，`rate = bounced / (sent + bounced)`；**样本为 0 时返回 `null`，不伪造 0%**；`> 0.03` 置 `circuitOpen=true`，后续导出返回 423 `E4010`。
+
+## ADR-030 · 客户库与结果事件纳入统一持久化，且不污染 AC-03
+
+**决策**：`server/store.mjs` 三种实现（sqlite / json / memory）统一新增 `companyUpsert/companyGet/companyList/companyDelete` 与 `outcomeAppend/outcomeList`；SQLite 新增 `companies` / `outcomes` 两张表并对 `outcomes.at` 建索引。批量管道与编排器**共用同一 store / gateway / ledger**，不产生第二本账。
+
+**边界**：`companies` 只存调用方导入的线索与研判结果；`outcomes` 只存事件元数据，不存邮件正文、不存发件人身份。AC-03 的任务游标 / 账本恢复路径不变，`npm run verify:restart` 在新增两张表后仍全链路 PASS。
 
 ---
 

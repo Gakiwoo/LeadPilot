@@ -431,3 +431,113 @@ export async function getGatewayDiagnostics(): Promise<GatewayDiagnostics | null
     return null
   }
 }
+
+/* ------------------------------------------------------------------ v0.7.0 批量 SDR 管道 */
+/**
+ * 定位仍是「自动获客」：CSV 是批量 SDR 既有的线索投喂通道，不是产品形态降级。
+ * 服务端一律标 origin=user_imported；导入 ≠ 采集，导出 ≠ 发送。
+ */
+export interface BatchSummary { received: number; accepted: number; rejected: number; duplicates: number }
+export interface BatchImportResult {
+  ok: boolean; code?: string; errors?: string[]; version?: string; origin?: string
+  summary?: BatchSummary
+  rejected?: { rowIndex: number; reason: string }[]
+  duplicates?: { rowIndex: number; domain: string; reason: string }[]
+  companies?: { domain: string; companyName: string; missingSource: boolean }[]
+  partial?: boolean; note?: string
+}
+export interface ImportedCompany {
+  domain: string; companyName: string; country: string; status: string
+  missingSource: boolean; hasJudgement: boolean; piiFields: string[]
+}
+export interface BatchJudgeResult {
+  ok: boolean; code?: string; reason?: string; batchId?: string
+  summary?: { total: number; succeeded: number; degraded: number; failed: number }
+  items?: {
+    domain: string; bucket: 'succeeded' | 'degraded' | 'failed'; missingSource: boolean
+    t0: { used: boolean; reason?: string; rulesVersion?: string; evidenceCount?: number; coverage?: unknown }
+    modelJudgement: unknown | null; codes: string[]; reason: string; note: string
+  }[]
+  allSucceeded?: boolean; releaseEligible?: boolean; note?: string
+}
+export interface DraftSender {
+  name: string; email: string; company: string; postalAddress: string; unsubscribe: string
+}
+export interface ExportDraftItem {
+  domain: string; to: string; subject: string; body: string
+  grade: 'A' | 'B' | 'C' | 'D'; confirmed?: boolean
+  sender: DraftSender; footer: string
+}
+export interface ExportDraftsResult {
+  ok: boolean; code?: string; reason?: string; errors?: string[]
+  format?: 'mbox'; filename?: string; content?: string; count?: number
+  blocked?: { index: number; domain: string | null; code: string; reasons: string[] }[]
+  statusAfterExport?: string; exportedIsNotSent?: boolean
+  note?: string; disclaimer?: string
+}
+export interface BatchState {
+  ok?: boolean; version?: string; positioning?: string; targetUser?: string; stage?: string
+  companies?: number; judged?: number; exportedToday?: number; circuitOpen?: boolean
+  bounce?: { sent: number; bounced: number; rate: number | null; sampleSize: number; threshold: number }
+  draftExportDailyLimit?: number; releaseEligible?: boolean
+}
+export interface OutcomeResult {
+  ok: boolean; code?: string; reason?: string
+  applied?: { domain: string; event: string; from: string; to: string }[]
+  rejected?: { index: number; domain: string; event: string; code: string; reasons: string[] }[]
+  state?: BatchState; note?: string
+}
+
+const offlineBatch = <T>(code = 'E6005'): T => ({ ok: false, code, reason: '云端批量管道不可达：请启动 npm run cloud' } as T)
+
+export async function importCompanies(payload: { csv: string } | { rows: Record<string, string>[] }): Promise<BatchImportResult> {
+  try {
+    return await jsonFetch<BatchImportResult>('/v1/import/companies', { method: 'POST', body: JSON.stringify(payload) }, 15000)
+  } catch { return offlineBatch<BatchImportResult>() }
+}
+
+export async function listImportedCompanies(): Promise<{ ok: boolean; count: number; companies: ImportedCompany[]; note?: string }> {
+  try {
+    return await jsonFetch('/v1/import/companies', undefined, 5000)
+  } catch { return { ok: false, count: 0, companies: [], note: '云端批量管道不可达' } }
+}
+
+export async function runJudgeBatch(payload: { batchSize?: number; domains?: string[] } = {}): Promise<BatchJudgeResult> {
+  try {
+    return await jsonFetch<BatchJudgeResult>('/v1/batch/judge', { method: 'POST', body: JSON.stringify(payload) }, 60000)
+  } catch { return offlineBatch<BatchJudgeResult>() }
+}
+
+export async function exportDrafts(payload: { items: ExportDraftItem[] }): Promise<ExportDraftsResult> {
+  try {
+    return await jsonFetch<ExportDraftsResult>('/v1/export/eml', { method: 'POST', body: JSON.stringify(payload) }, 15000)
+  } catch { return offlineBatch<ExportDraftsResult>() }
+}
+
+export async function importOutcomes(payload: {
+  events: { domain: string; event: 'sent' | 'bounced' | 'replied' | 'unsubscribed' | 'invalid'; confirmed?: boolean; operator?: string }[]
+}): Promise<OutcomeResult> {
+  try {
+    return await jsonFetch<OutcomeResult>('/v1/import/outcomes', { method: 'POST', body: JSON.stringify(payload) }, 10000)
+  } catch { return offlineBatch<OutcomeResult>() }
+}
+
+export async function getBatchHealth(): Promise<BatchState> {
+  try { return await jsonFetch<BatchState>('/v1/batch/health', undefined, 3000) }
+  catch { return { ...offlineBatch<BatchState>(), releaseEligible: false } }
+}
+
+/** 由调用方在本地拼装合规尾巴；服务端只校验存在性，不代生成、不代存 */
+export function buildComplianceFooter(sender: DraftSender): string {
+  return `${sender.name} · ${sender.company}\n${sender.postalAddress}\n${sender.unsubscribe}`
+}
+
+/** 触发浏览器下载，纯前端动作；不代表已发送 */
+export function downloadMbox(filename: string, content: string): void {
+  const blob = new Blob([content], { type: 'application/mbox;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = filename
+  document.body.appendChild(a); a.click(); a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
