@@ -200,7 +200,8 @@ docs/
 - `npm run gate` 新增前后端白名单一致性静态断言：`AUTOMATIC_TRANSITIONS` / `AUTO_EVENT` 与 `batchPipeline.outcomes.autoTransitions` 必须完全一致。
 - 历史专项（v0.6.0，仍全绿）：网关计费 9 个单测、评测 diff 8 个单测、并发队列 FIFO 与硬超时计时。
 - CI 干净检出清单补入 `server/batch.mjs` / `src/components/outreach/BatchPipelinePanel.tsx` / `OutreachView.tsx`；CI action 保持 `checkout@v5` / `setup-node@v5`。
-- 历史记录：v0.6.0 对应 run `42560588202` 全绿（38 s，15 步）；提交 `8d46f69` → `5791544`。
+- CI：**v0.7.0 对应 run `42592728273` 全链路全绿（29 s，15 步全 ✓）**，含干净检出、门禁、AC-03 重启与 42 项冒烟。
+- 提交链：`662a7ac feat(batch) …（v0.7.0，18 文件 / +1490 −44）` → CI `42592728273` 全绿；历史 v0.6.0 为 `8d46f69` → `5791544` / run `42560588202`。
 - 安全活体（v0.3.0 记录）：`HOST=0.0.0.0` 无 token / `CORS=*` → 启动前置拒绝；启用 token 后 401 `E6009` / Bearer 200 / 非白名单 Origin 不回显。
 
 > **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地文件都在，所以 typecheck/build/test 全绿；CI 从 git 干净检出时报 `TS2307`。现改为 `/data/` 锚定仓库根，并加 CI 检查。**结论：本地全绿不等于仓库可构建。**
