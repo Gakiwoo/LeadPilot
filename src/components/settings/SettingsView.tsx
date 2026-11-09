@@ -115,7 +115,7 @@ export default function SettingsView() {
                 <SectionTitle title="成本、评测与合规" desc="9.4 / 9.5 / 11.4 的工程纪律" />
                 <div className="grid grid-cols-3 gap-3 text-[11px]">
                   <div className="rounded-lg border border-line p-3"><p className="font-medium text-ink">单任务成本（L2/200）</p><p className="mt-1 text-[18px] font-semibold text-emerald-600">≈ ¥9.9</p><p className="mt-1 leading-4 text-muted">三级路由方案 B；全 GPT-5 约 ¥80，差 8 倍。路由不是优化项，是订阅制的生死线。</p></div>
-                  <div className="rounded-lg border border-line p-3"><p className="font-medium text-ink">上线门槛</p><p className="mt-1 text-[18px] font-semibold text-brand-600">≥ 385 家</p><p className="mt-1 leading-4 text-muted">人工标注基准集；Provenance ≥ 95%、Kappa ≥ 0.65、Rule Compliance 100%，任一 P0 不达标阻断发布。</p></div>
+                  <div className="rounded-lg border border-line p-3"><p className="font-medium text-ink">上线门槛</p><p className="mt-1 text-[18px] font-semibold text-brand-600">integrity + outcome</p><p className="mt-1 leading-4 text-muted">v0.8.0 不做人工标注：可溯源率 ≥ 95%、Rule Compliance 100%、证据逐字可核验 ≥ 95%、真实退信率 ≤ 3%；无真实样本返回 NO_DATA，且不宣称准确率。</p></div>
                   <div className="rounded-lg border border-line p-3"><p className="font-medium text-ink">数据出境</p><p className="mt-1 text-[13px] font-semibold text-ink">{region.group === 'domestic' ? '默认境内组' : '境外需同意'}</p><p className="mt-1 leading-4 text-muted">{region.reason}。EU/EEA/UK 客户 T0/T1 强制境内，T2 默认拒绝。</p></div>
                 </div>
                 <div className="mt-4 space-y-1 border-t border-line pt-3">
@@ -199,7 +199,7 @@ export default function SettingsView() {
                     { label: '可用点数', value: gateway?.points ? `${gateway.points.available} / ${gateway.points.granted}` : '—' },
                     { label: '预扣中 / 已结算', value: gateway?.points ? `${gateway.points.held} / ${gateway.points.spent}` : '—' },
                     { label: '账本流水', value: gateway?.points ? `${gateway.points.entries} 条 · ${gateway.points.persistence}` : '—' },
-                    { label: '385 家基准集', value: gateway?.baseline ? `${gateway.baseline.importStatus} · ${gateway.baseline.requiredSize} 家` : '—' },
+                    { label: '标注契约（legacy）', value: gateway?.baseline ? `${gateway.baseline.contractStatus ?? 'legacy'} · 不做 385` : '—' },
                   ].map((x) => (
                     <div key={x.label} className="rounded-lg border border-line bg-canvas p-3">
                       <p className="text-[10px] text-muted">{x.label}</p>
@@ -239,9 +239,9 @@ export default function SettingsView() {
                   </p>
                   <p className="flex flex-wrap items-center gap-1.5">
                     <LockKeyhole size={12} className="text-slate-500" />
-                    基准集契约：
-                    <Badge tone="amber">{gateway?.baseline?.contractVersion ?? '—'}</Badge>
-                    <span>导入校验通过 ≠ 评测通过；releaseEligible 当前恒为 false，无标注时评测返回 NO_DATA。</span>
+                    评测口径：
+                    <Badge tone="emerald">integrity + outcome</Badge>
+                    <span>v0.8.0 决策不做人工标注：完整性 / 可溯源 / 一致性 + 真实退信率；无真实样本返回 NO_DATA，accuracyClaim 恒 false。</span>
                   </p>
                 </div>
               </Card>
@@ -287,10 +287,10 @@ export default function SettingsView() {
               </Card>
 
               <Card className="p-5">
-                <SectionTitle title="发布评测门禁" desc="385 家人工标注基准集；P0 任一不达标阻断发布，没有标注数据就返回 NO_DATA" extra={<Badge tone="rose">P0 阻断项</Badge>} />
+                <SectionTitle title="发布评测门禁" desc="v0.8.0：不做 385 家人工标注；口径为 integrity + outcome。P0 任一不达标阻断内测，没有真实样本就返回 NO_DATA" extra={<Badge tone="rose">P0 阻断项</Badge>} />
                 <div className="grid grid-cols-3 gap-2 text-[11px]">
-                  {(diag?.gates?.p0 ?? []).map((k) => {
-                    const m = diag?.gates?.metrics[k]
+                  {(diag?.gates?.integrityGate?.p0 ?? diag?.gates?.p0 ?? []).map((k) => {
+                    const m = diag?.gates?.integrityGate?.metrics?.[k] ?? diag?.gates?.metrics[k]
                     return (
                       <div key={k} className="rounded-lg border border-line p-2.5">
                         <p className="font-medium text-ink">{m?.name ?? k}</p>
@@ -300,13 +300,16 @@ export default function SettingsView() {
                   })}
                   {!diag?.gates && <p className="text-muted">评测门禁配置不可读（云端服务离线）。</p>}
                 </div>
+                <p className="mt-2 text-[11px] text-muted">
+                  outcome 门禁：硬退信率 ≤ 3%（P0）· 回复率仅观测；样本不足返回 NO_DATA / INSUFFICIENT，永不生成准确率断言。
+                </p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <Button size="sm" onClick={async () => {
                     const r = await runEvalGate([])
                     setEvalResult(r)
-                    showToast(r.status === 'NO_DATA' ? '没有标注样本：门禁返回 NO_DATA，不编造通过' : `门禁结果：${r.status}`, r.ok ? 'ok' : 'warn')
-                  }}><CloudCog size={12} /> 以空样本试跑门禁</Button>
-                  <span className="text-[11px] text-muted">基准集规模 {diag?.gates?.baselineSize ?? 385} 家 · {diag?.gates ? `${Object.keys(diag.gates.metrics).length} 项指标` : '指标不可读'}</span>
+                    showToast(r.status === 'NO_DATA' ? '没有真实样本：门禁返回 NO_DATA，不编造通过' : `门禁结果：${r.status}`, r.ok ? 'ok' : 'warn')
+                  }}><CloudCog size={12} /> 以空样本试跑 legacy 门禁</Button>
+                  <span className="text-[11px] text-muted">integrity 指标 {diag?.gates?.integrityGate ? Object.keys(diag.gates.integrityGate.metrics).length : '—'} 项 · outcome 2 项 · 不宣称准确率</span>
                 </div>
                 {evalResult && (
                   <p className={`mt-2 rounded-lg border px-3 py-2 text-[11px] leading-4 ${evalResult.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>

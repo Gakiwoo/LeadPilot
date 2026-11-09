@@ -166,7 +166,7 @@
     "$complianceNote": "真实发件人身份、物理地址与退订尾巴由代码注入，绝不交给模型（PRD F6-5 / CAN-SPAM）。"
   },
   "evalGates": {
-    "$comment": "PRD 9.5.2 八项评测指标；P0 任一不达标阻断发布。",
+    "$comment": "PRD 9.5.2 八项评测指标与 legacy 标注 P0 门禁；v0.8.0 决策后，当前阻断口径以 integrity / outcome 为准，本块仅保留 legacy 标注路径与 diff 指标定义。",
     "baselineSize": 385,
     "baselineComposition": "8 种客户类型全覆盖 · 有/无海关数据市场各半 · S/M/L/XL 各档 · 15% 疑似同行 + 10% 空壳负样本",
     "p0": ["provenance_rate", "signal_precision", "rule_compliance"],
@@ -179,6 +179,63 @@
       "spearman_rho": { "name": "Spearman ρ（连续）", "threshold": 0.75, "direction": ">=" },
       "schema_pass_rate": { "name": "Schema 合法率", "threshold": 0.99, "direction": ">=" },
       "refusal_rate": { "name": "拒答率", "threshold": 0.05, "direction": "<=" }
+    },
+    "integrity": {
+      "$comment": "v0.8.0 决策（用户拍板）：不做 385 家人工标注基准集。评测口径改为 integrity + outcome 三类零人工证据：①代码可算的完整性 / 可溯源 / 合规；②同一输入跨运行一致性；③用户真实发送后的退信率。本门禁不对准确率作任何断言，accuracyClaim 恒 false；无真实样本时返回 NO_DATA，绝不拿合成样本凑 PASSED。",
+      "version": "integrity-gate-v1",
+      "mode": "integrity+outcome",
+      "labelsRequired": false,
+      "accuracyClaim": false,
+      "accuracyClaimForbiddenPatterns": [
+        "准确率\\s*[≥>]\\s*\\d",
+        "准确率\\s*\\d{1,3}\\s*%",
+        "accuracy\\s*[≥>]\\s*0\\.\\d",
+        "Kappa\\s*[≥>]\\s*0\\.\\d"
+      ],
+      "minSamples": 100,
+      "consistency": {
+        "minRuns": 2,
+        "threshold": 0.98,
+        "$comment": "同一输入重复运行的结果一致率；只证明可复现，不做任何跨模型准确率推断。"
+      },
+      "p0": ["provenance_rate", "rule_compliance", "schema_pass_rate", "evidence_quote_rate"],
+      "metrics": {
+        "provenance_rate": { "name": "可溯源率", "threshold": 0.95, "direction": ">=" },
+        "rule_compliance": { "name": "规则遵从率", "threshold": 1.0, "direction": ">=" },
+        "schema_pass_rate": { "name": "Schema 合法率", "threshold": 0.99, "direction": ">=" },
+        "evidence_quote_rate": { "name": "证据逐字可核验率", "threshold": 0.95, "direction": ">=" },
+        "refusal_rate": { "name": "拒答率", "threshold": 0.05, "direction": "<=" }
+      },
+      "$noLabelNote": "不要求任何人工标注；它证明「没编造、没违规、可复现」，不证明「判得准」。产品文案不得宣称准确率，由 npm run gate 静态扫描锁定。"
+    },
+    "outcome": {
+      "$comment": "v0.8.0：用用户自己的真实发送结果做外部验证（客观、无需标注）。退信率是硬指标；回复率仅观测、不阻断。样本不足返回 NO_DATA / INSUFFICIENT，不伪造。",
+      "version": "outcome-gate-v1",
+      "labelsRequired": false,
+      "minSamples": 30,
+      "windowSize": 100,
+      "metrics": {
+        "bounce_rate": { "name": "硬退信率", "threshold": 0.03, "direction": "<=", "p0": true },
+        "reply_rate": { "name": "回复率", "threshold": 0.02, "direction": ">=", "p0": false }
+      }
+    },
+    "releasePolicy": {
+      "version": "release-policy-v2",
+      "$comment": "v0.8.0：正式发布仍需 provider 快照、OAuth/CASA、EV 签名与法务意见；「385 标注集」与「商业数据源采购」两项已由用户决策取消，不再作为阻断项，改为 legacy 契约与用户投喂 + 用户指定抓取。releaseEligible 只表示具备外部验证证据，当前恒 false；accuracyClaim 永远 false。",
+      "internalPreviewReady": "integrity P0 全绿且样本数 ≥ minSamples",
+      "externalValidated": "outcome P0 全绿且样本数 ≥ minSamples",
+      "releaseEligible": false,
+      "accuracyClaim": false,
+      "remainingExternalBlockers": [
+        "provider 模型快照未注入（未锁即 E6008）",
+        "Google OAuth / CASA Tier 2 未开始",
+        "EV 代码签名 / 安装包未开始",
+        "PIPL / GDPR 与数据源授权法律意见未取得"
+      ],
+      "droppedByDecision": [
+        "385 家人工标注基准集（legacy 契约保留、不参与判定）",
+        "商业数据源采购（保持 0/6，改为用户投喂 + 用户指定抓取）"
+      ]
     }
   },
   "evalDiff": {
@@ -188,7 +245,7 @@
     "noBaselineStatus": "NO_BASELINE",
     "regressionPolicy": "P0 数值下降 / 跨过阈值转失败 / 已测量变未测量，任一命中即判 regression；上一版 PASSED 而本次非 PASSED 也算门禁回退",
     "measurementLossIsRegression": true,
-    "$releaseNote": "diff 通过 ≠ 可发布。385 家人工标注集、双标独立与数据源沙箱仍为外部阻断项，releaseEligible 恒为 false。"
+    "$releaseNote": "diff 通过 ≠ 可发布。v0.8.0 决策后 385 标注与商业数据源不再是阻断项；releaseEligible 仍恒 false，剩余外部阻断项见 evalGates.releasePolicy.remainingExternalBlockers。"
   },
   "batchPipeline": {
     "$comment": "v0.7.0 产品定位仍为「自动获客」，目标用户为批量 SDR。批量导入是这类用户既有的线索投喂通道（展会名录 / 海关导出 / CRM 存量），不是把产品降为「研判提效」，也绝不能说成系统自动采集。自动化的对象是批量补全 → 批量研判 → 批量出信 → 批量触达与回写，而非凭空发现公司。",
@@ -196,7 +253,7 @@
     "positioning": "auto_prospecting",
     "targetUser": "bulk_sdr",
     "stage": "internal_preview",
-    "$stageNote": "内测可跑 ≠ 可正式发布。四项外部依赖从「阻塞研发」重分类为「发布门禁」：385 家标注集、数据源合同/沙箱、Google OAuth / CASA Tier 2、EV 代码签名。releaseEligible 恒为 false，Go / No-Go 四条判据一条不撤。",
+    "$stageNote": "内测可跑 ≠ 可正式发布。v0.8.0 决策后 385 家标注集与商业数据源采购两项**已取消**（标注契约降级 legacy、数据源保持 0/6 改为用户投喂 + 用户指定抓取）；剩余外部依赖重分类为发布门禁：Google OAuth / CASA Tier 2、EV 代码签名、provider 模型快照、法务意见。releaseEligible 恒为 false，accuracyClaim 恒为 false。",
     "import": {
       "endpoint": "POST /v1/import/companies",
       "origin": "user_imported",
@@ -243,6 +300,36 @@
       "releaseGate": "bounceRate > 0.03 → circuitOpen=true，后续草稿导出返回 423 E4010"
     }
   },
+  "fetchPolicy": {
+    "$comment": "v0.9.0 · 用户指定 URL 抓取器（ADR-032）。只抓调用方显式指定的 URL：不发现、不爬全站、不猜地址；robots 遵从、每域限速、超时与大小上限、拒绝私网/回环地址（SSRF）。抓到的原文进入 T0 → judge，输出 origin=user_directed_fetch，绝不写成 system_collected。它不属于 6 类商业数据源，单独计数。",
+    "version": "user-directed-fetch-v1",
+    "origin": "user_directed_fetch",
+    "forbiddenOrigins": ["system_collected", "auto_collected", "scraped", "crawled"],
+    "respectRobots": true,
+    "timeoutMs": 8000,
+    "maxBytes": 524288,
+    "maxTextChars": 20000,
+    "maxRedirects": 3,
+    "maxUrlChars": 2048,
+    "perDomainMinIntervalMs": 1000,
+    "maxUrlsPerRequest": 10,
+    "maxUrlsPerBatch": 50,
+    "robots": {
+      "userAgent": "LeadPilotBot/0.9 (+user-directed fetch; https://github.com/Gakiwoo/LeadPilot)",
+      "cacheMs": 3600000,
+      "maxBytes": 65536,
+      "$note": "robots.txt 404/410 视为放行；401/403 与命中 Disallow 视为禁止（E4013）；网络失败/5xx 放行但显式标注 unavailable。"
+    },
+    "allowedContentTypes": ["text/html", "application/xhtml+xml", "text/plain"],
+    "ssrf": {
+      "blockLoopback": true,
+      "blockPrivate": true,
+      "blockLinkLocal": true,
+      "blockMetadataHosts": true,
+      "$note": "URL 主机名解析出的任一地址落在回环/私网/link-local/保留段即拒绝（E4011），绝不发起请求。"
+    },
+    "$boundaryNote": "抓取失败逐条如实降级为 missing_source，不生成任何公司事实、不拿演示文本补齐。抓取 ≠ 采集：商业 6 类源仍 0/6。"
+  },
   "errorCodes": {
     "E6001": "provider 超时", "E6002": "限流", "E6003": "schema 校验失败",
     "E6004": "证据校验不通过", "E6005": "全部 provider 不可用（降级模式）",
@@ -252,13 +339,16 @@
     "E4001": "点数不足（预扣超出可用余额）",
     "E4002": "账本幂等键冲突（同一 key 携带不同金额）",
     "E4003": "账本状态非法（无活跃预扣却结算/重复释放）",
-    "E4004": "385 家基准集标注导入校验失败",
+    "E4004": "legacy 385 家基准集标注导入校验失败（v0.8.0 起不参与发布判定）",
     "E4005": "网关调用计费幂等键已结算，拒绝重复调用与重复扣点",
     "E4006": "评测版本 diff 输入非法（缺少有效的两次评测归档）",
     "E4007": "批量线索导入校验失败（无可接受行 / 行数据不合法 / 伪称系统采集）",
     "E4008": "批量研判输入非法（批次大小越界 / 无待研判公司）",
     "E4009": "草稿导出被合规闸门拒绝（D 级禁发 / C 级未确认 / 正文或尾巴不合规 / 超额）",
-    "E4010": "发送结果回写非法或熔断中（状态流转不允许 / 不可逆终态 / 退信率超阈值）"
+    "E4010": "发送结果回写非法或熔断中（状态流转不允许 / 不可逆终态 / 退信率超阈值）",
+    "E4011": "抓取地址被拒绝（非 http(s) / 带凭据 / 私网回环 / 超长 URL / SSRF 防护命中）",
+    "E4012": "抓取失败（DNS / 超时 / 重定向过多 / HTTP 错误 / 内容类型不支持 / 响应过大）",
+    "E4013": "robots.txt 禁止抓取该路径（用户指定 URL 也不例外）"
   },
   "piiExclusion": {
     "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",

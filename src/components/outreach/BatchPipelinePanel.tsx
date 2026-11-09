@@ -11,9 +11,9 @@ import { Badge, Button, Card, SectionTitle } from '@/components/ui'
 import { useAppStore } from '@/store/useAppStore'
 import {
   importCompanies, runJudgeBatch, exportDrafts, getBatchHealth,
-  buildComplianceFooter, downloadMbox,
+  fetchCompanySources, buildComplianceFooter, downloadMbox,
   type BatchImportResult, type BatchJudgeResult, type ExportDraftsResult,
-  type DraftSender, type BatchState, type ExportDraftItem,
+  type BatchFetchSourcesResult, type DraftSender, type BatchState, type ExportDraftItem,
 } from '@/services/adapters'
 
 const CSV_HINT = `company_name,domain,source_url,fetched_at,raw_text,country,product_hint,contact_email
@@ -37,6 +37,7 @@ export default function BatchPipelinePanel() {
   const [confirmC, setConfirmC] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [imported, setImported] = useState<BatchImportResult | null>(null)
+  const [fetched, setFetched] = useState<BatchFetchSourcesResult | null>(null)
   const [judged, setJudged] = useState<BatchJudgeResult | null>(null)
   const [exported, setExported] = useState<ExportDraftsResult | null>(null)
   const [health, setHealth] = useState<BatchState | null>(null)
@@ -54,6 +55,16 @@ export default function BatchPipelinePanel() {
     const r = await importCompanies({ csv })
     setImported(r); setBusy(null); refresh()
     showToast(r.ok ? `已导入 ${r.summary?.accepted ?? 0} 家；拒绝 ${r.summary?.rejected ?? 0} / 重复 ${r.summary?.duplicates ?? 0}` : `导入失败：${r.code ?? 'E6005'}`, r.ok ? 'ok' : 'warn')
+  }
+
+  async function doFetch() {
+    setBusy('fetch')
+    const r = await fetchCompanySources({ limit: 10 })
+    setFetched(r); setBusy(null); refresh()
+    if (!r.ok) showToast(`抓取未完成：${r.code ?? 'E4012'}（${r.reason ?? '见下方明细'}）`, 'warn')
+    else if (r.summary?.failed) {
+      showToast(`已抓取 ${r.summary.fetched} 家，失败 ${r.summary.failed} 家（逐条标 missing_source，不编造原文）`, 'warn')
+    } else showToast(`已抓取 ${r.summary?.fetched ?? 0} 家官网原文；抓取 ≠ 采集，商业数据源仍 0/6`, 'ok')
   }
 
   async function doJudge() {
@@ -105,9 +116,9 @@ export default function BatchPipelinePanel() {
         {health?.circuitOpen && <Badge tone="rose">退信熔断中</Badge>}
       </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] leading-4 text-muted">
-        <span>导入 ≠ 采集：origin=user_imported，系统未抓取任何网站</span>
+        <span>导入 ≠ 采集：origin=user_imported；官网原文由你指定 URL 抓取（user_directed_fetch），仍非系统采集</span>
         <span>导出 ≠ 发送：只生成 mbox，状态不自动置 sent</span>
-        <span>数据源仍 0/6 未接入 · 385 家标注 NOT_IMPORTED</span>
+        <span>数据源仍 0/6 未接入 · 标注契约 legacy（v0.8.0 不做人工标注）</span>
         <span>云端客户库 {health?.companies ?? 0} 家 · 已研判 {health?.judged ?? 0} 家 · 今日导出 {health?.exportedToday ?? 0}/100</span>
       </div>
 
@@ -134,10 +145,23 @@ export default function BatchPipelinePanel() {
 
         {/* Step 2 */}
         <div className="space-y-2">
-          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-ink"><Sparkles size={13} />2 · 批量研判</div>
-          <p className="h-[104px] overflow-auto rounded-lg border border-line bg-canvas px-2.5 py-2 text-[10px] leading-4 text-slate-700">
-            T0 规则事实抽取不调模型、不联网，逐字可核验；模型判断只在 provider 已配置且锁定快照时发生。未配 Key 时明确 E6005，<strong>不把降级伪装成成功</strong>。
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold text-ink"><Sparkles size={13} />2 · 抓取原文 + 批量研判</div>
+          <p className="h-[64px] overflow-auto rounded-lg border border-line bg-canvas px-2.5 py-2 text-[10px] leading-4 text-slate-700">
+            抓取只针对你导入的公司：用 CSV 里的 website/source_url（缺省 <code>https://域名</code>），robots 遵从、每域限速、拒绝私网地址；原文标 <code>user_directed_fetch</code>，<strong>不是系统采集</strong>。抓不到就标 <code>missing_source</code>，不编造原文。
           </p>
+          <Button size="sm" variant="primary" disabled={busy === 'fetch'} onClick={doFetch}>
+            {busy === 'fetch' ? '抓取中…' : '抓取缺原文公司（最多 10 家）'}
+          </Button>
+          {fetched && (
+            <div className="space-y-0.5 text-[10px] leading-4 text-muted">
+              <div>抓取成功 <strong className="text-emerald-700">{fetched.summary?.fetched ?? 0}</strong> · 失败 {fetched.summary?.failed ?? 0}{fetched.fetchVersion ? ` · ${fetched.fetchVersion}` : ''}</div>
+              {fetched.items?.slice(0, 3).map((i) => (
+                <div key={i.domain} className={i.ok ? 'text-emerald-700' : 'text-rose-700'}>
+                  {i.domain} · {i.ok ? `${i.textChars ?? 0} 字 · ${i.origin}` : `${i.code ?? 'E4012'} ${String(i.reason ?? '').slice(0, 40)}`}
+                </div>
+              ))}
+            </div>
+          )}
           <Button size="sm" disabled={busy === 'judge'} onClick={doJudge}>
             {busy === 'judge' ? '研判中…' : '研判前 20 家'}
           </Button>
@@ -187,7 +211,7 @@ export default function BatchPipelinePanel() {
 
       <div className="mt-3 flex items-start gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10px] leading-4 text-amber-900">
         <ShieldAlert size={12} className="mt-0.5 shrink-0" />
-        <span>内测边界：OAuth / CASA Tier 2、数据源合同、385 家人工标注、EV 签名仍是正式发布门禁，一条未撤。本面板不提供「批量直接发送」，批量与真发之间必须保留人的一次确认。</span>
+        <span>内测边界：OAuth / CASA Tier 2、EV 签名、provider 快照与法务意见仍是正式发布门禁；v0.8.0 决策不做 385 人工标注与商业数据源采购，评测改看 integrity + outcome 且不宣称准确率。本面板不提供「批量直接发送」，批量与真发之间必须保留人的一次确认。</span>
       </div>
     </Card>
   )

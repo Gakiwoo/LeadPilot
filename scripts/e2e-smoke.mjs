@@ -116,6 +116,29 @@ async function main() {
     ds?.total === 6 && ds?.readyCount === 0 && ds?.mode === 'demo',
     `ready=${ds?.readyCount ?? 'n/a'}/${ds?.total ?? 'n/a'} mode=${ds?.mode ?? 'n/a'}`)
 
+  // v0.9.0 用户指定 URL 抓取：单独计数，不并入商业数据源 0/6；抓取 ≠ 采集
+  const fetchHealth = await req('/v1/sources/health')
+  check('用户指定抓取器健康可读（robots 遵从 / 每域限速 / 单独计数）',
+    fetchHealth.status === 200
+    && fetchHealth.body?.version === 'user-directed-fetch-v1'
+    && fetchHealth.body?.origin === 'user_directed_fetch'
+    && fetchHealth.body?.policy?.respectRobots === true
+    && fetchHealth.body?.policy?.perDomainMinIntervalMs > 0
+    && health.body?.fetch?.version === 'user-directed-fetch-v1',
+    `version=${fetchHealth.body?.version} interval=${fetchHealth.body?.policy?.perDomainMinIntervalMs}`)
+
+  const ssrfFetch = await post('/v1/sources/fetch', { urls: ['http://127.0.0.1/secret'] })
+  check('抓取器拒绝回环地址且不发起请求（SSRF → E4011）',
+    ssrfFetch.status === 400
+    && ssrfFetch.body?.failed?.[0]?.code === 'E4011'
+    && ssrfFetch.body?.summary?.fetched === 0,
+    `status=${ssrfFetch.status} code=${ssrfFetch.body?.failed?.[0]?.code ?? 'n/a'}`)
+
+  const batchFetch = await post('/v1/batch/fetch-sources', { domains: ['no-such-domain.example'], limit: 5 })
+  check('批量抓取无候选时明确 E4008，不凭空发现公司',
+    batchFetch.status === 400 && batchFetch.body?.code === 'E4008',
+    `status=${batchFetch.status} code=${batchFetch.body?.code ?? 'n/a'}`)
+
   const gh = await req('/v1/gateway/health')
   check('网关 provider 清单可读', gh.status === 200 && Array.isArray(gh.body.providers),
     `configured=${gh.body?.configuredCount}/${gh.body?.totalProviders}`)
@@ -223,6 +246,27 @@ async function main() {
   const gates = await req('/v1/eval/gates')
   check('评测门禁清单可读', gates.status === 200 && gates.body.baselineSize === 385,
     `status=${gates.status} baseline=${gates.body?.baselineSize}`)
+
+  // v0.8.0 决策：不做 385 人工标注集，口径改为 integrity + outcome（零人工、永不宣称准确率）
+  check('v0.8.0 评测口径：标注契约 legacy、integrity + outcome、accuracyClaim=false',
+    gates.status === 200 && gates.body?.accuracyClaim === false
+    && gates.body?.labelsRequired === false
+    && gates.body?.legacy === true
+    && gates.body?.integrityGate?.gateVersion === 'integrity-gate-v1'
+    && gates.body?.outcomeGate?.gateVersion === 'outcome-gate-v1'
+    && gates.body?.release?.releaseEligible === false,
+    `mode=${gates.body?.evalMode} accuracyClaim=${gates.body?.accuracyClaim} internal=${gates.body?.release?.internalPreviewReady}`)
+
+  const integrityEmpty = await post('/v1/eval/integrity', { records: [] })
+  check('integrity 门禁无真实样本返回 NO_DATA，不拿合成样本凑通过',
+    integrityEmpty.status === 200 && integrityEmpty.body?.status === 'NO_DATA'
+    && integrityEmpty.body?.accuracyClaim === false,
+    `status=${integrityEmpty.body?.status}`)
+
+  const outcomeEmpty = await post('/v1/eval/outcome', { events: [] })
+  check('outcome 门禁无真实发送样本返回 NO_DATA，不伪造退信率',
+    outcomeEmpty.status === 200 && outcomeEmpty.body?.status === 'NO_DATA',
+    `status=${outcomeEmpty.body?.status}`)
 
   const evalRun = await post('/v1/eval/run', { results: [] })
   check('无标注样本返回 NO_DATA，不编造通过',

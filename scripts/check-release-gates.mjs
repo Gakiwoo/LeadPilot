@@ -1,13 +1,18 @@
 /**
- * 发布门禁自检 · v0.7.0
+ * 发布门禁自检 · v0.8.0
  *
  * 目的：把「哪些能力已真实实现、哪些还没达标」变成可执行的断言，而不是文档里的一句话。
  * 这个脚本只做确定性本地检查，不启动服务、不联网、不调用任何 provider、不生成标注数据。
  *
+ * v0.8.0 决策：不做 385 家人工标注基准集、不做商业数据源采购。
+ *  - 标注契约降级为 legacy（格式与校验器保留），不再作为发布前置；
+ *  - 评测口径改为 integrity + outcome（零人工），accuracyClaim 恒 false；
+ *  - 门禁会静态扫描产品文案，禁止无标注却宣称准确率。
+ *
  * 退出码：
  *  - 任何自检断言失败 → 1（CI 必须红）
- *  - 断言全绿但发布条件未满足 → 0，并明确打印 releaseBlocked=true 与阻断项
- *  - LEADPILOT_REQUIRE_BASELINE=1 时，发布条件未满足也 → 1（用于真正卡发布）
+ *  - 断言全绿但外部验证条件未满足 → 0，并明确打印 releaseBlocked=true 与阻断项
+ *  - LEADPILOT_REQUIRE_BASELINE=1 时，外部验证条件未满足也 → 1（用于真正卡发布）
  */
 import { readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -15,7 +20,11 @@ import { fileURLToPath } from 'node:url'
 import { protocol } from '../server/protocol.mjs'
 import { createLedger } from '../server/ledger.mjs'
 import { createMemoryStore, createStore } from '../server/store.mjs'
-import { evaluateBaseline, baselineManifest, diffEvalRuns } from '../server/eval.mjs'
+import {
+  evaluateBaseline, baselineManifest, diffEvalRuns,
+  evaluateIntegrity, evaluateOutcome, evaluateConsistency, releaseStatus,
+  integrityManifest, outcomeManifest,
+} from '../server/eval.mjs'
 import { createOrchestrator } from '../server/orchestrator.mjs'
 import { validateBaselineImport } from '../server/baseline.mjs'
 import { extractFacts, reconcileWithT0 } from '../server/t0.mjs'
@@ -24,6 +33,9 @@ import {
   createBatchPipeline, validateRows, checkExportGates, buildMbox,
   computeBounceRate, normalizeDomain, BATCH_VERSION,
 } from '../server/batch.mjs'
+import {
+  createFetcher, FETCH_VERSION as FETCH_GATE_VERSION, FETCH_ORIGIN as FETCH_GATE_ORIGIN,
+} from '../server/fetch.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const results = []
@@ -79,15 +91,118 @@ function walkTs(dir, out = []) {
     invalid.errors.some((e) => /样本数/.test(e)), '样本数不符必须报错')
 
   const evalEmpty = evaluateBaseline([])
-  check('无标注样本时评测返回 NO_DATA 且 ok=false',
+  check('无标注样本时 legacy 评测返回 NO_DATA 且 ok=false',
     evalEmpty.status === 'NO_DATA' && evalEmpty.ok === false)
   const manifest = baselineManifest()
-  check('基准集 manifest 如实标注 NOT_LABELED / 不可发布',
-    manifest.status === 'NOT_LABELED' && manifest.releaseEligible === false && manifest.contractVersion === 'baseline-contract-v1',
+  check('标注契约降级为 legacy：不做 385 标注也保持诚实',
+    manifest.status === 'NOT_LABELED' && manifest.releaseEligible === false
+    && manifest.contractVersion === 'baseline-contract-v1'
+    && manifest.legacy === true && manifest.labelsRequired === false && manifest.accuracyClaim === false,
     `importStatus=${manifest.importStatus}`)
   const contract = JSON.parse(readFileSync(join(ROOT, 'shared/baseline-contract.json'), 'utf8'))
-  check('契约要求 385 家且禁止研发兼任标注',
-    contract.baselineSize === 385 && contract.annotatorPolicy.developerMayAnnotate === false)
+  check('legacy 契约保留双人独立标注约束（不删除、不伪造）',
+    contract.status === 'legacy' && contract.enabled === false
+    && contract.baselineSize === 385 && contract.annotatorPolicy.developerMayAnnotate === false)
+}
+
+// 2b. v0.8.0 决策：不做人工标注集，评测口径改为 integrity + outcome（零人工、永不宣称准确率）
+{
+  const ig = integrityManifest()
+  const og = outcomeManifest()
+  check('integrity / outcome 门禁契约：零标注、不宣称准确率',
+    ig.gateVersion === 'integrity-gate-v1' && ig.labelsRequired === false
+    && ig.accuracyClaim === false && ig.minSamples >= 1
+    && og.gateVersion === 'outcome-gate-v1' && og.labelsRequired === false,
+    `${ig.gateVersion} / ${og.gateVersion}`)
+
+  const emptyIntegrity = evaluateIntegrity([])
+  check('integrity 门禁无真实证据时返回 NO_DATA，不拿合成样本凑 PASSED',
+    emptyIntegrity.status === 'NO_DATA' && emptyIntegrity.ok === false
+    && emptyIntegrity.accuracyClaim === false,
+    `status=${emptyIntegrity.status}`)
+
+  const evidence = (i) => ({
+    provenance: { matched: 1, total: 1 },
+    rules: { passed: 2, total: 2 },
+    schemaPass: true,
+    refused: false,
+    quote: `we import fittings ${i}`,
+    sourceText: `api: we import fittings ${i} from asia`,
+  })
+  const consistent = evaluateConsistency([{ a: 1 }, { b: 2 }], [{ a: 1 }, { b: 2 }])
+  const goodIntegrity = evaluateIntegrity(
+    Array.from({ length: ig.minSamples }, (_, i) => evidence(i)),
+    { consistency: consistent },
+  )
+  check('integrity 门禁：证据全核验 + 一致性达标 → PASSED（仅表示可内测）',
+    goodIntegrity.status === 'PASSED' && goodIntegrity.ok === true
+    && goodIntegrity.metrics.provenance_rate === 1
+    && goodIntegrity.metrics.evidence_quote_rate === 1
+    && goodIntegrity.accuracyClaim === false,
+    `sampleSize=${goodIntegrity.sampleSize} p0Failures=${goodIntegrity.p0Failures.length}`)
+
+  const badIntegrity = evaluateIntegrity(
+    Array.from({ length: ig.minSamples }, () => ({
+      provenance: { matched: 0, total: 1 },
+      rules: { passed: 2, total: 2 },
+      schemaPass: true,
+      refused: false,
+      quote: 'this quote is not in the source text',
+      sourceText: 'api: unrelated text',
+    })),
+    { consistency: evaluateConsistency([{ a: 1 }], [{ a: 2 }]) },
+  )
+  check('integrity 门禁：可溯源率 / 逐字核验 / 一致性失败 → BLOCKED',
+    badIntegrity.status === 'BLOCKED' && badIntegrity.ok === false
+    && badIntegrity.p0Failures.length >= 2,
+    `fails=${badIntegrity.p0Failures.join('；')}`)
+
+  const smallIntegrity = evaluateIntegrity([evidence(0)], { consistency: consistent })
+  check('integrity 门禁：样本数不足不判 PASSED（不拿小样本凑）',
+    smallIntegrity.ok === false && smallIntegrity.sampleTooSmall === true)
+
+  check('outcome 门禁无真实发送样本时返回 NO_DATA',
+    evaluateOutcome([]).status === 'NO_DATA' && evaluateOutcome([]).ok === false)
+  const sent = (n) => Array.from({ length: n }, () => 'sent')
+  const goodOutcome = evaluateOutcome([...sent(40), 'replied'])
+  check('outcome 门禁：真实退信率达标 → PASSED（只证明业务结果，不是准确率）',
+    goodOutcome.status === 'PASSED' && goodOutcome.ok === true
+    && goodOutcome.metrics.bounce_rate === 0 && goodOutcome.accuracyClaim === false)
+  const badOutcome = evaluateOutcome([...sent(40), 'bounced', 'bounced'])
+  check('outcome 门禁：退信率超 3% → BLOCKED',
+    badOutcome.status === 'BLOCKED' && badOutcome.ok === false
+    && badOutcome.p0Failures.some((f) => f.includes('硬退信率')))
+  const insufficient = evaluateOutcome(sent(10))
+  check('outcome 门禁：样本不足标 INSUFFICIENT，不宣告通过',
+    insufficient.ok === false && insufficient.status === 'INSUFFICIENT')
+
+  const release = releaseStatus({ integrity: goodIntegrity, outcome: goodOutcome })
+  check('发布状态三分离：内测可 / 外部已验证 / 正式发布仍 false，且永不宣称准确率',
+    release.internalPreviewReady === true && release.externalValidated === true
+    && release.releaseEligible === false && release.accuracyClaim === false
+    && Array.isArray(release.remainingExternalBlockers) && release.remainingExternalBlockers.length > 0,
+    `internal=${release.internalPreviewReady} external=${release.externalValidated}`)
+}
+
+// 2c. 禁止准确率宣称：没有人工标注就没有 accuracy，产品文案不得出现准确率数字断言
+{
+  const forbidden = protocol.evalGates.integrity.accuracyClaimForbiddenPatterns ?? []
+  const patterns = forbidden.map((p) => new RegExp(p))
+  const files = [
+    join(ROOT, 'README.md'),
+    ...walkTs(join(ROOT, 'src')),
+  ].filter(existsSync)
+  const offenders = []
+  for (const f of files) {
+    const text = readFileSync(f, 'utf8')
+    for (const r of patterns) {
+      const m = text.match(r)
+      if (m) { offenders.push(`${f.slice(ROOT.length + 1)}: ${m[0]}`); break }
+    }
+  }
+  check('产品文案不得宣称准确率（无标注即无准确率）',
+    offenders.length === 0,
+    offenders.length ? `违规：${offenders.join(' | ')}` : `${files.length} 个文件已扫描 · ${patterns.length} 条禁用模式`)
 }
 
 // 3. 点数账本：幂等 / 余额守恒 / 不足拒绝 / 结算释放互斥 / 跨进程恢复
@@ -183,6 +298,103 @@ function walkTs(dir, out = []) {
   check('数据源注册表如实报告 0/6 已接入',
     ds.total === 6 && ds.readyCount === 0 && ds.mode === 'demo',
     `${ds.readyCount}/${ds.total} · ${ds.mode}`)
+}
+
+// 5b. v0.9.0 用户指定 URL 抓取：robots 遵从 / 限速 / 拒绝私网 / 抓取 ≠ 采集
+{
+  const fp = protocol.fetchPolicy
+  check('抓取契约：只抓用户指定 URL、robots 遵从、每域限速、拒绝私网',
+    FETCH_GATE_VERSION === 'user-directed-fetch-v1'
+    && FETCH_GATE_ORIGIN === 'user_directed_fetch'
+    && fp.respectRobots === true
+    && fp.perDomainMinIntervalMs >= 500
+    && fp.ssrf.blockPrivate === true
+    && fp.ssrf.blockLoopback === true
+    && fp.forbiddenOrigins.includes('system_collected'),
+    `${FETCH_GATE_VERSION} · interval=${fp.perDomainMinIntervalMs}ms`)
+
+  const calls = []
+  const fakeFetch = async (url) => {
+    calls.push(String(url))
+    return new Response('User-agent: *\nDisallow: /private\n', { status: 200, headers: { 'content-type': 'text/plain' } })
+  }
+  const fetcher = createFetcher({
+    fetchImpl: fakeFetch,
+    resolveHost: async () => [{ address: '93.184.216.34', family: 4 }],
+    now: () => 1_000_000,
+    sleep: async () => {},
+  })
+  const ssrfLiteral = await fetcher.fetchOne('http://127.0.0.1/secret')
+  const ssrfLoopback = await fetcher.fetchOne('https://localhost/')
+  check('抓取器拒绝回环 / 私网地址，且不发起任何请求（SSRF）',
+    ssrfLiteral.ok === false && ssrfLiteral.code === 'E4011'
+    && ssrfLoopback.ok === false && ssrfLoopback.code === 'E4011'
+    && calls.length === 0,
+    `calls=${calls.length}`)
+
+  // robots 命中 Disallow 时禁止抓取：robots URL 返回禁止规则，目标页不应被请求
+  const robotsCalls = []
+  const robotsFetcher = createFetcher({
+    fetchImpl: async (url) => {
+      robotsCalls.push(String(url))
+      if (String(url).endsWith('/robots.txt')) {
+        return new Response('User-agent: *\nDisallow: /private\n', { status: 200, headers: { 'content-type': 'text/plain' } })
+      }
+      return new Response('<html><body>should not be fetched</body></html>', { status: 200, headers: { 'content-type': 'text/html' } })
+    },
+    resolveHost: async () => [{ address: '93.184.216.34', family: 4 }],
+    now: () => 1_000_000,
+    sleep: async () => {},
+  })
+  const blockedByRobots = await robotsFetcher.fetchOne('https://public.example/private/page')
+  check('robots.txt 命中 Disallow → E4013，目标页不被抓取',
+    blockedByRobots.ok === false && blockedByRobots.code === 'E4013'
+    && robotsCalls.length === 1 && robotsCalls[0] === 'https://public.example/robots.txt',
+    `calls=${robotsCalls.length}`)
+
+  const shown = await fetcher.fetchMany(['https://public.example/about'])
+  check('批量抓取逐条返回，成功项标 origin=user_directed_fetch（抓取 ≠ 采集）',
+    shown.origin === FETCH_GATE_ORIGIN
+    && (shown.fetched.length + shown.failed.length) === 1
+    && shown.note.includes('抓取 ≠ 采集'),
+    `fetched=${shown.fetched.length} failed=${shown.failed.length} origin=${shown.origin}`)
+
+  // 批量管道：抓取成功写回原文，公司 origin 仍是 user_imported
+  const store = createMemoryStore()
+  const pipeline = createBatchPipeline({
+    store, gateway: null,
+    fetcher: {
+      version: FETCH_GATE_VERSION,
+      origin: FETCH_GATE_ORIGIN,
+      health: () => ({ counters: { fetched: 1, failed: 0, robotsBlocked: 0, ssrfBlocked: 0, lastFetchAt: null } }),
+      fetchMany: async (urls) => ({
+        ok: true, version: FETCH_GATE_VERSION, origin: FETCH_GATE_ORIGIN,
+        fetched: [{
+          ok: true, url: new URL(urls[0]).href, finalUrl: new URL(urls[0]).href,
+          fetchedAt: '2026-11-09T00:00:00.000Z', text: 'We import hydraulic fittings.',
+          textChars: 30, hash: 'gate-hash', truncated: false, piiRemoved: 0,
+        }],
+        failed: [], summary: { requested: 1, fetched: 1, failed: 0 },
+      }),
+    },
+  })
+  pipeline.importCompanies({ rows: [{ company_name: 'Gate Acme', domain: 'gate-acme.example' }] })
+  const fetchedResult = await pipeline.fetchSources({ limit: 5 })
+  const gateCompany = store.companyGet('gate-acme.example')
+  check('批量抓取：原文标 user_directed_fetch，公司 origin 仍 user_imported（抓取 ≠ 采集）',
+    fetchedResult.ok === true && fetchedResult.sourceOrigin === FETCH_GATE_ORIGIN
+    && gateCompany.origin === 'user_imported'
+    && gateCompany.sourceOrigin === FETCH_GATE_ORIGIN
+    && String(gateCompany.rawText ?? '').includes('hydraulic')
+    && fetchedResult.note.includes('抓取 ≠ 采集'),
+    `origin=${gateCompany.origin} sourceOrigin=${gateCompany.sourceOrigin}`)
+
+  const arch = readFileSync(join(ROOT, 'docs/ARCHITECTURE.md'), 'utf8')
+  const pmDoc = readFileSync(join(ROOT, 'docs/PM-REVIEW.md'), 'utf8')
+  check('文档固化：ADR-032 + 用户指定抓取口径在场',
+    /ADR-032/.test(arch) && /user_directed_fetch/.test(arch)
+    && /用户指定/.test(pmDoc),
+    'docs/ARCHITECTURE.md · docs/PM-REVIEW.md')
 }
 
 // 6. v0.6.0：评测 diff / 并发队列必须是真实实现，不能退回占位说明
@@ -310,9 +522,12 @@ function walkTs(dir, out = []) {
     `front=[${autoList.join(',')}] server=[${Object.values(serverMap).join(',')}]`)
 
   const pm = readFileSync(join(ROOT, 'docs/PM-REVIEW.md'), 'utf8')
-  check('Go / No-Go 四条外部判据一条未撤（标注员 / OAuth / 数据源合同 / EV 签名）',
-    /385 家基准集标注启动/.test(pm) && /OAuth/.test(pm)
-    && /数据源合同/.test(pm) && /EV 签名/.test(pm)
+  check('v0.8.0 决策固化：标注集与商业数据源不做；OAuth / EV 仍是发布前置',
+    /v0\.8\.0 决策/.test(pm)
+    && /不做 385 家人工标注基准集/.test(pm)
+    && /不做商业数据源采购/.test(pm)
+    && /integrity \+ outcome/.test(pm)
+    && /OAuth/.test(pm) && /EV 签名/.test(pm)
     && bp.export.forbidDirectSend === true)
 }
 
@@ -321,23 +536,30 @@ for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name.padEnd
 console.log(`\n${results.length - failed}/${results.length} gate self-checks passed`)
 
 const ds = createDataSourceRegistry().health()
+const emptyIntegrity = evaluateIntegrity([])
+const emptyOutcome = evaluateOutcome([])
+const release = releaseStatus({ integrity: emptyIntegrity, outcome: emptyOutcome })
 const blockers = [
-  `385 家人工标注基准集：${baselineManifest().importStatus}（releaseEligible=false）`,
-  `真实数据源：${ds.readyCount}/${ds.total} 已接入`,
+  `integrity 门禁：${emptyIntegrity.status}（暂无真实原文样本，内部预览资格未验证）`,
+  `业务结果门禁：${emptyOutcome.status}（无真实发送样本，不得宣称准确率 / 回复率）`,
+  '用户指定抓取器已就绪（robots / 限速 / SSRF），但尚无真实站点抓取样本进入 integrity',
   'provider 模型快照需运行时注入 LEADPILOT_MODEL_VERSION_*（未锁即 E6008）',
-  'Google OAuth / CASA Tier 2 / 数据源采购 / 30 封真实开发信人工复核：未开始',
+  'Google OAuth / CASA Tier 2 / EV 代码签名 / PIPL·GDPR 法律意见：未开始',
 ]
-console.log('\n发布门禁状态：releaseBlocked = true')
+console.log('\n发布门禁状态：releaseBlocked = true · releaseEligible = false · accuracyClaim = false')
 for (const b of blockers) console.log(`  BLOCKED  ${b}`)
 console.log('说明：以上为「尚未达标」，不是失败。自检全绿只证明边界没被伪造，不证明产品可发布。')
-console.log('v0.7.0 补充：批量 SDR 管道定位仍为 auto_prospecting，当前阶段 internal_preview（内测可跑）。四项外部依赖从「阻塞研发」重分类为「发布门禁」，判据本身一条未撤。')
+console.log('v0.9.0 抓取：只抓用户显式指定的 URL（robots 遵从 / 每域限速 / 拒绝私网），原文标 user_directed_fetch；抓取 ≠ 采集，商业源仍 0/6。')
+console.log('v0.8.0 决策：不做 385 家人工标注基准集、不做商业数据源采购；两项已从阻断项移除（legacy 契约保留、不参与判定）。')
+console.log(`  数据源仍如实报 ${ds.readyCount}/${ds.total}（用户投喂 + 用户指定抓取是唯一来源）；评测改看 integrity + outcome，accuracyClaim 恒 false。`)
+console.log(`  internalPreviewReady=${release.internalPreviewReady} · externalValidated=${release.externalValidated}`)
 
 if (failed) {
   console.error(`\nGATE FAILED：${failed} 项自检断言失败，CI 必须红。`)
   process.exit(1)
 }
 if (process.env.LEADPILOT_REQUIRE_BASELINE === '1') {
-  console.error('\nGATE FAILED：LEADPILOT_REQUIRE_BASELINE=1 但发布阻断项未解除。')
+  console.error('\nGATE FAILED：LEADPILOT_REQUIRE_BASELINE=1 但外部验证条件未解除（integrity / outcome / provider 快照 / OAuth / EV）。')
   process.exit(1)
 }
 console.log('\nGATE OK：自检断言全绿；发布仍被上述阻断项明确卡住（符合预期）。')

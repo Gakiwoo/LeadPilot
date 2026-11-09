@@ -49,6 +49,7 @@ export interface GatewayHealth {
   }
   baseline?: {
     contractVersion: string; importStatus: string; requiredSize: number; releaseEligible: boolean
+    contractStatus?: string; labelsRequired?: boolean; accuracyClaim?: boolean
     diffEndpoint?: string; diffVersion?: string
   }
   reason?: string
@@ -396,7 +397,7 @@ export interface EvalRunResult {
   failedGates?: string[]
 }
 
-/** 无 385 家人工标注集时返回 NO_DATA，绝不编造「通过」 */
+/** legacy 评测入口：v0.8.0 决策不做人工标注，无标注样本时固定返回 NO_DATA，绝不编造「通过」 */
 export async function runEvalGate(results: unknown[] = []): Promise<EvalRunResult> {
   try {
     return await jsonFetch<EvalRunResult>('/v1/eval/run', {
@@ -415,7 +416,28 @@ export interface GatewayDiagnostics {
   }[]
   circuit: { providerKey: string; openUntil: string }[]
   cache: { entries: number; ttlDays: number }
-  gates: { baselineSize: number; metrics: Record<string, { name: string; threshold: number; direction: string }>; p0: string[] } | null
+  gates: {
+    baselineSize: number
+    metrics: Record<string, { name: string; threshold: number; direction: string }>
+    p0: string[]
+    legacy?: boolean
+    labelsRequired?: boolean
+    accuracyClaim?: boolean
+    evalMode?: string
+    integrityGate?: {
+      gateVersion: string; mode?: string; labelsRequired: boolean; accuracyClaim: boolean
+      minSamples: number; p0: string[]
+      metrics: Record<string, { name: string; threshold: number; direction: string }>
+    }
+    outcomeGate?: {
+      gateVersion: string; labelsRequired: boolean; minSamples: number; windowSize: number
+      metrics: Record<string, { name: string; threshold: number; direction: string; p0?: boolean }>
+    }
+    release?: {
+      internalPreviewReady: boolean; externalValidated: boolean
+      releaseEligible: boolean; accuracyClaim: boolean
+    }
+  } | null
 }
 
 export async function getGatewayDiagnostics(): Promise<GatewayDiagnostics | null> {
@@ -449,6 +471,7 @@ export interface BatchImportResult {
 export interface ImportedCompany {
   domain: string; companyName: string; country: string; status: string
   missingSource: boolean; hasJudgement: boolean; piiFields: string[]
+  hasSource?: boolean; sourceOrigin?: string | null; sourceUrl?: string | null
 }
 export interface BatchJudgeResult {
   ok: boolean; code?: string; reason?: string; batchId?: string
@@ -480,6 +503,47 @@ export interface BatchState {
   companies?: number; judged?: number; exportedToday?: number; circuitOpen?: boolean
   bounce?: { sent: number; bounced: number; rate: number | null; sampleSize: number; threshold: number }
   draftExportDailyLimit?: number; releaseEligible?: boolean
+  userDirectedFetch?: {
+    version?: string; origin?: string
+    counters?: { fetched: number; failed: number; robotsBlocked: number; ssrfBlocked: number; lastFetchAt?: string | null }
+    policy?: { respectRobots?: boolean; perDomainMinIntervalMs?: number; maxUrlsPerBatch?: number }
+  }
+}
+
+/* ------------------------------------------------- v0.9.0 用户指定 URL 抓取（ADR-032） */
+export interface UserDirectedFetchHealth {
+  version?: string; enabled?: boolean; origin?: string
+  policy?: {
+    version?: string; respectRobots?: boolean; timeoutMs?: number; maxBytes?: number
+    maxTextChars?: number; maxRedirects?: number; perDomainMinIntervalMs?: number
+    maxUrlsPerRequest?: number; maxUrlsPerBatch?: number
+    allowedContentTypes?: string[]; userAgent?: string
+  }
+  counters?: { fetched: number; failed: number; robotsBlocked: number; ssrfBlocked: number; lastFetchAt: string | null }
+  note?: string
+}
+export interface SourceFetchItem {
+  ok: boolean; url: string; finalUrl?: string; fetchedAt?: string
+  textChars?: number; hash?: string; truncated?: boolean; piiRemoved?: number
+  contentType?: string; redirects?: string[]
+  code?: string; reason?: string
+}
+export interface SourceFetchResult {
+  ok: boolean; code?: string; reason?: string; version?: string; origin?: string
+  fetched?: SourceFetchItem[]; failed?: SourceFetchItem[]
+  summary?: { requested: number; fetched: number; failed: number }
+  policy?: UserDirectedFetchHealth['policy']; note?: string
+}
+export interface BatchFetchSourcesResult {
+  ok: boolean; code?: string; reason?: string; version?: string; fetchVersion?: string
+  origin?: string; sourceOrigin?: string
+  summary?: { requested: number; fetched: number; failed: number }
+  items?: {
+    domain: string; url: string; ok: boolean; finalUrl?: string; fetchedAt?: string
+    textChars?: number; hash?: string; truncated?: boolean; piiRemoved?: number
+    code?: string; reason?: string; missingSource?: boolean; origin?: string
+  }[]
+  releaseEligible?: boolean; note?: string
 }
 export interface OutcomeResult {
   ok: boolean; code?: string; reason?: string
@@ -525,6 +589,25 @@ export async function importOutcomes(payload: {
 export async function getBatchHealth(): Promise<BatchState> {
   try { return await jsonFetch<BatchState>('/v1/batch/health', undefined, 3000) }
   catch { return { ...offlineBatch<BatchState>(), releaseEligible: false } }
+}
+
+export async function getSourceFetchHealth(): Promise<UserDirectedFetchHealth> {
+  try { return await jsonFetch<UserDirectedFetchHealth>('/v1/sources/health', undefined, 3000) }
+  catch { return { enabled: false, note: '云端抓取器不可达：请启动 npm run cloud' } }
+}
+
+/** 临时抓取：只由调用方显式给出 URL，不发现、不爬全站；返回逐条成功/失败，绝不编造原文 */
+export async function fetchSourceUrls(urls: string[]): Promise<SourceFetchResult> {
+  try {
+    return await jsonFetch<SourceFetchResult>('/v1/sources/fetch', { method: 'POST', body: JSON.stringify({ urls }) }, 90000)
+  } catch { return { ok: false, code: 'E4012', reason: '云端抓取器不可达：请启动 npm run cloud' } }
+}
+
+/** 批量抓取：把已导入线索缺的原文补上（origin=user_directed_fetch），抓取 ≠ 采集 */
+export async function fetchCompanySources(payload: { domains?: string[]; limit?: number } = {}): Promise<BatchFetchSourcesResult> {
+  try {
+    return await jsonFetch<BatchFetchSourcesResult>('/v1/batch/fetch-sources', { method: 'POST', body: JSON.stringify(payload) }, 120000)
+  } catch { return { ok: false, code: 'E4012', reason: '云端批量抓取不可达：请启动 npm run cloud' } }
 }
 
 /** 由调用方在本地拼装合规尾巴；服务端只校验存在性，不代生成、不代存 */

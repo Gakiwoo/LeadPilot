@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createGateway, route, regionDecision } from '../gateway.mjs'
 import { createOrchestrator } from '../orchestrator.mjs'
-import { evaluateBaseline, baselineManifest, diffEvalRuns, EVAL_DIFF_VERSION } from '../eval.mjs'
+import {
+  evaluateBaseline, baselineManifest, diffEvalRuns, EVAL_DIFF_VERSION,
+  evaluateIntegrity, evaluateOutcome, evaluateConsistency, releaseStatus,
+  integrityManifest, outcomeManifest,
+  INTEGRITY_GATE_VERSION, OUTCOME_GATE_VERSION, RELEASE_POLICY_VERSION,
+} from '../eval.mjs'
 import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft, buildJudgeMessages } from '../protocol.mjs'
 import { createApp } from '../index.mjs'
 import { createStore, createMemoryStore, sqliteAvailable } from '../store.mjs'
@@ -1616,6 +1621,172 @@ describe('v0.7.0 · 批量 SDR 管道（定位不变：自动获客）', () => {
       const blocked = await post('/v1/export/eml', { items: [validDraft()] })
       expect(blocked.status).toBe(423)
       expect(blocked.body.code).toBe('E4010')
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+/* ============================================================ v0.8.0 integrity + outcome */
+describe('v0.8.0 · 不做人工标注集：integrity + outcome 零人工评测口径', () => {
+  const evidence = (i) => ({
+    provenance: { matched: 1, total: 1 },
+    rules: { passed: 2, total: 2 },
+    schemaPass: true,
+    refused: false,
+    quote: `we import fittings ${i}`,
+    sourceText: `api: we import fittings ${i} from asia`,
+  })
+
+  it('评测契约版本与 accuracyClaim=false 固化', () => {
+    expect(INTEGRITY_GATE_VERSION).toBe('integrity-gate-v1')
+    expect(OUTCOME_GATE_VERSION).toBe('outcome-gate-v1')
+    expect(RELEASE_POLICY_VERSION).toBe('release-policy-v2')
+    expect(integrityManifest().labelsRequired).toBe(false)
+    expect(integrityManifest().accuracyClaim).toBe(false)
+    expect(outcomeManifest().labelsRequired).toBe(false)
+    expect(protocol.evalGates.integrity.accuracyClaim).toBe(false)
+    expect(protocol.evalGates.releasePolicy.releaseEligible).toBe(false)
+  })
+
+  it('legacy 标注契约降级：enabled=false 且 manifest 如实标 legacy', () => {
+    const m = baselineManifest()
+    expect(m.legacy).toBe(true)
+    expect(m.labelsRequired).toBe(false)
+    expect(m.accuracyClaim).toBe(false)
+    expect(m.evalMode).toBe('integrity+outcome')
+    expect(m.releaseEligible).toBe(false)
+    expect(m.integrityGate.gateVersion).toBe(INTEGRITY_GATE_VERSION)
+    const contract = JSON.parse(readFileSync(new URL('../../shared/baseline-contract.json', import.meta.url), 'utf8'))
+    expect(contract.status).toBe('legacy')
+    expect(contract.enabled).toBe(false)
+  })
+
+  it('integrity：无样本 NO_DATA；证据齐全 + 一致 PASSED；P0 失守 BLOCKED', () => {
+    expect(evaluateIntegrity([]).status).toBe('NO_DATA')
+    const consistent = evaluateConsistency([{ a: 1 }, { b: 2 }], [{ a: 1 }, { b: 2 }])
+    expect(consistent.ok).toBe(true)
+    expect(consistent.rate).toBe(1)
+    const good = evaluateIntegrity(
+      Array.from({ length: protocol.evalGates.integrity.minSamples }, (_, i) => evidence(i)),
+      { consistency: consistent },
+    )
+    expect(good.status).toBe('PASSED')
+    expect(good.metrics.provenance_rate).toBe(1)
+    expect(good.metrics.evidence_quote_rate).toBe(1)
+    expect(good.accuracyClaim).toBe(false)
+
+    const bad = evaluateIntegrity(
+      Array.from({ length: protocol.evalGates.integrity.minSamples }, () => ({
+        provenance: { matched: 0, total: 1 },
+        rules: { passed: 1, total: 2 },
+        schemaPass: false,
+        refused: false,
+        quote: 'not in source',
+        sourceText: 'something else',
+      })),
+      { consistency: evaluateConsistency([{ a: 1 }], [{ a: 2 }]) },
+    )
+    expect(bad.status).toBe('BLOCKED')
+    expect(bad.p0Failures.length).toBeGreaterThan(0)
+
+    const small = evaluateIntegrity([evidence(0)], { consistency: consistent })
+    expect(small.ok).toBe(false)
+    expect(small.sampleTooSmall).toBe(true)
+  })
+
+  it('outcome：无样本 NO_DATA；退信率达标 PASSED；超阈值 BLOCKED；样本不足 INSUFFICIENT', () => {
+    expect(evaluateOutcome([]).status).toBe('NO_DATA')
+    const sent = (n) => Array.from({ length: n }, () => 'sent')
+    const ok = evaluateOutcome([...sent(40), 'replied'])
+    expect(ok.status).toBe('PASSED')
+    expect(ok.metrics.bounce_rate).toBe(0)
+    expect(ok.accuracyClaim).toBe(false)
+    const bad = evaluateOutcome([...sent(40), 'bounced', 'bounced'])
+    expect(bad.status).toBe('BLOCKED')
+    expect(evaluateOutcome(sent(10)).status).toBe('INSUFFICIENT')
+  })
+
+  it('发布状态三分离：内测 / 外部验证 / 正式发布，accuracyClaim 恒 false', () => {
+    const consistent = evaluateConsistency([{ a: 1 }], [{ a: 1 }])
+    const integrity = evaluateIntegrity(
+      Array.from({ length: protocol.evalGates.integrity.minSamples }, (_, i) => evidence(i)),
+      { consistency: consistent },
+    )
+    const outcome = evaluateOutcome(Array.from({ length: 40 }, () => 'sent'))
+    const release = releaseStatus({ integrity, outcome })
+    expect(release.internalPreviewReady).toBe(true)
+    expect(release.externalValidated).toBe(true)
+    expect(release.releaseEligible).toBe(false)
+    expect(release.accuracyClaim).toBe(false)
+    expect(release.droppedByDecision.join()).toMatch(/385/)
+    expect(releaseStatus().releaseEligible).toBe(false)
+  })
+
+  it('HTTP：/v1/eval/integrity、/v1/eval/outcome 与 /v1/eval/gates 如实暴露零标注口径', async () => {
+    const app = createApp({ store: createMemoryStore(), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    const post = (path, body) => fetch(`${base}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    try {
+      const health = await (await fetch(`${base}/health`)).json()
+      expect(health.version).toBe(PKG_VERSION)
+      expect(health.evalGates.labelsRequired).toBe(false)
+      expect(health.evalGates.accuracyClaim).toBe(false)
+      expect(health.evalGates.releaseEligible).toBe(false)
+      expect(health.baseline.contractStatus).toBe('legacy')
+
+      const gates = await (await fetch(`${base}/v1/eval/gates`)).json()
+      expect(gates.accuracyClaim).toBe(false)
+      expect(gates.integrityGate.gateVersion).toBe(INTEGRITY_GATE_VERSION)
+      expect(gates.outcomeGate.gateVersion).toBe(OUTCOME_GATE_VERSION)
+
+      const integrity = await post('/v1/eval/integrity', { records: [] })
+      expect(integrity.status).toBe(200)
+      expect(integrity.body.status).toBe('NO_DATA')
+      expect(integrity.body.accuracyClaim).toBe(false)
+
+      const outcome = await post('/v1/eval/outcome', { events: [] })
+      expect(outcome.status).toBe(200)
+      expect(outcome.body.status).toBe('NO_DATA')
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+/* ==================================================== v0.9.0 用户指定 URL 抓取 */
+describe('v0.9.0 · 用户指定 URL 抓取（抓取 ≠ 采集）', () => {
+  it('HTTP：抓取器健康、SSRF 拒绝、批量无候选 E4008，商业数据源仍 0/6', async () => {
+    const app = createApp({ store: createMemoryStore(), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    const post = (path, body) => fetch(`${base}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    try {
+      const health = await (await fetch(`${base}/v1/sources/health`)).json()
+      expect(health.version).toBe('user-directed-fetch-v1')
+      expect(health.origin).toBe('user_directed_fetch')
+      expect(health.policy.respectRobots).toBe(true)
+      expect(health.counters.fetched).toBe(0)
+
+      const ssrf = await post('/v1/sources/fetch', { urls: ['http://127.0.0.1/secret', 'https://localhost/'] })
+      expect(ssrf.status).toBe(400)
+      expect(ssrf.body.failed.map((f) => f.code)).toEqual(['E4011', 'E4011'])
+      expect(ssrf.body.summary.fetched).toBe(0)
+
+      const bad = await post('/v1/sources/fetch', { urls: [] })
+      expect(bad.status).toBe(400)
+      expect(bad.body.code).toBe('E4011')
+
+      const noCandidate = await post('/v1/batch/fetch-sources', { domains: ['no-such.example'] })
+      expect(noCandidate.status).toBe(400)
+      expect(noCandidate.body.code).toBe('E4008')
+
+      const all = await (await fetch(`${base}/health`)).json()
+      expect(all.dataSources.readyCount).toBe(0)
+      expect(all.dataSources.total).toBe(6)
+      expect(all.fetch.version).toBe('user-directed-fetch-v1')
+      expect(all.batch.userDirectedFetch.origin).toBe('user_directed_fetch')
     } finally { await new Promise((resolve) => app.server.close(resolve)) }
   })
 })

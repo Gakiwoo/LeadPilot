@@ -227,7 +227,7 @@ export function validateBaselineImport(payload) {
     composition,
     annotators: { independentPairsChecked: sampleCount, conflicts: annotatorConflicts, policy: contract.annotatorPolicy },
     releaseEligible: false,
-    note: '导入校验通过 ≠ 评测通过。真实发布必须把模型预测与这 385 家人工标注配对后调用 /v1/eval/run；当前仓库不含任何标注样本。',
+    note: 'v0.8.0 决策不做 385 人工标注集，本契约降级为 legacy：导入校验通过 ≠ 评测通过，且不参与当前内测/发布判定。当前评测口径见 evalGates.integrity / outcome；仓库不含任何标注样本。',
   }
 }
 

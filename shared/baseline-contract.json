@@ -1,6 +1,10 @@
 {
-  "$comment": "PRD 9.5 / 9.5.3 · 385 家人工标注基准集的导入契约。本仓库不提供、也不得生成任何标注样本：标注必须由 2 名外贸业务背景标注员独立完成 + 第 3 人裁决，研发不得兼任。此文件只约束格式与构成，评测在未导入真实标注前恒定返回 NO_DATA。",
+  "$comment": "PRD 9.5 / 9.5.3 · 385 家人工标注基准集的导入契约。本仓库不提供、也不得生成任何标注样本：标注必须由 2 名外贸业务背景标注员独立完成 + 第 3 人裁决，研发不得兼任。此文件只约束格式与构成，评测在未导入真实标注前恒定返回 NO_DATA。v0.8.0 决策（用户拍板）后本契约降级为 legacy 通道：不做 385 标注，当前评测口径改用 shared/model-protocol.json 的 evalGates.integrity / outcome。",
   "contractVersion": "baseline-contract-v1",
+  "status": "legacy",
+  "enabled": false,
+  "decisionNote": "v0.8.0 决策：不做 385 家人工标注基准集。本契约保留作为将来可选的 legacy 通道，不参与当前内测/发布判定；标注数据若将来导入仍走同一校验器，绝不合成或补全。",
+  "activeEvalMode": "integrity+outcome",
   "baselineSize": 385,
   "baselineComposition": "8 种客户类型全覆盖 · 有/无海关数据市场各半 · S/M/L/XL 各档 · 15% 疑似同行 + 10% 空壳负样本",
   "annotatorPolicy": {

@@ -1,11 +1,13 @@
 /**
- * 385 家基准集导入校验 CLI · PRD 9.5 / ADR-020
+ * legacy 385 家基准集导入校验 CLI · PRD 9.5 / ADR-020（v0.8.0 降级为 legacy 通道）
  *
  * 用法：
  *   node scripts/validate-baseline.mjs <path-to-samples.json|jsonl|csv>
  *   node scripts/validate-baseline.mjs --self-test
  *
  * 纪律：本脚本不生成、不补全、不推断任何标注，只校验。
+ * v0.8.0 决策：不做 385 人工标注集，本通道不参与当前内测/发布判定；
+ * 当前评测口径为 integrity + outcome（见 server/eval.mjs、POST /v1/eval/integrity|outcome）。
  * 校验通过只代表「格式与构成符合契约」，不代表评测通过，更不代表可以发布。
  */
 import { readFileSync } from 'node:fs'

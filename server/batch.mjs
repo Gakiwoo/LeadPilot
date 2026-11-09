@@ -1,9 +1,11 @@
 /**
- * v0.7.0 · 批量 SDR 管道（定位仍为「自动获客」）
+ * v0.9.0 · 批量 SDR 管道（定位仍为「自动获客」）
  *
  * 产品边界（必须原样对外表达）：
  *  - 批量导入是批量 SDR 既有的线索投喂通道（展会名录 / 海关导出 / CRM 存量），
  *    origin 恒为 user_imported。**导入 ≠ 采集**，绝不写 system_collected。
+ *  - v0.9.0 新增「用户指定 URL 抓取」：把导入行缺的原文由系统代抓（origin=user_directed_fetch），
+ *    抓取失败逐条降级为 missing_source；**抓取 ≠ 采集**，商业 6 类源仍 0/6。
  *  - 自动化的对象是「批量补全 → 批量研判 → 批量出信 → 批量触达与回写」，
  *    不是「系统凭空发现公司」。数据源 0/6 仍如实上报。
  *  - 导出 mbox 是 PRD MVP 承诺的「一键建好草稿，用户自己按发送」的等价实现，
@@ -12,9 +14,11 @@
  */
 import { protocol, validateEmailDraft, sanitizeContext } from './protocol.mjs'
 import { extractFacts } from './t0.mjs'
+import { createFetcher, FETCH_VERSION } from './fetch.mjs'
 
 const CFG = protocol.batchPipeline
 export const BATCH_VERSION = CFG.version
+export const BATCH_FETCH_VERSION = FETCH_VERSION
 
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 const iso = (ms) => new Date(ms).toISOString()
@@ -307,7 +311,7 @@ export function outcomeEventsForExport(store, now = Date.now()) {
 
 /* ------------------------------------------------------------------ 管道实例 */
 
-export function createBatchPipeline({ store, gateway, now = () => Date.now() } = {}) {
+export function createBatchPipeline({ store, gateway, fetcher = createFetcher(), now = () => Date.now() } = {}) {
   if (!store) throw new Error('createBatchPipeline 需要 store')
   const batchId = () => `b${now().toString(36)}${Math.random().toString(36).slice(2, 7)}`
 
@@ -351,10 +355,107 @@ export function createBatchPipeline({ store, gateway, now = () => Date.now() } =
       count: companies().length,
       companies: companies().map((c) => ({
         domain: c.domain, companyName: c.companyName, country: c.country,
-        status: c.status, missingSource: c.missingSource,
+        status: c.status, missingSource: Boolean(c.missingSource),
+        hasSource: !c.missingSource && Boolean(String(c.rawText ?? '').trim()),
+        sourceOrigin: c.sourceOrigin ?? null,
+        sourceUrl: c.sourceUrl ?? null,
         hasJudgement: Boolean(c.judgement), piiFields: c.piiFields ?? [],
       })),
-      note: '本接口只返回调用方导入的线索，不代表系统采集结果。',
+      note: '本接口只返回调用方导入的线索，不代表系统采集结果；sourceOrigin=user_directed_fetch 表示原文由用户指定 URL 抓取。',
+    }
+  }
+
+  const normalizeUrlKey = (u) => {
+    try { return new URL(String(u)).href } catch { return String(u ?? '') }
+  }
+
+  /**
+   * v0.9.0 · 用户指定 URL 抓取（ADR-032）。
+   * 只抓已导入公司显式提供的 website / source_url（缺省 https://<domain>）：
+   * 不发现、不爬全站、不抓登录后内容；抓取成功把原文写回 company，
+   * 公司 origin 仍是 user_imported，原文来源标 user_directed_fetch；失败逐条 missing_source。
+   */
+  async function fetchSources(payload = {}) {
+    const all = companies()
+    const limit = Math.min(
+      Math.max(1, Number(payload.limit ?? 10)),
+      protocol.fetchPolicy.maxUrlsPerBatch,
+    )
+    const wanted = Array.isArray(payload.domains) && payload.domains.length
+      ? payload.domains.map(normalizeDomain).map((d) => all.find((c) => c.domain === d)).filter(Boolean)
+      : all.filter((c) => c.missingSource || !String(c.rawText ?? '').trim())
+    const selected = wanted.slice(0, limit)
+    if (!selected.length) {
+      return {
+        ok: false, code: 'E4008',
+        reason: '没有缺少原文的已导入公司：先导入线索（或这些公司已有 source_url/fetched_at/raw_text）',
+        note: '抓取不会凭空发现公司；请先 POST /v1/import/companies。',
+      }
+    }
+    const targets = selected.map((c) => {
+      const raw = String(c.website ?? c.sourceUrl ?? '').trim()
+      const url = /^https?:\/\//i.test(raw) ? raw : `https://${c.domain}`
+      return { domain: c.domain, url }
+    })
+    const batch = await fetcher.fetchMany(targets.map((t) => t.url), { maxUrlsPerRequest: targets.length })
+    const fetchedByKey = new Map((batch.fetched ?? []).map((r) => [normalizeUrlKey(r.url), r]))
+    const failedByKey = new Map((batch.failed ?? []).map((r) => [normalizeUrlKey(r.url), r]))
+    const items = []
+    for (const t of targets) {
+      const key = normalizeUrlKey(t.url)
+      const rec = store.companyGet(t.domain)
+      if (!rec) {
+        items.push({ domain: t.domain, url: t.url, ok: false, code: 'E4012', reason: '客户记录已不存在' })
+        continue
+      }
+      const hit = fetchedByKey.get(key)
+      if (hit) {
+        const at = iso(now())
+        store.companyUpsert(t.domain, {
+          ...rec,
+          website: t.url,
+          sourceUrl: hit.url,
+          fetchedAt: hit.fetchedAt,
+          rawText: hit.text,
+          sourceHash: hit.hash,
+          sourceOrigin: protocol.fetchPolicy.origin,
+          sourceFetchedAt: at,
+          missingSource: false,
+          statusLog: [...(rec.statusLog ?? []), {
+            from: rec.status, to: rec.status, at, automated: true,
+            note: `用户指定 URL 抓取 · ${hit.url}（origin=${protocol.fetchPolicy.origin}，抓取 ≠ 采集）`,
+          }],
+        })
+        items.push({
+          domain: t.domain, url: t.url, ok: true, finalUrl: hit.finalUrl,
+          fetchedAt: hit.fetchedAt, textChars: hit.textChars, hash: hit.hash,
+          truncated: hit.truncated, piiRemoved: hit.piiRemoved,
+          origin: protocol.fetchPolicy.origin,
+        })
+      } else {
+        const failed = failedByKey.get(key) ?? { code: 'E4012', reason: '抓取未返回结果' }
+        store.companyUpsert(t.domain, {
+          ...rec,
+          missingSource: true,
+          sourceFetchError: { code: failed.code ?? 'E4012', reason: String(failed.reason ?? '抓取失败'), at: iso(now()) },
+        })
+        items.push({
+          domain: t.domain, url: t.url, ok: false,
+          code: failed.code ?? 'E4012', reason: failed.reason ?? '抓取失败', missingSource: true,
+        })
+      }
+    }
+    const okCount = items.filter((x) => x.ok).length
+    return {
+      ok: okCount > 0,
+      version: BATCH_VERSION,
+      fetchVersion: FETCH_VERSION,
+      origin: CFG.import.origin,
+      sourceOrigin: protocol.fetchPolicy.origin,
+      summary: { requested: items.length, fetched: okCount, failed: items.length - okCount },
+      items,
+      releaseEligible: false,
+      note: '抓取 ≠ 采集：只抓取已导入公司显式提供的 website/source_url（缺省 https://<domain>），不发现、不爬全站、不抓登录后内容。原文 origin=user_directed_fetch，公司 origin 仍为 user_imported；失败逐条标 missing_source，不编造原文。商业 6 类数据源仍 0/6。',
     }
   }
 
@@ -447,6 +548,17 @@ export function createBatchPipeline({ store, gateway, now = () => Date.now() } =
       circuitOpen: bounce.rate !== null && bounce.rate > CFG.export.bounceCircuitThreshold,
       draftExportDailyLimit: CFG.export.draftExportDailyLimit,
       dataSourceReady: '0/6 由 /health.dataSources 单独如实上报；本管道不做采集',
+      userDirectedFetch: {
+        version: FETCH_VERSION,
+        origin: protocol.fetchPolicy.origin,
+        counters: fetcher.health().counters,
+        policy: {
+          respectRobots: protocol.fetchPolicy.respectRobots,
+          perDomainMinIntervalMs: protocol.fetchPolicy.perDomainMinIntervalMs,
+          maxUrlsPerBatch: protocol.fetchPolicy.maxUrlsPerBatch,
+        },
+        note: '用户指定 URL 抓取单独计数，不并入商业数据源 0/6；抓取 ≠ 采集。',
+      },
       releaseEligible: false,
     }
   }
@@ -524,7 +636,7 @@ export function createBatchPipeline({ store, gateway, now = () => Date.now() } =
 
   return {
     version: BATCH_VERSION,
-    importCompanies, listCompanies, runJudgeBatch,
+    importCompanies, listCompanies, fetchSources, runJudgeBatch,
     exportDrafts, importOutcomes, state, health: state,
   }
 }

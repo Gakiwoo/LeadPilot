@@ -8,7 +8,7 @@
  *  - 输出 extractor='rules'，与网关的 judge（模型离散判断）严格区分，禁止混称。
  *
  * 这一层解决的是「规则分的输入从哪来」：把官网/搜索摘要文本变成可核验的结构化事实，
- * 供评分引擎、开发信个性化锚点与 385 家基准集评测复用。
+ * 供评分引擎、开发信个性化锚点与 integrity 评测（v0.8.0 决策：不再依赖 385 家人工标注集）复用。
  */
 import { protocol, sanitizeContext, assertNoPii, normalizeText } from './protocol.mjs'
 

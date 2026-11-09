@@ -12,11 +12,16 @@ import { createGateway } from './gateway.mjs'
 import { createOrchestrator, MAX_CONCURRENT } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
 import { evaluateBaseline, baselineManifest, diffEvalRuns } from './eval.mjs'
+import {
+  evaluateIntegrity, evaluateOutcome, integrityManifest, outcomeManifest, releaseStatus,
+  INTEGRITY_GATE_VERSION, OUTCOME_GATE_VERSION, RELEASE_POLICY_VERSION,
+} from './eval.mjs'
 import { createStore } from './store.mjs'
 import { createLedger, LEDGER_VERSION } from './ledger.mjs'
 import { extractFacts, T0_RULES_VERSION } from './t0.mjs'
 import { createDataSourceRegistry } from './data-sources.mjs'
 import { createBatchPipeline, BATCH_VERSION } from './batch.mjs'
+import { createFetcher, FETCH_VERSION } from './fetch.mjs'
 import {
   contract as baselineContract, BASELINE_CONTRACT_VERSION,
   validateBaselineImport, checkLabeledBaseline,
@@ -47,7 +52,9 @@ export function createApp(opts = {}) {
   const dataSources = opts.dataSources ?? opts.orchestratorOptions?.dataSources ?? createDataSourceRegistry()
   const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store, ledger, dataSources })
   // v0.7.0 批量 SDR 管道：与编排器共用同一 store / gateway / ledger，避免两本账
-  const batch = opts.batch ?? createBatchPipeline({ store, gateway })
+  // v0.9.0：注入用户指定 URL 抓取器（单独计数，不并入商业数据源 0/6）
+  const fetcher = opts.fetcher ?? createFetcher()
+  const batch = opts.batch ?? createBatchPipeline({ store, gateway, fetcher })
   // 允许测试注入独立的安全上下文，不污染进程级默认值
   const sec = { ...DEFAULT_SECURITY, ...(opts.security ?? {}) }
   const hits = new Map() // ip -> { count, resetAt }
@@ -169,7 +176,7 @@ export function createApp(opts = {}) {
     try {
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.7.0',
+          ok: true, service: 'leadpilot-cloud', version: '0.9.0',
           gateway: gateway.health(),
           orchestrator: (() => {
             const list = orchestrator.listTasks()
@@ -204,12 +211,37 @@ export function createApp(opts = {}) {
           },
           baseline: {
             contractVersion: BASELINE_CONTRACT_VERSION,
+            contractStatus: baselineContract.status,
             importStatus: checkLabeledBaseline().status,
             requiredSize: baselineContract.baselineSize,
             diffEndpoint: protocol.evalDiff.endpoint,
             diffVersion: protocol.evalDiff.version,
+            labelsRequired: false,
+            accuracyClaim: false,
             releaseEligible: false,
+            note: 'v0.8.0 决策：不再要求 385 家人工标注基准集，本契约降级为 legacy；当前评测口径见 evalGates。',
           },
+          evalGates: (() => {
+            const release = releaseStatus()
+            return {
+              mode: protocol.evalGates.integrity.mode,
+              integrityVersion: INTEGRITY_GATE_VERSION,
+              outcomeVersion: OUTCOME_GATE_VERSION,
+              policyVersion: RELEASE_POLICY_VERSION,
+              labelsRequired: false,
+              accuracyClaim: false,
+              internalPreviewReady: release.internalPreviewReady,
+              externalValidated: release.externalValidated,
+              releaseEligible: release.releaseEligible,
+              remainingExternalBlockers: release.remainingExternalBlockers,
+              droppedByDecision: release.droppedByDecision,
+              endpoints: {
+                integrity: integrityManifest().endpoint,
+                outcome: outcomeManifest().endpoint,
+                manifest: 'GET /v1/eval/gates',
+              },
+            }
+          })(),
           t0: {
             extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text',
             judgeFactChain: {
@@ -222,6 +254,7 @@ export function createApp(opts = {}) {
             const d = dataSources.health()
             return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
           })(),
+          fetch: fetcher.health(),
           batch: (() => {
             const b = batch.state()
             return {
@@ -229,7 +262,8 @@ export function createApp(opts = {}) {
               stage: b.stage, companies: b.companies, judged: b.judged,
               exportedToday: b.exportedToday, circuitOpen: b.circuitOpen,
               bounce: b.bounce, releaseEligible: false,
-              note: '定位仍为自动获客；批量导入是批量 SDR 的线索投喂通道，origin=user_imported，导入≠采集。外部依赖重分类为发布门禁，releaseEligible 恒 false。',
+              userDirectedFetch: b.userDirectedFetch,
+              note: '定位仍为自动获客；批量导入是批量 SDR 的线索投喂通道，origin=user_imported，导入≠采集；官网原文由用户指定 URL 抓取（user_directed_fetch），抓取≠采集。外部依赖重分类为发布门禁，releaseEligible 恒 false。',
             }
           })(),
           demo: gateway.health().mode === 'unconfigured-demo',
@@ -250,11 +284,15 @@ export function createApp(opts = {}) {
           },
           baseline: {
             contractVersion: BASELINE_CONTRACT_VERSION,
+            contractStatus: baselineContract.status,
             importStatus: checkLabeledBaseline().status,
             requiredSize: baselineContract.baselineSize,
             diffEndpoint: protocol.evalDiff.endpoint,
             diffVersion: protocol.evalDiff.version,
+            labelsRequired: false,
+            accuracyClaim: false,
             releaseEligible: false,
+            note: 'v0.8.0 决策：不再要求 385 家人工标注基准集，本契约降级为 legacy；当前评测口径见 evalGates。',
           },
           t0: {
             extractor: 'rules', rulesVersion: T0_RULES_VERSION, sourceMode: 'provided-text',
@@ -264,6 +302,7 @@ export function createApp(opts = {}) {
             const d = dataSources.health()
             return { mode: d.mode, total: d.total, configured: d.configured, readyCount: d.readyCount }
           })(),
+          fetch: fetcher.health(),
         })
       }
       if (method === 'GET' && path === '/v1/gateway/audit') return json(res, 200, { entries: gateway.getAudit(), circuit: gateway.getCircuitState(), cache: gateway.getCacheStats() })
@@ -297,6 +336,24 @@ export function createApp(opts = {}) {
       if (method === 'POST' && path === '/v1/import/companies') {
         const body = await readBody(req)
         const result = batch.importCompanies(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+
+      // ---- v0.9.0 用户指定 URL 抓取（ADR-032；单独计数，不并入商业数据源 0/6）----
+      if (method === 'GET' && path === '/v1/sources/health') return json(res, 200, fetcher.health())
+
+      if (method === 'POST' && path === '/v1/sources/fetch') {
+        const body = await readBody(req)
+        if (!Array.isArray(body.urls) || !body.urls.length) {
+          return fail(res, 400, 'E4011', '抓取请求不合法', 'urls 必须是非空数组，且每个地址由调用方显式提供', '传 { urls: ["https://example.com/about"] } 后重试')
+        }
+        const result = await fetcher.fetchMany(body.urls)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+
+      if (method === 'POST' && path === '/v1/batch/fetch-sources') {
+        const body = await readBody(req)
+        const result = await batch.fetchSources(body)
         return json(res, result.ok ? 200 : 400, result)
       }
 
@@ -370,6 +427,27 @@ export function createApp(opts = {}) {
         const body = await readBody(req)
         const result = diffEvalRuns(body.prev, body.current)
         return json(res, result.status === 'INVALID_INPUT' ? 400 : 200, result)
+      }
+
+      // v0.8.0：不做人工标注集，评测口径改为 integrity（零人工）+ outcome（真实业务结果）。
+      // 两个端点都只做确定性计算，不联网、不调模型；无真实样本一律 NO_DATA。
+      if (method === 'GET' && path === '/v1/eval/integrity/gates') return json(res, 200, integrityManifest())
+      if (method === 'GET' && path === '/v1/eval/outcome/gates') return json(res, 200, outcomeManifest())
+      if (method === 'POST' && path === '/v1/eval/integrity') {
+        const body = await readBody(req)
+        const result = evaluateIntegrity(body.records ?? body.evidence ?? [], {
+          consistency: body.consistency,
+          minSamples: Number.isInteger(body.minSamples) ? body.minSamples : undefined,
+        })
+        return json(res, 200, result)
+      }
+      if (method === 'POST' && path === '/v1/eval/outcome') {
+        const body = await readBody(req)
+        const result = evaluateOutcome(body.events ?? [], {
+          windowSize: Number.isInteger(body.windowSize) ? body.windowSize : undefined,
+          minSamples: Number.isInteger(body.minSamples) ? body.minSamples : undefined,
+        })
+        return json(res, 200, result)
       }
 
       if (method === 'POST' && path === '/v1/tasks') {
