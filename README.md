@@ -184,7 +184,8 @@ docs/
 - `npm run verify:restart` → **AC-03 全链路 PASS**：真实杀进程 → 直读 SQLite → 同库重启 → 断点续跑，账本预扣不重复。
 - 网关计费专项：9 个单测覆盖成功结算、写信结算、无 provider 不预扣、失败全额释放、缓存不二次扣、`E4001` 不发请求、`E4005` 幂等拒绝、`audit-only` 独立网关、HTTP 402 映射。
 - 评测 diff 专项：8 个单测覆盖非法输入、无基线、指标改善、P0 回退/跨阈值/测量丢失、门禁回退、纯函数稳定性、占位字符串清除、HTTP 端点。
-- CI：`actions/checkout@v5` / `actions/setup-node@v5` 已升级，干净检出清单补入 `server/gateway.mjs` / `server/orchestrator.mjs` 等易漏文件。
+- CI：`actions/checkout@v5` / `actions/setup-node@v5` 已升级，干净检出清单补入 `server/gateway.mjs` / `server/orchestrator.mjs` 等易漏文件。**v0.6.0 对应 run `42560588202` 全链路全绿（38 s，15 个步骤全 ✓）**，Node 20 弃用提示已消除。
+- 提交链：`8d46f69`（v0.6.0，24 文件 / +1445 −225）→ CI `42560588202` 全绿。
 - 安全活体（v0.3.0 记录）：`HOST=0.0.0.0` 无 token / `CORS=*` → 启动前置拒绝；启用 token 后 401 `E6009` / Bearer 200 / 非白名单 Origin 不回显。
 
 > **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地文件都在，所以 typecheck/build/test 全绿；CI 从 git 干净检出时报 `TS2307`。现改为 `/data/` 锚定仓库根，并加 CI 检查。**结论：本地全绿不等于仓库可构建。**
