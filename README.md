@@ -176,7 +176,8 @@ docs/
 - `npm run smoke` → **27/27 通过**：含点数账本恒等式、`/v1/points`、基准契约与 400 `E4004`、T0→judge 事实链启用 / 非法来源拒绝、402 `E4001` 拒绝建任务、中止结算留痕。
 - `npm run verify:restart` → **AC-03 全链路 PASS**：新增断言「账本预扣已落盘且只有一条 reserve 流水」「跨进程 held/available 不变」「续跑后冻结额不变」。
 - 安全活体（v0.3.0 记录）：`HOST=0.0.0.0` 无 token / `CORS=*` → 启动前置拒绝；启用 token 后 401 `E6009` / Bearer 200 / 非白名单 Origin 不回显。
-- GitHub Actions `ci.yml` 新增 `Release gate self-check` 与 `Baseline import validator self-test` 两步，并把 v0.5.0 新文件纳入干净检出检查。
+- GitHub Actions `ci.yml` 新增 `Release gate self-check` 与 `Baseline import validator self-test` 两步，并把 v0.5.0 新文件纳入干净检出检查。**v0.5.0 对应 run `42555702735` 全链路全绿（38 s，10 个步骤全 ✓）**。
+- CI 仅有两条平台级提示（非失败）：`actions/checkout@v4` / `setup-node@v4` 仍以 Node 20 为目标被强制跑在 Node 24；`ubuntu-latest` 将在 2026-10 后迁移到 Ubuntu 26。升级到 `v5` 属低风险维护项，单独提交处理，不与功能改动混做。
 
 > **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地文件都在，所以 typecheck/build/test 全绿；CI 从 git 干净检出时报 `TS2307`。现改为 `/data/` 锚定仓库根，并加 CI 检查。**结论：本地全绿不等于仓库可构建。**
 
