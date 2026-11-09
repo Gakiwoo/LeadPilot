@@ -8,8 +8,9 @@
  *  - 每次写操作都在 store.ledgerTransact 内完成（SQLite = BEGIN IMMEDIATE）。
  *  - 同一 refId 的同类操作由 idem_key 唯一约束保证幂等；同 key 不同金额返回 E4002。
  *  - available = granted - held - spent，任何情况下不允许为负（allowNegative=false）。
- *  - 账本只覆盖云端任务生命周期；gateway 的 points 是按 token 折算的审计估值，
- *    不进账本。health 必须如实暴露 scope，绝不把审计估值说成已扣点。
+ *  - v0.6.0：账本范围从「仅云端任务」扩展到「云端任务 + 网关真实调用」，
+ *    两者共用同一套事务与幂等键；未注入 ledger 的独立网关才只产出审计估值。
+ *    health 必须如实暴露 scope 与 ledgerConsumers，绝不把审计估值说成已扣点。
  */
 import { protocol } from './protocol.mjs'
 import { createMemoryStore } from './store.mjs'
@@ -79,6 +80,7 @@ export function createLedger(opts = {}) {
     version: LEDGER_VERSION,
     mode: store.mode,
     scope: CFG.scope,
+    ledgerConsumers: CFG.ledgerConsumers,
     auditOnlyConsumers: CFG.auditOnlyConsumers,
 
     /** 只读查询也确保账户已初始化，返回的结构即 /v1/points 的响应体 */
@@ -244,8 +246,16 @@ export function createLedger(opts = {}) {
           ...stateOf(ensureAccount(DEFAULT_ACCOUNT)),
           accounts: stats.accounts, entries: stats.entries,
           scope: CFG.scope,
+          ledgerConsumers: CFG.ledgerConsumers,
           auditOnlyConsumers: CFG.auditOnlyConsumers,
-          note: '账本只覆盖云端任务的预扣/结算/释放；gateway 审计里的 points 是 token 折算估值，不代表已扣点。',
+          gatewayBilling: {
+            version: protocol.billing.gatewayBilling.version,
+            reservePoints: protocol.billing.gatewayBilling.reservePoints,
+            chargeOn: protocol.billing.gatewayBilling.chargeOn,
+            releaseOn: protocol.billing.gatewayBilling.releaseOn,
+            noChargeOn: protocol.billing.gatewayBilling.noChargeOn,
+          },
+          note: '账本覆盖云端任务与网关真实调用的预扣/结算/释放；未注入 ledger 的独立网关仍只产出 token 折算审计估值，其响应会标注 audit-only。',
         }
       })
     },

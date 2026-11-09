@@ -19,11 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          # 与本地开发、node:sqlite 持久化基线保持一致
+          # 与本地开发、node:sqlite 持久化基线保持一致；显式 22 避免 Node 20 弃用提示
           node-version: '22'
           cache: npm
 
@@ -36,9 +36,12 @@ jobs:
           for f in \
             src/data/demo-data.ts src/data/repository.ts \
             src/domain/scoring.ts src/services/adapters.ts src/services/gateway-client.ts \
+            src/store/useAppStore.ts src/types/index.ts \
+            src/components/developer/ExecutionView.tsx src/components/settings/SettingsView.tsx \
             shared/model-protocol.json shared/baseline-contract.json \
             server/index.mjs server/store.mjs server/t0.mjs server/data-sources.mjs \
             server/ledger.mjs server/baseline.mjs server/eval.mjs server/protocol.mjs \
+            server/gateway.mjs server/orchestrator.mjs \
             scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh \
             scripts/check-release-gates.mjs scripts/validate-baseline.mjs \
             scripts/fixtures/invalid-baseline-sample.json; do
@@ -49,7 +52,7 @@ jobs:
       - name: Typecheck (TS strict)
         run: npm run typecheck
 
-      # v0.5.0：把「未标注 / 未接数据源 / 审计估值不等于扣点」变成可执行断言
+      # v0.6.0：把「未标注 / 未接数据源 / 审计估值不等于扣点 / diff 与队列非占位」变成可执行断言
       - name: Release gate self-check
         run: npm run gate
 

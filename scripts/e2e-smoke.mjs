@@ -7,7 +7,11 @@
  * 纪律：只验证「真实实现」与「显式降级」，不把降级当成功，也不编造采集结果。
  * 未配置 API Key 时，/v1/judge 与 /v1/email/generate 必须明确返回 503 + E6005。
  */
+import { readFileSync } from 'node:fs'
+
 const BASE = process.env.LEADPILOT_API ?? 'http://127.0.0.1:5181'
+// 版本从 package.json 读取，避免每次发版都漏改冒烟脚本里的硬编码
+const PKG_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const results = []
 let failures = 0
 
@@ -63,22 +67,29 @@ async function sseProbe(taskId, maxEvents = 4) {
 
 async function main() {
   const health = await req('/health')
-  check('云端服务健康检查', health.status === 200 && health.body.ok === true && health.body.version === '0.5.0',
-    `status=${health.status} version=${health.body?.version} mode=${health.body?.gateway?.mode ?? 'n/a'}`)
+  check('云端服务健康检查（版本与 package.json 一致）',
+    health.status === 200 && health.body.ok === true && health.body.version === PKG_VERSION,
+    `status=${health.status} version=${health.body?.version} expect=${PKG_VERSION} mode=${health.body?.gateway?.mode ?? 'n/a'}`)
 
   const points = health.body?.points
-  check('点数账本健康如实暴露余额恒等式与范围',
+  check('点数账本健康如实暴露余额恒等式与范围（任务 + 网关共用一本账）',
     points && points.available + points.held + points.spent === points.granted
     && points.scope?.includes('task_reserve')
-    && points.auditOnlyConsumers?.includes('judge'),
+    && points.scope?.includes('gateway_reserve')
+    && points.ledgerConsumers?.includes('judge')
+    && points.auditOnlyConsumers?.length === 0,
     `available=${points?.available} held=${points?.held} spent=${points?.spent} scope=${points?.scope?.length ?? 0}`)
   check('评测契约如实标注不可发布，T0 → judge 事实链已接线',
     health.body?.baseline?.releaseEligible === false
     && health.body?.t0?.judgeFactChain?.enabled === true,
     `import=${health.body?.baseline?.importStatus} chain=${health.body?.t0?.judgeFactChain?.onConflict}`)
-  check('billing 明确区分账本扣点与 gateway 审计估值',
-    health.body?.billing?.auditOnlyConsumers?.includes('write_email') === true,
-    `mode=${health.body?.billing?.mode}`)
+  check('billing 明确列出网关计费策略：成功才结算、失败/缓存不扣点',
+    health.body?.billing?.ledgerConsumers?.includes('write_email') === true
+    && health.body?.billing?.chargeOn === 'schema_and_content_validation_passed'
+    && health.body?.billing?.releaseOn?.includes('degraded') === true
+    && health.body?.billing?.noChargeOn?.includes('cache_hit') === true
+    && Boolean(health.body?.billing?.reservePoints?.T1),
+    `mode=${health.body?.billing?.mode} reserveT1=${health.body?.billing?.reservePoints?.T1}`)
 
   const pointsApi = await req('/v1/points')
   check('点数账本只读接口可用（不暴露充值写接口）',
@@ -154,6 +165,12 @@ async function main() {
   check('写信请求：真实 T1 或明确 E6005（正文为空）', emailDegraded || emailReal,
     `status=${email.status} bodyLength=${email.body?.body?.length ?? 0} codes=${JSON.stringify(email.body?.errorCodes ?? [])}`)
 
+  check('网关计费如实标注：降级不扣点 / 真实调用才进账本',
+    judgeDegraded
+      ? judge.body?.billing?.charged === false && judge.body?.billing?.reason === 'no_provider'
+      : judge.body?.billing?.charged === true && judge.body?.billing?.scope === 'ledger-v2',
+    `judge=${judge.body?.billing?.reason ?? judge.body?.billing?.scope} charged=${judge.body?.billing?.charged}`)
+
   const pii = await post('/v1/email/generate', {
     anchor: 'write to purchasing@smoke.demo.local', product: 'hydraulic fittings',
     advantages: [], purpose: 'intro', tone: 'concise', maxWords: 90, language: 'en', country: '美国',
@@ -197,14 +214,40 @@ async function main() {
     && (t0Email.status === 503 ? t0Email.body?.body === null : typeof t0Email.body?.body === 'string'),
     `status=${t0Email.status} anchorSource=${t0Email.body?.anchorSource}`)
 
+  const pointsMid = await req('/v1/points')
+  check('降级 / 校验拒绝 / T0 抽取类调用不消耗账本点数',
+    pointsMid.status === 200 && pointsMid.body?.available === points?.available
+    && pointsMid.body?.held === 0 && pointsMid.body?.spent === points?.spent,
+    `before=${points?.available} after=${pointsMid.body?.available} held=${pointsMid.body?.held}`)
+
   const gates = await req('/v1/eval/gates')
   check('评测门禁清单可读', gates.status === 200 && gates.body.baselineSize === 385,
     `status=${gates.status} baseline=${gates.body?.baselineSize}`)
 
   const evalRun = await post('/v1/eval/run', { results: [] })
   check('无标注样本返回 NO_DATA，不编造通过',
-    evalRun.status === 200 && evalRun.body.status === 'NO_DATA',
-    `status=${evalRun.body?.status}`)
+    evalRun.status === 200 && evalRun.body.status === 'NO_DATA'
+    && evalRun.body.diffEndpoint === 'POST /v1/eval/diff'
+    && !JSON.stringify(evalRun.body).includes('需在 CI'),
+    `status=${evalRun.body?.status} diff=${evalRun.body?.diffEndpoint}`)
+
+  const diffBad = await post('/v1/eval/diff', { prev: {}, current: {} })
+  check('评测 diff 非法归档被 400 E4006 拒绝，不凑假报告',
+    diffBad.status === 400 && diffBad.body?.code === 'E4006',
+    `status=${diffBad.status} code=${diffBad.body?.code}`)
+
+  const emptyArchive = { ok: false, status: 'NO_DATA', baselineVersion: 'none', metrics: {} }
+  const diffNoData = await post('/v1/eval/diff', { prev: emptyArchive, current: emptyArchive })
+  check('评测 diff：无基线时 NO_BASELINE，不生成数值 delta、不宣称可发布',
+    diffNoData.status === 200 && diffNoData.body?.status === 'NO_BASELINE'
+    && diffNoData.body?.releaseEligible === false
+    && diffNoData.body?.rows?.every((r) => r.delta === null),
+    `status=${diffNoData.body?.status} rows=${diffNoData.body?.rows?.length ?? 0}`)
+
+  check('/health 暴露可执行 diff 端点与契约版本',
+    health.body?.baseline?.diffEndpoint === 'POST /v1/eval/diff'
+    && typeof health.body?.baseline?.diffVersion === 'string',
+    `endpoint=${health.body?.baseline?.diffEndpoint} version=${health.body?.baseline?.diffVersion}`)
 
   const created = await post('/v1/tasks', {
     keywords: ['hydraulic fittings'], markets: ['德国'], customerTypes: ['distributor'],
@@ -240,6 +283,48 @@ async function main() {
       && aborted.body?.task?.progress?.log?.some((l) => l.text.includes('点数账本')),
       `settled=${aborted.body?.task?.ledger?.settled} used=${aborted.body?.task?.pointsUsed}`)
   }
+
+  // v0.6.0：并发队列必须在真实 HTTP 链路上验证，不能只靠单测
+  const queueCfg = { keywords: ['queue smoke'], markets: ['德国'], depth: 2, targetCount: 20 }
+  const q = []
+  for (let i = 0; i < 4; i++) q.push(await post('/v1/tasks', queueCfg))
+  const qIds = q.map((r) => r.body?.task?.id).filter(Boolean)
+  check('并发上限 3 真实生效，第 4 个任务如实排队并带队列位次',
+    q.every((r) => r.status === 201)
+    && q.filter((r) => r.body?.task?.status === 'running').length === 3
+    && q[3]?.body?.task?.status === 'queued'
+    && q[3]?.body?.task?.queuePosition === 1
+    && q[3]?.body?.task?.maxConcurrent === 3,
+    `statuses=${q.map((r) => r.body?.task?.status ?? r.status).join(',')} pos=${q[3]?.body?.task?.queuePosition}`)
+
+  if (qIds.length === 4) {
+    const firstAbort = await post(`/v1/tasks/${qIds[0]}/abort`, {})
+    const dequeued = await req(`/v1/tasks/${qIds[3]}`)
+    check('槽位释放后队首自动出队，无需手动继续',
+      firstAbort.status === 200
+      && dequeued.status === 200
+      && dequeued.body?.task?.status === 'running'
+      && dequeued.body?.task?.queuePosition === 0
+      && dequeued.body?.task?.activeCount <= 3
+      && dequeued.body?.task?.progress?.log?.some((l) => l.text.includes('队列出队')),
+      `status=${dequeued.body?.task?.status} active=${dequeued.body?.task?.activeCount}`)
+
+    const resumeQueued = await post(`/v1/tasks/${qIds[3]}/resume`, {})
+    check('对运行中任务重复「继续」不会伪造排队状态',
+      resumeQueued.status === 409 || resumeQueued.body?.task?.status === 'running',
+      `status=${resumeQueued.status}`)
+
+    for (const id of qIds.slice(1)) await post(`/v1/tasks/${id}/abort`, {})
+  }
+
+  const queueHealth = await req('/health')
+  check('/health 如实暴露运行/排队计数与 FIFO 出队模式',
+    queueHealth.body?.orchestrator?.maxConcurrent === 3
+    && queueHealth.body?.orchestrator?.queueMode === 'fifo-auto-dequeue'
+    && Number.isInteger(queueHealth.body?.orchestrator?.running)
+    && Number.isInteger(queueHealth.body?.orchestrator?.queued)
+    && queueHealth.body.orchestrator.queued === 0,
+    `running=${queueHealth.body?.orchestrator?.running} queued=${queueHealth.body?.orchestrator?.queued}`)
 
   const pointsAfter = await req('/v1/points')
   check('任务收尾后账本余额恒等式仍成立',

@@ -9,9 +9,9 @@
 import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { createGateway } from './gateway.mjs'
-import { createOrchestrator } from './orchestrator.mjs'
+import { createOrchestrator, MAX_CONCURRENT } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
-import { evaluateBaseline, baselineManifest } from './eval.mjs'
+import { evaluateBaseline, baselineManifest, diffEvalRuns } from './eval.mjs'
 import { createStore } from './store.mjs'
 import { createLedger, LEDGER_VERSION } from './ledger.mjs'
 import { extractFacts, T0_RULES_VERSION } from './t0.mjs'
@@ -40,7 +40,9 @@ const DEFAULT_SECURITY = {
 export function createApp(opts = {}) {
   const store = opts.store ?? createStore()
   const ledger = opts.ledger ?? createLedger({ store })
-  const gateway = opts.gateway ?? createGateway({ store })
+  // v0.6.0：把同一个账本实例注入网关，judge / write_email 才产生真实预扣/结算；
+  // 独立创建的网关（部分单测）没有 ledger，仍只产出审计估值并在响应里如实标注。
+  const gateway = opts.gateway ?? createGateway({ store, ledger })
   const dataSources = opts.dataSources ?? opts.orchestratorOptions?.dataSources ?? createDataSourceRegistry()
   const orchestrator = opts.orchestrator ?? createOrchestrator({ ...(opts.orchestratorOptions ?? {}), store, ledger, dataSources })
   // 允许测试注入独立的安全上下文，不污染进程级默认值
@@ -164,9 +166,18 @@ export function createApp(opts = {}) {
     try {
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.5.0',
+          ok: true, service: 'leadpilot-cloud', version: '0.6.0',
           gateway: gateway.health(),
-          orchestrator: { tasks: orchestrator.listTasks().length, maxConcurrent: 3 },
+          orchestrator: (() => {
+            const list = orchestrator.listTasks()
+            return {
+              tasks: list.length,
+              running: list.filter((t) => t.status === 'running').length,
+              queued: list.filter((t) => t.status === 'queued').length,
+              maxConcurrent: orchestrator.maxConcurrent ?? MAX_CONCURRENT,
+              queueMode: 'fifo-auto-dequeue',
+            }
+          })(),
           protocol: { schemaVersion: protocol.schemaVersion, promptVersion: protocol.promptVersion },
           security: securityInfo(),
           persistence: {
@@ -177,15 +188,23 @@ export function createApp(opts = {}) {
           points: ledger.health(),
           billing: {
             ledgerVersion: LEDGER_VERSION,
-            mode: 'task-ledger-v1',
+            mode: 'unified-ledger-v1',
+            gatewayVersion: protocol.billing.gatewayBilling.version,
             scope: protocol.billing.ledger.scope,
+            ledgerConsumers: protocol.billing.ledger.ledgerConsumers,
             auditOnlyConsumers: protocol.billing.ledger.auditOnlyConsumers,
-            note: 'gateway judge / write_email 的 points 是按 token 折算的审计估值，不进账本、不代表已扣点。',
+            reservePoints: protocol.billing.gatewayBilling.reservePoints,
+            chargeOn: protocol.billing.gatewayBilling.chargeOn,
+            releaseOn: protocol.billing.gatewayBilling.releaseOn,
+            noChargeOn: protocol.billing.gatewayBilling.noChargeOn,
+            note: '云端任务与网关真实调用共用一本账：有可用 provider 才预扣，内容校验通过才结算，失败/降级/缓存命中一律不扣点并全额释放。未注入账本的独立网关仍只产出审计估值。',
           },
           baseline: {
             contractVersion: BASELINE_CONTRACT_VERSION,
             importStatus: checkLabeledBaseline().status,
             requiredSize: baselineContract.baselineSize,
+            diffEndpoint: protocol.evalDiff.endpoint,
+            diffVersion: protocol.evalDiff.version,
             releaseEligible: false,
           },
           t0: {
@@ -207,11 +226,21 @@ export function createApp(opts = {}) {
         return json(res, 200, {
           ...gateway.health(), security: securityInfo(),
           points: ledger.health(),
-          billing: { mode: 'task-ledger-v1', scope: protocol.billing.ledger.scope, auditOnlyConsumers: protocol.billing.ledger.auditOnlyConsumers },
+          billing: {
+            mode: 'unified-ledger-v1',
+            version: protocol.billing.gatewayBilling.version,
+            scope: protocol.billing.ledger.scope,
+            ledgerConsumers: protocol.billing.ledger.ledgerConsumers,
+            auditOnlyConsumers: protocol.billing.ledger.auditOnlyConsumers,
+            reservePoints: protocol.billing.gatewayBilling.reservePoints,
+            releaseOn: protocol.billing.gatewayBilling.releaseOn,
+          },
           baseline: {
             contractVersion: BASELINE_CONTRACT_VERSION,
             importStatus: checkLabeledBaseline().status,
             requiredSize: baselineContract.baselineSize,
+            diffEndpoint: protocol.evalDiff.endpoint,
+            diffVersion: protocol.evalDiff.version,
             releaseEligible: false,
           },
           t0: {
@@ -243,7 +272,8 @@ export function createApp(opts = {}) {
           ...state,
           entries,
           scope: protocol.billing.ledger.scope,
-          note: '只读接口。账本只覆盖云端任务预扣/结算/释放；gateway 的 points 为审计估值，不进账本。',
+          ledgerConsumers: protocol.billing.ledger.ledgerConsumers,
+          note: '只读接口。账本覆盖云端任务与网关真实调用的预扣/结算/释放；未注入账本的独立网关才只产出审计估值。',
         })
       }
       if (method === 'GET' && path === '/v1/tasks') return json(res, 200, { tasks: orchestrator.listTasks() })
@@ -255,7 +285,9 @@ export function createApp(opts = {}) {
           return fail(res, 400, 'E6004', '请求体含禁止字段', `数据最小化要求剔除个人信息，命中：${pii.violations.join('、')}`, '移除邮箱/电话/联系人姓名/邮件正文后重试')
         }
         const result = await gateway.judge(body)
-        const status = result.ok ? 200 : result.needsConsent ? 403 : 503
+        // E4001 / E4005 是计费拒绝，不是「服务降级」；用 402 / 409 表达，避免前端误判为可重试的模型故障
+        const status = result.ok ? 200 : result.needsConsent ? 403
+          : result.code === 'E4001' ? 402 : result.code === 'E4005' ? 409 : 503
         return json(res, status, { ok: !!result.ok, ...result })
       }
 
@@ -279,13 +311,21 @@ export function createApp(opts = {}) {
           return fail(res, 400, 'E6004', '写信请求体含禁止字段', `数据最小化要求剔除个人信息，命中：${pii.violations.join('、')}`, '移除收件人邮箱/联系人姓名/邮件正文后重试')
         }
         const result = await gateway.writeEmail(body)
-        const status = result.ok ? 200 : result.needsConsent ? 403 : 503
+        const status = result.ok ? 200 : result.needsConsent ? 403
+          : result.code === 'E4001' ? 402 : result.code === 'E4005' ? 409 : 503
         return json(res, status, { ok: !!result.ok, ...result })
       }
 
       if (method === 'POST' && path === '/v1/eval/run') {
         const body = await readBody(req)
         return json(res, 200, evaluateBaseline(body.results ?? [], body.baselineVersion ?? 'unversioned'))
+      }
+
+      // v0.6.0：版本 diff 是可执行的纯函数，不再是「需在 CI 中生成」的占位说明
+      if (method === 'POST' && path === '/v1/eval/diff') {
+        const body = await readBody(req)
+        const result = diffEvalRuns(body.prev, body.current)
+        return json(res, result.status === 'INVALID_INPUT' ? 400 : 200, result)
       }
 
       if (method === 'POST' && path === '/v1/tasks') {

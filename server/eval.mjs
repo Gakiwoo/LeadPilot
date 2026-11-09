@@ -10,6 +10,8 @@ import {
 } from './baseline.mjs'
 
 const G = protocol.evalGates
+const DIFF = protocol.evalDiff
+export const EVAL_DIFF_VERSION = DIFF.version
 
 export function baselineManifest() {
   const imported = checkLabeledBaseline()
@@ -32,6 +34,8 @@ export function baselineManifest() {
     },
     validateEndpoint: 'POST /v1/eval/baseline/validate',
     contractEndpoint: 'GET /v1/eval/baseline/contract',
+    diffEndpoint: DIFF.endpoint,
+    diffVersion: EVAL_DIFF_VERSION,
     releaseEligible: false,
     note: '本服务不提供标注数据。M0 需先完成 385 家基准集标注并通过导入校验，CI 才能执行全量评测。导入校验通过 ≠ 评测通过。',
   }
@@ -77,6 +81,8 @@ export function evaluateBaseline(results, baselineVersion = 'unversioned') {
     return {
       ok: false, status: 'NO_DATA', baselineVersion,
       message: `未提供标注样本，无法评测。需 ≥ ${G.baselineSize} 家人工标注基准集（${G.baselineComposition}）。`,
+      diffEndpoint: DIFF.endpoint,
+      diffVersion: EVAL_DIFF_VERSION,
       manifest: baselineManifest(),
     }
   }
@@ -131,8 +137,109 @@ export function evaluateBaseline(results, baselineVersion = 'unversioned') {
     checks,
     p0Failures: p0Failures.map((c) => `${c.name}：${c.value ?? '未测量'} ${c.direction} ${c.threshold}`),
     releaseRule: '任一 P0 指标不达标即阻断发布（PRD 9.5.3）',
-    diff: baselineVersion === 'unversioned'
-      ? '未提供基线版本号，无法生成与上一版本的 diff 报告'
-      : `与基线 ${baselineVersion} 的 diff 报告需在 CI 中读取历史评测归档后生成`,
+    diffEndpoint: DIFF.endpoint,
+    diffVersion: EVAL_DIFF_VERSION,
+    diffNote: '单次评测不生成版本 diff；把上一版本与本次评测归档显式提交到 /v1/eval/diff，由纯函数 diffEvalRuns 计算。',
+  }
+}
+
+/** 只有「两次真实评测归档」才算合法输入；绝不拿占位对象或空 metrics 凑一份 diff */
+function isEvalRun(run) {
+  return Boolean(run) && typeof run === 'object' && !Array.isArray(run)
+    && typeof run.status === 'string'
+    && run.metrics && typeof run.metrics === 'object' && !Array.isArray(run.metrics)
+}
+
+const isNumber = (v) => typeof v === 'number' && Number.isFinite(v)
+const passed = (v, def) => isNumber(v) && (def.direction === '>=' ? v >= def.threshold : v <= def.threshold)
+
+/**
+ * PRD 9.5.3 · 评测版本 diff（纯函数，无 IO、无时间依赖、无随机数）。
+ *
+ * 只比较调用方显式提交的两份评测归档；仓库没有、也不会伪造历史归档。
+ * P0 数值下降 / 跨阈值转失败 / 已测量变未测量，任一命中即 regression。
+ * 无论 diff 结论如何，releaseEligible 恒为 false：外部阻断项（385 家标注、
+ * 双标独立、数据源沙箱、OAuth/CASA）不是 diff 能证明的。
+ */
+export function diffEvalRuns(prev, current) {
+  if (!isEvalRun(prev) || !isEvalRun(current)) {
+    return {
+      ok: false, code: 'E4006', status: 'INVALID_INPUT', version: EVAL_DIFF_VERSION,
+      reason: `需要两次真实评测归档（各自含 status 与 metrics）。${DIFF.endpoint} 不接受占位对象，本仓库也不内嵌历史归档。`,
+      releaseEligible: false,
+    }
+  }
+
+  const summaryOf = (run) => ({
+    baselineVersion: String(run.baselineVersion ?? 'unversioned'),
+    status: run.status,
+    sampleSize: Number.isInteger(run.sampleSize) ? run.sampleSize : null,
+    ok: Boolean(run.ok),
+  })
+  const noBaseline = prev.status === 'NO_DATA' || current.status === 'NO_DATA'
+
+  const rows = Object.entries(G.metrics).map(([key, def]) => {
+    const a = prev.metrics[key]
+    const b = current.metrics[key]
+    const aMeasured = isNumber(a)
+    const bMeasured = isNumber(b)
+    const aPassed = passed(a, def)
+    const bPassed = passed(b, def)
+    const delta = aMeasured && bMeasured ? Number((b - a).toFixed(6)) : null
+    const valueRegression = aMeasured && bMeasured && (def.direction === '>=' ? b < a : b > a)
+    const measurementLost = aMeasured && !bMeasured
+    const thresholdCrossed = aPassed && !bPassed
+    return {
+      key, name: def.name, p0: G.p0.includes(key),
+      threshold: def.threshold, direction: def.direction,
+      prevValue: aMeasured ? a : null,
+      currentValue: bMeasured ? b : null,
+      delta, measured: bMeasured,
+      prevPassed: aPassed, currentPassed: bPassed,
+      regression: !noBaseline && (valueRegression || measurementLost || Boolean(thresholdCrossed)),
+      improvement: !noBaseline && aMeasured && bMeasured && (def.direction === '>=' ? b > a : b < a),
+      measurementLost, thresholdCrossed: Boolean(thresholdCrossed),
+    }
+  })
+
+  const regressions = rows.filter((r) => r.regression)
+  const p0Regressions = regressions.filter((r) => r.p0)
+  const improvements = rows.filter((r) => r.improvement).map((r) => r.key)
+  const gateRegression = prev.status === 'PASSED' && current.status !== 'PASSED'
+  const diffPassed = !noBaseline && !gateRegression && p0Regressions.length === 0
+    && prev.status === 'PASSED' && current.status === 'PASSED'
+
+  let status
+  if (noBaseline) status = DIFF.noBaselineStatus
+  else if (gateRegression || p0Regressions.length > 0) status = 'REGRESSION'
+  else if (current.status !== 'PASSED' || prev.status !== 'PASSED') status = 'BLOCKED'
+  else if (improvements.length > 0) status = 'IMPROVED'
+  else status = 'STABLE'
+
+  return {
+    ok: !noBaseline,
+    status,
+    version: EVAL_DIFF_VERSION,
+    prev: summaryOf(prev), current: summaryOf(current),
+    statusTransition: `${prev.status} → ${current.status}`,
+    sampleSizeDelta: Number.isInteger(prev.sampleSize) && Number.isInteger(current.sampleSize)
+      ? current.sampleSize - prev.sampleSize : null,
+    rows,
+    regressions: regressions.map((r) => r.key),
+    p0Regressions: p0Regressions.map((r) => r.key),
+    improvements,
+    gateRegression,
+    diffPassed,
+    releaseBlocked: !diffPassed,
+    releaseEligible: false,
+    baseline: {
+      importStatus: checkLabeledBaseline().status,
+      requiredSize: G.baselineSize,
+    },
+    note: noBaseline
+      ? '至少一份评测归档为 NO_DATA：没有真实标注样本可比，绝不生成数值 delta，也不宣称无回退。'
+      : diffPassed
+        ? '两次评测均为 PASSED 且无 P0 回退；但 diff 通过 ≠ 可发布，385 家人工标注集与外部合规项仍需独立验收。'
+        : `检测到回退或门禁未通过：${[...p0Regressions.map((r) => r.key), ...(gateRegression ? ['status_transition'] : [])].join('、') || current.status}；禁止发布。`,
   }
 }

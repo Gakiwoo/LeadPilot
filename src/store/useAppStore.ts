@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type {
-  Company, CompanyStatus, DevTask, Outreach, Settings, StatusLogEntry, TaskConfig, TaskProgress,
+  Company, CompanyStatus, DevTask, Outreach, Settings, StatusLogEntry, TaskConfig, TaskProgress, TaskStatus,
 } from '@/types'
 import { buildDemoCompanies, DEMO_TASK_ID } from '@/data/demo-data'
 import { localRepository } from '@/data/repository'
@@ -159,11 +159,16 @@ function applyCloudEvent(taskId: string, evt: CloudEvent): void {
     const task = s.tasks.find((t) => t.id === taskId)
     if (!task) return s
     let progress = task.progress
-    let status = task.status
+    let status: TaskStatus = task.status
+    let queuePosition = task.queuePosition ?? 0
+    let maxConcurrent = task.maxConcurrent
 
     switch (evt.type) {
       case 'hello': {
-        const snap = evt.snapshot as { progress?: TaskProgress; cursor?: unknown } | undefined
+        const snap = evt.snapshot as {
+          status?: TaskStatus; progress?: TaskProgress; cursor?: unknown
+          queuePosition?: number; maxConcurrent?: number
+        } | undefined
         if (snap?.progress) {
           progress = {
             ...snap.progress,
@@ -171,7 +176,13 @@ function applyCloudEvent(taskId: string, evt: CloudEvent): void {
           }
         }
         cloudCursor = snap?.cursor ?? cloudCursor
-        status = 'running'
+        // v0.6.0：排队任务订阅 SSE 时不能把「排队中」硬写成「执行中」
+        status = snap?.status ?? 'running'
+        queuePosition = Number(snap?.queuePosition ?? 0)
+        maxConcurrent = snap?.maxConcurrent ?? maxConcurrent
+        if (status === 'queued') {
+          progress = { ...progress, log: [...progress.log, logLine(`并发槽位已满，任务位于队列第 ${queuePosition} 位；槽位释放后自动启动`, 'warn')] }
+        }
         break
       }
       case 'stage':
@@ -194,22 +205,39 @@ function applyCloudEvent(taskId: string, evt: CloudEvent): void {
         }
         break
       }
-      case 'queued': status = 'queued'; break
+      case 'queued':
+        status = 'queued'
+        queuePosition = Number(evt.position ?? 1)
+        maxConcurrent = Number(evt.maxConcurrent ?? maxConcurrent)
+        progress = { ...progress, log: [...progress.log, logLine(`任务排队中：第 ${queuePosition} 位 / 并发上限 ${maxConcurrent ?? '—'}；槽位释放后自动启动，无需重复点击继续`, 'warn')] }
+        break
+      case 'started':
+        status = 'running'
+        queuePosition = 0
+        maxConcurrent = Number(evt.maxConcurrent ?? maxConcurrent)
+        progress = evt.dequeued
+          ? { ...progress, log: [...progress.log, logLine('已从并发队列出队并按 FIFO 自动启动；排队时长不计入硬超时，点数不重复预扣')] }
+          : progress
+        break
       case 'paused':
         status = 'paused'
+        queuePosition = 0
         cloudCursor = evt.cursor ?? cloudCursor
-        progress = { ...progress, log: [...progress.log, logLine('云端任务已暂停，游标已持久化', 'warn')] }
+        progress = { ...progress, log: [...progress.log, logLine('云端任务已暂停，游标已持久化；释放的并发槽位由队首任务接替', 'warn')] }
         break
       case 'resumed':
         status = 'running'
+        queuePosition = 0
         progress = { ...progress, log: [...progress.log, logLine('云端任务从持久化游标继续，额度不重复扣减')] }
         break
       case 'done':
         status = 'done'
+        queuePosition = 0
         progress = { ...progress, stage: '完成', etaRange: [0, 0], log: [...progress.log, logLine('云端编排完成（演示编排，不产生真实客户记录）')] }
         break
       case 'aborted':
         status = 'aborted'
+        queuePosition = 0
         progress = { ...progress, etaRange: [0, 0], log: [...progress.log, logLine('云端任务已中止；已采集结果全部保留，游标可断点续跑', 'warn')] }
         break
       case 'error':
@@ -221,7 +249,7 @@ function applyCloudEvent(taskId: string, evt: CloudEvent): void {
     progress = { ...progress, log: progress.log.slice(-80) }
     const terminal = ['done', 'aborted', 'failed'].includes(status)
     return {
-      tasks: s.tasks.map((t) => t.id === taskId ? { ...t, status, progress } : t),
+      tasks: s.tasks.map((t) => t.id === taskId ? { ...t, status, progress, queuePosition, maxConcurrent } : t),
       activeTaskId: terminal && s.activeTaskId === taskId ? null : s.activeTaskId,
     }
   })
@@ -370,9 +398,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   pauseTask: () => {
     if (get().runnerMode === 'cloud') {
       if (!cloudTaskId) return
-      void controlCloudTask(cloudTaskId, 'pause').then((ok) => {
-        if (ok) set((s) => ({ tasks: s.tasks.map((t) => t.status === 'running' ? { ...t, status: 'paused' } : t) }))
-        else get().showToast('云端暂停失败：任务状态不允许该操作', 'warn')
+      void controlCloudTask(cloudTaskId, 'pause').then((r) => {
+        if (!r.ok) { get().showToast('云端暂停失败：任务状态不允许该操作', 'warn'); return }
+        const status: TaskStatus = r.task?.status ?? 'paused'
+        set((s) => ({ tasks: s.tasks.map((t) => t.status === 'running'
+          ? { ...t, status, queuePosition: r.task?.queuePosition ?? 0 } : t) }))
       })
       return
     }
@@ -382,9 +412,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   resumeTask: () => {
     if (get().runnerMode === 'cloud') {
       if (!cloudTaskId) return
-      void controlCloudTask(cloudTaskId, 'resume', cloudCursor).then((ok) => {
-        if (ok) set((s) => ({ tasks: s.tasks.map((t) => t.status === 'paused' || t.status === 'queued' ? { ...t, status: 'running' } : t) }))
-        else get().showToast('云端续跑失败：任务已完成或不存在', 'warn')
+      void controlCloudTask(cloudTaskId, 'resume', cloudCursor).then((r) => {
+        if (!r.ok) { get().showToast('云端续跑失败：任务已完成或不存在', 'warn'); return }
+        // 服务端权威状态：并发已满时任务仍是 queued，绝不乐观标成 running
+        const status: TaskStatus = r.task?.status ?? 'running'
+        set((s) => ({ tasks: s.tasks.map((t) => t.status === 'paused' || t.status === 'queued'
+          ? { ...t, status, queuePosition: r.task?.queuePosition ?? 0, maxConcurrent: r.task?.maxConcurrent ?? t.maxConcurrent }
+          : t) }))
+        if (status === 'queued') get().showToast('并发槽位已满，任务仍在队列中；槽位释放后会自动启动', 'warn')
       })
       return
     }
@@ -392,7 +427,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ tasks: s.tasks.map((t) => t.status === 'paused' ? { ...t, status: 'running' } : t) }))
   },
   abortTask: () => {
-    if (get().runnerMode === 'cloud' && cloudTaskId) void controlCloudTask(cloudTaskId, 'abort')
+    if (get().runnerMode === 'cloud' && cloudTaskId) {
+      void controlCloudTask(cloudTaskId, 'abort').then((r) => {
+        if (!r.ok) return
+        const status: TaskStatus = r.task?.status ?? 'aborted'
+        set((s) => ({ tasks: s.tasks.map((t) => t.mode === 'cloud' && !['done', 'aborted', 'failed'].includes(t.status)
+          ? { ...t, status, queuePosition: 0 } : t) }))
+      })
+    }
     cloudClose?.()
     cloudClose = null
     cloudTaskId = null

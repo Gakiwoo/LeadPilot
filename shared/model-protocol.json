@@ -118,14 +118,28 @@
     "depthPointsPerCompany": { "1": 1, "2": 2, "3": 4, "4": 8 },
     "byokChargesPoints": false,
     "ledger": {
-      "$comment": "v0.5.0 点数账本事务化。范围严格限定为云端任务生命周期：创建预扣 → 完成/中止结算 → 未启动释放。同一 refId + 同一操作幂等，进程重启不重复扣（AC-03）。",
-      "version": "ledger-v1",
+      "$comment": "v0.5.0 账本事务化；v0.6.0 扩展到网关真实调用。云端任务与 judge / write_email 共用同一套 reserve / settle / release 事务与 idem_key，进程重启不重复扣（AC-03）。",
+      "version": "ledger-v2",
       "defaultAccount": "default",
       "openingBalancePoints": 2000,
       "allowNegative": false,
-      "scope": ["task_reserve", "task_settle", "task_release"],
-      "$auditOnlyNote": "gateway judge / write_email 的 points 目前仍是按 token 折算的审计估值，不进入账本、不代表实际扣费。health 必须如实暴露 scope，绝不把审计估值说成已扣点。",
-      "auditOnlyConsumers": ["judge", "write_email"]
+      "scope": ["task_reserve", "task_settle", "task_release", "gateway_reserve", "gateway_settle", "gateway_release"],
+      "ledgerConsumers": ["cloud_task", "judge", "write_email"],
+      "$auditOnlyNote": "v0.5.0 曾把 judge / write_email 列为 audit-only；v0.6.0 已接入账本。未注入 ledger 实例的独立网关仍只产出审计估值，其响应 billing.scope='audit-only' 必须如实标注。",
+      "auditOnlyConsumers": []
+    },
+    "gatewayBilling": {
+      "$comment": "v0.6.0 网关调用计费闭环。仅在确认存在可用 provider 链之后才预扣；任何失败/降级/校验拒绝都全额释放，平台自担失败调用成本，绝不把失败伪装成已扣点。",
+      "version": "gateway-ledger-v1",
+      "reservePoints": { "T0": 8, "T1": 16, "T2": 40 },
+      "rounding": "ceil-to-integer-points",
+      "$roundingNote": "pointCost 按 PRD 公式乘层级系数后可能是小数（如 T1 的 1.6 倍）；账本只接受整数点，统一向上取整，响应同时给出 estimatedPoints（原始折算）与 chargedPoints（实际整数扣点）。",
+      "chargeOn": "schema_and_content_validation_passed",
+      "releaseOn": ["no_provider", "validation_error", "needs_consent", "provider_failure", "content_rejected", "degraded", "exception"],
+      "noChargeOn": ["cache_hit", "byok", "no_ledger_injected"],
+      "capPolicy": "charged=min(estimated,reserve)；estimated>reserve 时 capped=true，并在响应与审计中显式标注需调高 reservePoints",
+      "idempotency": "调用方可传 requestId；同一 requestId 已结算则拒绝重复调用，绝不二次扣点",
+      "$byokNote": "byokChargesPoints=false：用户自带 Key 不扣平台点数。当前网关仅使用平台侧环境变量 Key，BYOK 通道尚未接入，不得提前宣称支持。"
     }
   },
   "providers": [
@@ -167,6 +181,15 @@
       "refusal_rate": { "name": "拒答率", "threshold": 0.05, "direction": "<=" }
     }
   },
+  "evalDiff": {
+    "$comment": "v0.6.0：版本 diff 是真实纯函数，不再用「需在 CI 中生成」占位字符串。只比较两次真实评测归档的数值，仓库不内嵌任何历史归档。",
+    "version": "eval-diff-v1",
+    "endpoint": "POST /v1/eval/diff",
+    "noBaselineStatus": "NO_BASELINE",
+    "regressionPolicy": "P0 数值下降 / 跨过阈值转失败 / 已测量变未测量，任一命中即判 regression；上一版 PASSED 而本次非 PASSED 也算门禁回退",
+    "measurementLossIsRegression": true,
+    "$releaseNote": "diff 通过 ≠ 可发布。385 家人工标注集、双标独立与数据源沙箱仍为外部阻断项，releaseEligible 恒为 false。"
+  },
   "errorCodes": {
     "E6001": "provider 超时", "E6002": "限流", "E6003": "schema 校验失败",
     "E6004": "证据校验不通过", "E6005": "全部 provider 不可用（降级模式）",
@@ -176,7 +199,9 @@
     "E4001": "点数不足（预扣超出可用余额）",
     "E4002": "账本幂等键冲突（同一 key 携带不同金额）",
     "E4003": "账本状态非法（无活跃预扣却结算/重复释放）",
-    "E4004": "385 家基准集标注导入校验失败"
+    "E4004": "385 家基准集标注导入校验失败",
+    "E4005": "网关调用计费幂等键已结算，拒绝重复调用与重复扣点",
+    "E4006": "评测版本 diff 输入非法（缺少有效的两次评测归档）"
   },
   "piiExclusion": {
     "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",

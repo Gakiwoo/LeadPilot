@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.5.0 · 2026-11-08（ADR-019–022 为本次新增）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.6.0 · 2026-11-08（ADR-023–026 为本次新增）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -227,7 +227,12 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 **理由**：标注集是外部人力产物，不是代码可生产的。把契约与校验器先做出来，能让 M0 拿到标注数据时立刻可导入，同时把「用假数据凑数」这条路在 CI 里堵死。
 
-## ADR-021 · 点数账本事务化，范围严格限定为云端任务生命周期
+## ADR-021 · 点数账本事务化，范围严格限定为云端任务生命周期（v0.5.0；范围已由 ADR-024 扩展）
+
+> **v0.6.0 修订注**：本节描述的「gateway 仅审计估值」边界在 v0.6.0 已被 ADR-024 有意扩展：
+> `judge / write_email` 现在也进入同一本账。本节的账务不变量（`available = granted - held - spent`、
+> `idem_key` 幂等、`BEGIN IMMEDIATE`、失败不静默）全部保留，仅 `scope` 与 `auditOnlyConsumers`
+> 的取值发生变化；阅读时以 ADR-024 和 `shared/model-protocol.json` 的当前值为准。
 
 **现状**：`pointsUsed` 只在 `orchestrator.finish()` 里赋值，创建任务时 `pointsUsed: 0`；前端另有本地 `pointsBalance: 2000` 自行扣减/退还。服务端没有账本，AC-03 只保证任务游标不重复推进，不保证额度不重复冻结。
 
@@ -253,6 +258,52 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **边界**：调用方未提供 `sources` 时如实返回 `t0.used=false`。**前端演示数据的 `sourceTexts` 没有真实 URL 与抓取时间，绝不拿来伪造 `sources`**；「云端判断」按钮保持无事实链，设置页明确显示「已接线，但需调用方提供可核验来源」。真实数据源接入后，由采集层产出 `sources` 再打开这条链。
 
 **理由**：PRD 6.7.1 的 T0 是「检索供事实」，不是与 T1 并行的第二套结论。规则层与模型层必须串成一条可追溯链，且冲突处理必须由代码决定（与 6.7.4 的 α 冲突纪律一致），不能让模型自己解释掉矛盾。
+
+## ADR-023 · 并发上限由唯一启动闸门执行，FIFO 用单调序号
+
+**现状（v0.5.0 缺陷）**：`createTask()` 在 `running >= MAX_CONCURRENT` 时把任务标为 `queued` 并 `emit('queued')`，但 `finish() / pause() / resume() / hydrate()` 后没有任何出队逻辑；`queued` 是永久态。同时 `resume()` 直接 `start()`，可绕过并发上限；排队任务在 `createdAt` 就写入 `startedMs`，排队一小时会让首个 tick 立即触发硬超时。
+
+**决策**：
+1. `start(task, opts)` 成为**唯一启动闸门**，`createTask / resume / pumpQueue` 全部经过它；`!opts.dequeued && activeCount() >= maxConcurrent` 一律转 `queued` 并返回 `false`，绝不谎报运行。
+2. `pumpQueue()` 在 `finish / pause / abort(→finish)` 释放槽位时按 FIFO 补位；出队不重复预扣（预扣在 `createTask` 已完成）。
+3. FIFO 用 `nextSeq()` 单调递增序号并持久化到 `serialize()`；**不用 `createdAt` / `id` 排序**——同一毫秒创建的任务 `createdAt` 相同，而 `id` 带随机后缀会打乱先后（该缺陷由新增单测直接抓出）。
+4. 硬超时只统计 `elapsedMs + (now - startedMs)` 的累计运行时长；排队与暂停期间 `startedMs = null`，不消耗预算。重启后 `elapsedMs` 从落盘值恢复，原 queued 任务降为 `paused` 且不自动出队（AC-03）。
+5. 前端 `hello` 事件改用快照的权威 `status`，新增 `started / queued` 事件处理；`controlCloudTask` 返回服务端 task 状态，`resumeTask` 不再把 `queued` 乐观标成 `running`。
+
+**边界**：`maxConcurrent` 默认 3，可由 `createOrchestrator({ maxConcurrent })` 注入（仅用于确定性测试），`/health.orchestrator` 如实暴露 `running / queued / maxConcurrent / queueMode`。排队期间不产生任何采集进度，也不会写入客户记录。
+
+**理由**：PRD 9.1 的并发上限若只在创建时检查，就是「看起来有限流、实际会卡死」。状态与真实槽位必须始终一致，且 UI 不得比服务端更乐观。
+
+## ADR-024 · 网关调用计费闭环：一次调用一条生命周期，失败不扣点
+
+**现状**：v0.5.0 账本只覆盖云端任务；`judge / write_email` 审计里的 `points` 是 `pointCost()` 折算估值，成功响应固定带 `billing: { charged:false, scope:'audit-only' }`。点数余额与真实模型调用脱节。
+
+**决策**：`createApp()` 把**同一个 ledger 实例**注入 `createGateway({ store, ledger })`。计费流程：
+1. 只有 `chainFor()` 确认存在可用 provider 链之后才 `reserveBilling()`；预扣额度按 `billing.gatewayBilling.reservePoints[T0/T1/T2] = 8/16/40`。无 Key / 未锁快照 / 校验拒绝 / 需同意 / 缓存命中一律不预扣，`billing.charged=false` 且带明确 `reason`。
+2. 只有内容通过 `validateSchema + verifyEvidence` / `validateEmailDraft` 的成功响应才 `settleBilling()`；`billingPoints()` 对 PRD 公式结果（T1 可能是 1.6 点）向上取整为整数点，响应同时给出 `estimatedPoints` 与 `chargedPoints`，超额按预扣上限封顶并标 `capped=true`。
+3. 降级链耗尽、内容被拒、抛异常一律 `releaseBilling()` 全额退还；失败尝试仍留在调用审计。异常路径也用 `try/catch` 包住，避免 `held` 点数永久冻结。
+4. `requestId` 作为计费幂等键；已结算/已释放的键显式返回 `E4005`（HTTP 409），而不是靠 `reserve` 的幂等命中再跑一次 provider 并再次宣称「已扣点」。陈旧预扣超时自动回收。预扣不足返回 `E4001`（HTTP 402），且不发起任何外部请求。
+5. 未注入 ledger 的独立网关（部分单测）保持 `billing.scope='audit-only'`，`gateway.health().billingMode` 如实暴露。
+
+**边界**：`pointCost()` 保留原始小数折算作为审计估值；账本只收整数点。`byokChargesPoints=false` 但 BYOK 通道尚未接入，文档不得提前宣称支持。这是**本地测试账本**，不是支付结算系统；`releaseEligible` 与发布门禁不受计费改动影响。
+
+**理由**：把「审计估值」升级成「真实扣点」会立刻暴露一堆边界（失败算不算钱、缓存算不算钱、重试算不算钱、小数点数怎么记）。先把这些口径写死并做成可执行断言，再谈对外计费。
+
+## ADR-025 · 评测版本 diff 用纯函数实现，删掉「需在 CI 中生成」占位说明
+
+**现状**：`evaluateBaseline()` 返回的 `diff` 是字符串——要么「未提供基线版本号」，要么「需在 CI 中读取历史评测归档后生成」。这是一句永远不会被执行的计划，容易被误读成「已有 diff 能力」。
+
+**决策**：新增纯函数 `diffEvalRuns(prev, current)`（无 IO / 无时间 / 无随机 / 不改输入）与 `POST /v1/eval/diff`。逐指标比较 8 项 Eval，给出 `prevValue / currentValue / delta / prevPassed / currentPassed / measurementLost / thresholdCrossed / regression / improvement`；P0 数值下降、跨阈值转失败、已测量变未测量、上一版 `PASSED` 而本次非 `PASSED` 一律判回退。非法归档 → `400 E4006`；任一归档 `NO_DATA` → `NO_BASELINE`，`delta` 全为 `null`，不宣称「无回退」。`evaluateBaseline()` 改为返回可执行的 `diffEndpoint / diffVersion / diffNote`，源码里不得再出现「需在 CI」字符串（`npm run gate` 静态断言）。
+
+**边界**：仓库**不内嵌任何历史评测归档**，diff 只消费调用方显式提交的两份归档；测试里构造的 archive 是纯函数输入夹具，不是 385 家人工标注集。`diffPassed=true` **不等于可发布**，`releaseEligible` 恒 `false`——标注集、双标独立、数据源沙箱与合规项是 diff 无法证明的。
+
+**理由**：占位字符串是「文档债」里最危险的一种：它让看代码的人以为能力已在路线图上落地。宁可返回 `NO_BASELINE`，也不要一句无法执行的承诺。
+
+## ADR-026 · CI action 升级与干净检出清单补全
+
+**决策**：`actions/checkout@v4 → v5`、`actions/setup-node@v4 → v5`，消除 Node 20 弃用提示；`node-version: '22'` 保持不变，与 `node:sqlite` 持久化基线一致。干净检出清单补入此前漏列的 `server/gateway.mjs` / `server/orchestrator.mjs` / `src/store/useAppStore.ts` / `src/types/index.ts` 与两个关键视图组件——v0.3.0 的 `data/` 教训说明「本地全绿」不等于「仓库可构建」，清单必须覆盖所有会被 import 的关键源码。
+
+**边界**：`ubuntu-latest` 的镜像迁移属于 GitHub 平台侧，不锁定镜像版本；依赖漏洞分级维持 ADR-018 结论，不在本轮跨 major 升级 Vite / Vitest。
 
 ---
 

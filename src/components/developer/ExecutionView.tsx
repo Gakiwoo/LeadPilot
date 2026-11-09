@@ -27,6 +27,11 @@ export default function ExecutionView({ task }: { task: DevTask }) {
                 {task.mode === 'cloud' ? <CloudCog size={10} /> : <HardDrive size={10} />}
                 {task.mode === 'cloud' ? '云端编排 · SSE' : '本地演示运行器'}
               </Badge>
+              {task.status === 'queued' && (
+                <Badge tone="amber">
+                  <Clock size={10} /> 队列第 {task.queuePosition || 1} 位 · 并发上限 {task.maxConcurrent ?? 3}
+                </Badge>
+              )}
             </div>
             <p className="mt-1 text-[11px] text-muted">任务 ID {task.id} · 创建于 {new Date(task.createdAt).toLocaleString('zh-CN', { hour12: false })} · 预扣 {task.pointsEstimated} 点</p>
           </div>
@@ -71,6 +76,12 @@ export default function ExecutionView({ task }: { task: DevTask }) {
         </div>
 
         <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted"><TrendingUp size={13} className="text-brand-500" /> 前 20 条达标客户在采集过程中即写入下方列表，可提前点开细看，无需等待全部完成（F2-1 流式结果）</p>
+        {task.mode === 'cloud' && task.status === 'queued' && (
+          <p className="mt-3 flex items-start gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+            <Clock size={13} className="mt-0.5 shrink-0" />
+            <span><strong>排队中不是卡死</strong>：服务端并发上限 {task.maxConcurrent ?? 3} 已满，本任务按创建顺序（FIFO）排队；任一任务完成 / 暂停 / 中止释放槽位后会自动出队启动，无需重复点击继续。排队与暂停时长不计入硬超时预算，点数预扣在排队时已完成且不会重复扣。</span>
+          </p>
+        )}
         {task.mode === 'cloud' && (
           <p className="mt-3 flex items-start gap-1.5 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-[11px] leading-5 text-violet-800">
             <CloudCog size={13} className="mt-0.5 shrink-0" />

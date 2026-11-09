@@ -5,9 +5,13 @@
  *          结果缓存、点数折算、调用审计、数据出境策略、PII 硬性剔除。
  * 未接部分：没有任何 API Key 时不发起任何外部请求，明确返回 E6005 降级，
  *          绝不伪造模型判断。配置 Key 后即可走真实 provider 调用。
+ *
+ * v0.6.0 计费闭环：注入 ledger 后，judge / write_email 在确认存在可用 provider 链
+ * 之后先 reserve；只有内容通过校验的成功响应才 settle，其余一律 release 全额退还。
+ * 未注入 ledger 的独立网关保持 audit-only，响应如实标 billing.scope='audit-only'。
  */
 import {
-  protocol, validateSchema, verifyEvidence, assertNoPii, pointCost,
+  protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, billingPoints,
   cacheKey, buildJudgeMessages, toClientJudgement, sanitizeContext,
   buildEmailMessages, validateEmailDraft,
 } from './protocol.mjs'
@@ -46,6 +50,8 @@ export function createGateway(opts = {}) {
   const nowFn = opts.now ?? (() => Date.now())
   const sleepFn = opts.sleep ?? sleep
   const store = opts.store ?? null
+  const ledger = opts.ledger ?? null // 注入后才产生真实账本扣点；否则保持审计估值
+  const billingCfg = protocol.billing.gatewayBilling
   const memoryCache = new Map()
   const memoryAudit = []
   // 传入持久化存储后，30 天结果缓存与调用审计跨进程可恢复；mode 在 health 中如实暴露
@@ -107,6 +113,118 @@ export function createGateway(opts = {}) {
     return store ? store.auditList(500) : [...memoryAudit]
   }
 
+  /* ─────────────── v0.6.0 网关调用计费（reserve → settle / release） ─────────────── */
+
+  /** 无账本 / 命中缓存 / 校验拒绝 / 未发起 provider 调用时，明确标成「未扣点」 */
+  function billingNone(reason) {
+    return {
+      charged: false,
+      scope: ledger ? 'ledger-v2' : 'audit-only',
+      reason,
+      note: ledger
+        ? '本次未产生账本扣点：未发起可用 provider 调用、命中缓存或被校验/降级拦截'
+        : '未注入点数账本：points 仍为 token 折算审计估值，不代表已扣点',
+    }
+  }
+
+  /** 仅在 chainFor 确认存在可用 provider 之后调用；预扣不成功就不发起任何外部请求 */
+  function reserveBilling(taskType, tier, input = {}) {
+    if (!ledger) return { active: false }
+    const amount = billingCfg.reservePoints[tier] ?? billingCfg.reservePoints.T1
+    const suffix = String(input.requestId ?? `${nowFn()}_${Math.random().toString(36).slice(2, 10)}`)
+    const refId = `gw:${taskType}:${suffix}`
+    // 同一 requestId 只允许一次计费尝试：已结算/已释放的键必须显式拒绝，
+    // 否则 reserve 的幂等命中会让第二次 provider 调用继续发生，并再次宣称「已扣点」。
+    const prior = ledger.entries(refId, 20)
+    if (prior.some((e) => e.kind === 'settle' || e.kind === 'release')) {
+      return {
+        active: false, failed: true, refId, code: 'E4005',
+        reason: `请求 ${refId} 已完成计费结算或释放，拒绝重复调用；重试请使用新的 requestId`,
+        available: ledger.state().available,
+      }
+    }
+    const r = ledger.reserve({ refId, amount, reason: `${taskType} 真实调用预扣（${tier}）` })
+    if (!r.ok) {
+      return {
+        active: false, failed: true, refId,
+        code: /已结算|已释放/.test(String(r.reason ?? '')) ? 'E4005' : (r.code ?? 'E4001'),
+        reason: r.reason, available: r.available ?? null,
+      }
+    }
+    // 幂等命中说明同 requestId 已有预扣（并发重复请求或上次进程崩溃遗留）：
+    // 不再发起第二次外部调用；若预扣已明显超时，顺手回收，避免 held 点数永久冻结。
+    if (r.idempotent) {
+      const heldAt = Number(prior.find((e) => e.kind === 'reserve')?.at ?? 0)
+      const stale = heldAt > 0 && nowFn() - heldAt > protocol.downgrade.timeoutMs * 20
+      const recovered = stale
+        ? ledger.release({ refId, reason: '清理超时未完成调用的陈旧预扣（v0.6.0 自动回收）' })
+        : null
+      return {
+        active: false, failed: true, refId, code: 'E4005',
+        reason: `请求 ${refId} 已有活跃预扣记录，拒绝并发/重复调用${recovered?.ok ? '；陈旧预扣已自动释放，请用新 requestId 重试' : ''}`,
+        available: r.available ?? null,
+      }
+    }
+    return { active: true, refId, reserve: amount }
+  }
+
+  /** 预扣被拒：不调用任何 provider，如实返回错误码，绝不假装成功 */
+  function reserveFailure(taskType, tier, region, hold, extra = {}) {
+    appendAudit({
+      taskType, tier, providerKey: null, cached: false, input: 0, output: 0, points: 0,
+      degraded: true, code: hold.code, billingRefused: true, latencyMs: 0,
+    })
+    return {
+      ok: false, degraded: true, judgement: null, subject: null, body: null,
+      tier, region, errorCodes: [hold.code], code: hold.code,
+      billing: {
+        charged: false, scope: 'ledger-v2', refId: hold.refId,
+        reason: hold.reason, available: hold.available,
+      },
+      reason: hold.code === 'E4001'
+        ? `点数不足，未发起任何 provider 调用：${hold.reason}`
+        : `计费幂等键已结算，拒绝重复调用与重复扣点：${hold.reason}`,
+      ...extra,
+    }
+  }
+
+  /** 成功响应结算。estimated 为 PRD 公式折算后向上取整的整数点数，超过预扣则封顶并显式标注 */
+  function settleBilling(hold, estimated) {
+    if (!hold?.active) return billingNone('no-ledger-or-no-reserve')
+    const capped = estimated > hold.reserve
+    const amount = Math.min(estimated, hold.reserve)
+    const r = ledger.settle({ refId: hold.refId, amount, reason: '网关真实调用结算（内容已通过校验）' })
+    if (!r.ok) {
+      return {
+        charged: false, scope: 'ledger-v2', refId: hold.refId,
+        error: r.code, reason: r.reason, note: `结算失败（${r.code}）：本次未扣点，预扣状态需人工核对`,
+      }
+    }
+    return {
+      charged: r.charged > 0, scope: 'ledger-v2', refId: hold.refId,
+      reserved: hold.reserve, estimatedPoints: estimated, chargedPoints: r.charged,
+      refunded: r.refunded, capped, idempotent: Boolean(r.idempotent),
+      available: r.available,
+      note: capped
+        ? `本次折算 ${estimated} 点超过预扣上限 ${hold.reserve} 点，按 ${r.charged} 点封顶结算；请在 shared/model-protocol.json 调高 gatewayBilling.reservePoints`
+        : `按 token 折算 ${estimated} 点实扣 ${r.charged} 点，退还 ${r.refunded} 点`,
+    }
+  }
+
+  /** 失败/降级/异常一律全额释放：平台自担失败调用成本，绝不把失败伪装成已扣点 */
+  function releaseBilling(hold, reason) {
+    if (!hold?.active) return billingNone(reason)
+    const r = ledger.release({ refId: hold.refId, reason })
+    return {
+      charged: false, scope: 'ledger-v2', refId: hold.refId, reserved: hold.reserve,
+      refunded: r.ok ? (r.refunded ?? hold.reserve) : 0,
+      released: Boolean(r.ok), code: r.ok ? null : r.code, reason,
+      note: r.ok
+        ? '调用失败或显式降级：预扣已全额释放，本次不计点（失败尝试仍留在调用审计里）'
+        : `释放失败（${r.code}）：${r.reason}，需人工核对账本`,
+    }
+  }
+
   function health() {
     const list = providers.map((p) => ({
       key: p.key, name: p.name, tier: p.tier, region: p.region, model: p.modelVersion,
@@ -125,6 +243,9 @@ export function createGateway(opts = {}) {
       cacheEntries: cache.size,
       auditEntries: readAudit().length,
       persistence: store?.mode ?? 'memory',
+      billingMode: ledger ? 'ledger-v2' : 'audit-only',
+      billingVersion: ledger ? billingCfg.version : null,
+      billingReservePoints: ledger ? billingCfg.reservePoints : null,
       providers: list,
       note: '只配 API Key 不足以调用：还必须锁定 model_version 快照。未锁定返回 E6008，未配 Key 返回 E6005，都不伪造模型判断。',
       reason: configuredCount === 0
@@ -267,6 +388,7 @@ export function createGateway(opts = {}) {
         return {
           ok: false, degraded: true, errorCodes: ['E6004'],
           t0: { used: true, ok: false, extractor: 'rules', code: extracted.code, errors: extracted.errors },
+          billing: billingNone('t0_validation_error'),
           reason: `T0 事实链输入不合法：${extracted.errors.join('；')}。未向任何 provider 发送数据。`,
         }
       }
@@ -286,6 +408,7 @@ export function createGateway(opts = {}) {
     if (!pii.ok) {
       return {
         ok: false, degraded: true, errorCodes: ['E6004'], t0: t0Meta,
+        billing: billingNone('pii_validation_error'),
         reason: `请求体含禁止字段（PRD 11.4.1 数据最小化）：${pii.violations.join('、')}。未向任何 provider 发送数据。`,
       }
     }
@@ -296,7 +419,10 @@ export function createGateway(opts = {}) {
       allowOverseas: input.allowOverseas ?? false,
     })
     if (region.needsConsent) {
-      return { ok: false, needsConsent: true, tier, region, errorCodes: [], t0: t0Meta, reason: region.reason }
+      return {
+        ok: false, needsConsent: true, tier, region, errorCodes: [], t0: t0Meta,
+        billing: billingNone('needs_consent'), reason: region.reason,
+      }
     }
 
     // 命中 T0 事实链的判断与未命中的不能共用缓存，避免规则层版本升级后读到旧结论
@@ -304,84 +430,106 @@ export function createGateway(opts = {}) {
       + (t0Result ? `:t0:${t0Result.rulesVersion}` : '')
     const hit = cache.get(key)
     if (hit && nowFn() - hit.at < protocol.rules.cacheTtlDays * 86400000) {
-      appendAudit({ taskType: 'judge', tier, providerKey: hit.providerKey, cached: true, input: 0, output: 0, points: 0, t0Used: t0Meta.used, latencyMs: nowFn() - started })
+      appendAudit({ taskType: 'judge', tier, providerKey: hit.providerKey, cached: true, input: 0, output: 0, points: 0, t0Used: t0Meta.used, billingCharged: false, latencyMs: nowFn() - started })
       return {
         ok: true, judgement: hit.judgement, cached: true, tier, region,
         provenanceRate: hit.provenanceRate, t0: { ...t0Meta, reconciliation: hit.reconciliation ?? null },
         audit: { cached: true },
+        billing: billingNone('cache_hit'),
       }
     }
 
     const chain = chainFor(tier, region)
     if (!chain.length) {
       const down = noProviderReason()
-      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], t0Used: t0Meta.used, latencyMs: nowFn() - started })
+      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], t0Used: t0Meta.used, billingCharged: false, latencyMs: nowFn() - started })
       return {
         ok: false, degraded: true, judgement: null, tier, region, t0: t0Meta,
         errorCodes: down.codes, reason: down.reason,
+        billing: billingNone('no_provider'),
       }
     }
+
+    // 只有确认存在可用 provider 链才预扣；预扣失败不发起任何外部请求
+    const hold = reserveBilling('judge', tier, input)
+    if (hold.failed) return reserveFailure('judge', tier, region, hold, { t0: t0Meta })
 
     const baseMessages = buildJudgeMessages({ companyId, sourceTexts: sanitized.texts, facts: input.facts, t0: t0Result })
     const trace = []
-    for (const p of chain) {
-      let messages = baseMessages
-      let result = await callProvider(p, messages, trace)
-      let checked = result.kind === 'ok' ? validateSchema(result.raw) : { valid: false, errors: ['provider 未返回可解析 JSON'] }
-      if (result.kind === 'ok' && !checked.valid && protocol.downgrade.schemaRetrySameProvider >= 1) {
-        messages = [...baseMessages, jsonSchemaHintForRetry(checked.errors)]
-        result = await callProvider(p, messages, trace)
-        checked = result.kind === 'ok' ? validateSchema(result.raw) : { valid: false, errors: ['schema 重试失败'] }
-      }
-      if (result.kind !== 'ok' || !checked.valid) {
-        recordFailure(p)
-        continue
+    try {
+      for (const p of chain) {
+        let messages = baseMessages
+        let result = await callProvider(p, messages, trace)
+        let checked = result.kind === 'ok' ? validateSchema(result.raw) : { valid: false, errors: ['provider 未返回可解析 JSON'] }
+        if (result.kind === 'ok' && !checked.valid && protocol.downgrade.schemaRetrySameProvider >= 1) {
+          messages = [...baseMessages, jsonSchemaHintForRetry(checked.errors)]
+          result = await callProvider(p, messages, trace)
+          checked = result.kind === 'ok' ? validateSchema(result.raw) : { valid: false, errors: ['schema 重试失败'] }
+        }
+        if (result.kind !== 'ok' || !checked.valid) {
+          recordFailure(p)
+          continue
+        }
+
+        const verified = verifyEvidence(checked.value, sanitized.texts)
+        // 证据校验之后再做规则层裁决：代码保守覆盖模型结论，全程留痕，不静默改写
+        const reconciliation = t0Result ? reconcileWithT0(checked.value, t0Result) : null
+        const points = pointCost(result.usage, tier, 0, p)
+        const estimated = billingPoints(result.usage, tier, 0, p)
+        const billing = settleBilling(hold, estimated)
+        appendAudit({
+          taskType: 'judge', tier, providerKey: p.key, model: p.modelVersion, cached: false,
+          input: result.usage.input, output: result.usage.output, points,
+          billingScope: billing.scope, billingCharged: billing.charged,
+          billingRefId: billing.refId ?? null, billingPoints: estimated,
+          piiRemoved: sanitized.removed, t0Used: t0Meta.used,
+          t0Conflicts: reconciliation?.conflicts?.length ?? 0,
+          provenanceRate: Number(verified.provenanceRate.toFixed(3)),
+          passesGate: verified.passesGate, latencyMs: nowFn() - started,
+        })
+        recordSuccess(p)
+        const payload = {
+          ok: true,
+          judgement: {
+            ...checked.value,
+            model_id: p.model,
+            model_version: p.modelVersion, // chainFor 保证非 null，禁止 -latest 浮动指针
+            prompt_version: protocol.promptVersion,
+            schema_version: protocol.schemaVersion,
+          },
+          clientJudgement: null,
+          provenanceRate: verified.provenanceRate,
+          passesGate: verified.passesGate,
+          evidenceFields: verified.fields,
+          errorCodes: verified.passesGate ? [] : ['E6004'],
+          tier, region, cached: false,
+          t0: { ...t0Meta, reconciliation },
+          audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
+          billing,
+        }
+        payload.clientJudgement = toClientJudgement(payload.judgement)
+        cache.set(key, {
+          at: nowFn(), judgement: payload.judgement, providerKey: p.key,
+          provenanceRate: verified.provenanceRate, reconciliation,
+        })
+        return payload
       }
 
-      const verified = verifyEvidence(checked.value, sanitized.texts)
-      // 证据校验之后再做规则层裁决：代码保守覆盖模型结论，全程留痕，不静默改写
-      const reconciliation = t0Result ? reconcileWithT0(checked.value, t0Result) : null
-      const points = pointCost(result.usage, tier, 0, p)
-      appendAudit({
-        taskType: 'judge', tier, providerKey: p.key, model: p.modelVersion, cached: false,
-        input: result.usage.input, output: result.usage.output, points,
-        piiRemoved: sanitized.removed, t0Used: t0Meta.used,
-        t0Conflicts: reconciliation?.conflicts?.length ?? 0,
-        provenanceRate: Number(verified.provenanceRate.toFixed(3)),
-        passesGate: verified.passesGate, latencyMs: nowFn() - started,
-      })
-      recordSuccess(p)
-      const payload = {
-        ok: true,
-        judgement: {
-          ...checked.value,
-          model_id: p.model,
-          model_version: p.modelVersion, // chainFor 保证非 null，禁止 -latest 浮动指针
-          prompt_version: protocol.promptVersion,
-          schema_version: protocol.schemaVersion,
-        },
-        clientJudgement: null,
-        provenanceRate: verified.provenanceRate,
-        passesGate: verified.passesGate,
-        evidenceFields: verified.fields,
-        errorCodes: verified.passesGate ? [] : ['E6004'],
-        tier, region, cached: false,
-        t0: { ...t0Meta, reconciliation },
-        audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
-        billing: { charged: false, scope: 'audit-only', note: 'gateway 的 points 为 token 折算审计估值，v0.5.0 账本只覆盖云端任务预扣/结算（见 /health.points.scope）' },
+      const billing = releaseBilling(hold, '降级链耗尽或 schema/证据校验全部失败')
+      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', t0Used: t0Meta.used, billingCharged: false, billingRefId: billing.refId ?? null, latencyMs: nowFn() - started })
+      return {
+        ok: false, degraded: true, judgement: null, tier, region, errorCodes: ['E6003', 'E6005'], trace, t0: t0Meta,
+        billing,
+        reason: '降级链已耗尽（provider 故障或 schema/证据校验全部失败）。本次为规则估算，未经模型校验，预扣点数已全额释放。',
       }
-      payload.clientJudgement = toClientJudgement(payload.judgement)
-      cache.set(key, {
-        at: nowFn(), judgement: payload.judgement, providerKey: p.key,
-        provenanceRate: verified.provenanceRate, reconciliation,
-      })
-      return payload
-    }
-
-    appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', t0Used: t0Meta.used, latencyMs: nowFn() - started })
-    return {
-      ok: false, degraded: true, judgement: null, tier, region, errorCodes: ['E6003', 'E6005'], trace, t0: t0Meta,
-      reason: '降级链已耗尽（provider 故障或 schema/证据校验全部失败）。本次为规则估算，未经模型校验。',
+    } catch (err) {
+      // 异常路径也必须释放预扣，绝不留下永久冻结的 held 点数
+      const billing = releaseBilling(hold, '网关调用异常')
+      appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6001', billingCharged: false, billingRefId: billing.refId ?? null, latencyMs: nowFn() - started })
+      return {
+        ok: false, degraded: true, judgement: null, tier, region, errorCodes: ['E6001'], trace, t0: t0Meta,
+        billing, reason: `网关调用异常，预扣点数已全额释放：${String(err?.message ?? err)}`,
+      }
     }
   }
 
@@ -436,11 +584,19 @@ export function createGateway(opts = {}) {
     const meta = { anchorSource, anchor: facts.anchor, ...(t0 ? { t0 } : {}) }
 
     if (!facts.anchor || !facts.product) {
-      return { ok: false, degraded: true, errorCodes: ['E6004'], ...meta, reason: '缺少个性化锚点或主营产品，拒绝生成无事实依据的开发信。' }
+      return {
+        ok: false, degraded: true, errorCodes: ['E6004'], ...meta,
+        billing: billingNone('missing_anchor_or_product'),
+        reason: '缺少个性化锚点或主营产品，拒绝生成无事实依据的开发信。',
+      }
     }
     const pii = assertNoPii({ facts })
     if (!pii.ok) {
-      return { ok: false, degraded: true, errorCodes: ['E6004'], ...meta, reason: `写信请求含禁止字段（PRD 11.4.1）：${pii.violations.join('、')}。未向任何 provider 发送数据。` }
+      return {
+        ok: false, degraded: true, errorCodes: ['E6004'], ...meta,
+        billing: billingNone('pii_validation_error'),
+        reason: `写信请求含禁止字段（PRD 11.4.1）：${pii.violations.join('、')}。未向任何 provider 发送数据。`,
+      }
     }
 
     const tier = route({ type: 'write_email' })
@@ -448,48 +604,74 @@ export function createGateway(opts = {}) {
       policy: input.regionPolicy ?? 'domestic_first',
       allowOverseas: input.allowOverseas ?? false,
     })
-    if (region.needsConsent) return { ok: false, needsConsent: true, tier, region, errorCodes: [], ...meta, reason: region.reason }
+    if (region.needsConsent) {
+      return {
+        ok: false, needsConsent: true, tier, region, errorCodes: [], ...meta,
+        billing: billingNone('needs_consent'), reason: region.reason,
+      }
+    }
 
     const chain = chainFor(tier, region)
     if (!chain.length) {
       const down = noProviderReason()
-      appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], latencyMs: nowFn() - started })
+      appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: down.codes[0], billingCharged: false, latencyMs: nowFn() - started })
       return {
         ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: down.codes, ...meta,
+        billing: billingNone('no_provider'),
         reason: down.reason + ' 本次不生成模型正文，客户端将回退本地确定性模板并明确标注 DEMO。',
       }
     }
 
+    // 只有确认存在可用 provider 链才预扣；预扣失败不发起任何外部请求
+    const hold = reserveBilling('write_email', tier, input)
+    if (hold.failed) return reserveFailure('write_email', tier, region, hold, meta)
+
     const messages = buildEmailMessages(facts)
     const trace = []
-    for (const p of chain) {
-      const result = await callProvider(p, messages, trace)
-      const checked = result.kind === 'ok' ? validateEmailDraft(result.raw, { maxWords: facts.maxWords }) : { valid: false, errors: ['provider 未返回可解析 JSON'] }
-      if (result.kind !== 'ok' || !checked.valid) {
-        recordFailure(p)
-        trace.push({ providerKey: p.key, event: 'content_rejected', errors: checked.errors.slice(0, 3) })
-        continue
+    try {
+      for (const p of chain) {
+        const result = await callProvider(p, messages, trace)
+        const checked = result.kind === 'ok' ? validateEmailDraft(result.raw, { maxWords: facts.maxWords }) : { valid: false, errors: ['provider 未返回可解析 JSON'] }
+        if (result.kind !== 'ok' || !checked.valid) {
+          recordFailure(p)
+          trace.push({ providerKey: p.key, event: 'content_rejected', errors: checked.errors.slice(0, 3) })
+          continue
+        }
+        const points = pointCost(result.usage, tier, 0, p)
+        const estimated = billingPoints(result.usage, tier, 0, p)
+        const billing = settleBilling(hold, estimated)
+        appendAudit({
+          taskType: 'write_email', tier, providerKey: p.key, model: p.modelVersion, cached: false,
+          input: result.usage.input, output: result.usage.output, points,
+          billingScope: billing.scope, billingCharged: billing.charged,
+          billingRefId: billing.refId ?? null, billingPoints: estimated,
+          wordCount: checked.value.wordCount, latencyMs: nowFn() - started,
+        })
+        recordSuccess(p)
+        return {
+          ok: true, subject: checked.value.subject, body: checked.value.body,
+          anchorUsed: checked.value.anchorUsed, wordCount: checked.value.wordCount,
+          tier, region, cached: false, ...meta,
+          audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
+          billing,
+          note: '正文未经合规尾巴注入：真实身份 / 物理地址 / 退订说明由客户端代码追加，并通过发送前校验后才可入草稿队列。',
+        }
       }
-      const points = pointCost(result.usage, tier, 0, p)
-      appendAudit({
-        taskType: 'write_email', tier, providerKey: p.key, model: p.modelVersion, cached: false,
-        input: result.usage.input, output: result.usage.output, points,
-        wordCount: checked.value.wordCount, latencyMs: nowFn() - started,
-      })
-      recordSuccess(p)
-      return {
-        ok: true, subject: checked.value.subject, body: checked.value.body,
-        anchorUsed: checked.value.anchorUsed, wordCount: checked.value.wordCount,
-        tier, region, cached: false, ...meta,
-        audit: { providerKey: p.key, model: p.modelVersion, input: result.usage.input, output: result.usage.output, points, latencyMs: nowFn() - started },
-        note: '正文未经合规尾巴注入：真实身份 / 物理地址 / 退订说明由客户端代码追加，并通过发送前校验后才可入草稿队列。',
-      }
-    }
 
-    appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', latencyMs: nowFn() - started })
-    return {
-      ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: ['E6003', 'E6005'], trace, ...meta,
-      reason: '降级链已耗尽（provider 故障或正文未通过 F6-2 硬约束）。不输出未校验正文，客户端回退本地模板。',
+      const billing = releaseBilling(hold, '降级链耗尽或正文未通过 F6-2 硬约束')
+      appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6005', billingCharged: false, billingRefId: billing.refId ?? null, latencyMs: nowFn() - started })
+      return {
+        ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: ['E6003', 'E6005'], trace, ...meta,
+        billing,
+        reason: '降级链已耗尽（provider 故障或正文未通过 F6-2 硬约束）。不输出未校验正文，客户端回退本地模板；预扣点数已全额释放。',
+      }
+    } catch (err) {
+      const billing = releaseBilling(hold, '网关写信异常')
+      appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6001', billingCharged: false, billingRefId: billing.refId ?? null, latencyMs: nowFn() - started })
+      return {
+        ok: false, degraded: true, subject: null, body: null, tier, region, errorCodes: ['E6001'], trace, ...meta,
+        billing, reason: `网关写信异常，预扣点数已全额释放：${String(err?.message ?? err)}`,
+      }
     }
   }
 

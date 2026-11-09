@@ -1,5 +1,5 @@
 /**
- * PRD F0 / 9.3：统一适配器与三级路由 · 前端服务层唯一入口（v0.5.0）
+ * PRD F0 / 9.3：统一适配器与三级路由 · 前端服务层唯一入口（v0.6.0）
  *
  * 本文件同时是业务代码的唯一 import 边界：组件、store、App 一律从这里取能力，
  * 不得直接 import gateway-client / task-runner / email-generator 的具体实现，

@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createGateway, route, regionDecision } from '../gateway.mjs'
 import { createOrchestrator } from '../orchestrator.mjs'
-import { evaluateBaseline, baselineManifest } from '../eval.mjs'
+import { evaluateBaseline, baselineManifest, diffEvalRuns, EVAL_DIFF_VERSION } from '../eval.mjs'
 import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft, buildJudgeMessages } from '../protocol.mjs'
 import { createApp } from '../index.mjs'
 import { createStore, createMemoryStore, sqliteAvailable } from '../store.mjs'
@@ -257,7 +257,131 @@ describe('任务编排器 · F2 SSE / 断点续跑 / 并发', () => {
     const ids = Array.from({ length: 4 }, () => o.createTask(config))
     expect(ids.filter((t) => t.status === 'running')).toHaveLength(3)
     expect(ids[3].status).toBe('queued')
+    expect(ids[3].queuePosition).toBe(1)
+    expect(ids[3].maxConcurrent).toBe(3)
     o.dispose()
+  })
+})
+
+describe('任务队列 · v0.6.0 queued 自动出队 / 并发闸门 / 硬超时不误算', () => {
+  const config = { keywords: ['hydraulic fittings'], markets: ['德国'], depth: 2, targetCount: 20 }
+
+  it('槽位释放后按 FIFO 自动出队，位次前移，并发上限任何时刻不越界', () => {
+    const o = createOrchestrator({ tickMs: 10000, maxConcurrent: 2 })
+    const t1 = o.createTask(config)
+    const t2 = o.createTask(config)
+    const t3 = o.createTask(config)
+    const t4 = o.createTask(config)
+    expect([t1, t2, t3, t4].map((t) => t.status)).toEqual(['running', 'running', 'queued', 'queued'])
+    expect(o.getTask(t3.id).queuePosition).toBe(1)
+    expect(o.getTask(t4.id).queuePosition).toBe(2)
+    expect(o.getTask(t3.id)).toMatchObject({ activeCount: 2, queuedCount: 2, maxConcurrent: 2 })
+
+    const started = []
+    o.subscribe(t3.id, (e) => { if (e.type === 'started') started.push({ id: t3.id, dequeued: e.dequeued }) })
+    o.subscribe(t4.id, (e) => { if (e.type === 'started') started.push({ id: t4.id, dequeued: e.dequeued }) })
+
+    o.abort(t1.id)
+    expect(o.getTask(t3.id).status).toBe('running')
+    expect(o.getTask(t4.id).status).toBe('queued')
+    expect(o.getTask(t4.id).queuePosition).toBe(1)
+    expect(o.listTasks().filter((t) => t.status === 'running')).toHaveLength(2)
+
+    o.abort(t2.id)
+    expect(o.getTask(t4.id).status).toBe('running')
+    expect(o.getTask(t4.id).queuePosition).toBe(0)
+    expect(o.listTasks().filter((t) => t.status === 'running')).toHaveLength(2)
+    expect(started).toEqual([
+      { id: t3.id, dequeued: true },
+      { id: t4.id, dequeued: true },
+    ])
+    // 出队日志必须可见，不能悄悄启动
+    expect(o.getTask(t4.id).progress.log.some((l) => l.text.includes('队列出队'))).toBe(true)
+    o.dispose()
+  })
+
+  it('暂停释放槽位并补位；续跑不能绕过并发上限，被挡回时如实保留 queued', () => {
+    const o = createOrchestrator({ tickMs: 10000, maxConcurrent: 1 })
+    const t1 = o.createTask(config)
+    const t2 = o.createTask(config)
+    expect(t2.status).toBe('queued')
+
+    o.pause(t1.id)
+    expect(o.getTask(t1.id).status).toBe('paused')
+    expect(o.getTask(t2.id).status).toBe('running')
+
+    const resumed = o.resume(t1.id)
+    expect(resumed.status).toBe('queued') // 绝不谎报 running
+    expect(o.listTasks().filter((t) => t.status === 'running')).toHaveLength(1)
+    // 对 queued 再点「继续」也不能插队或伪造启动
+    expect(o.resume(t1.id).status).toBe('queued')
+
+    o.abort(t2.id)
+    expect(o.getTask(t1.id).status).toBe('running')
+    o.dispose()
+  })
+
+  it('排队等待 1 小时不占用硬超时预算，出队后的第一个 tick 不会被误判超时', () => {
+    vi.useFakeTimers()
+    let clock = 1_700_000_000_000
+    const o = createOrchestrator({ now: () => clock, tickMs: 10, maxConcurrent: 1 })
+    try {
+      const t1 = o.createTask(config)
+      const t2 = o.createTask(config)
+      expect(t2.status).toBe('queued')
+      // 排队等待期间没有任何 tick，但墙钟前进一小时
+      clock += 60 * 60 * 1000
+      // t1 的第一个 tick 会因真实运行 1 小时触发硬超时收尾，从而释放槽位
+      vi.advanceTimersByTime(10)
+      expect(o.getTask(t2.id).status).toBe('running')
+      expect(o.getTask(t2.id).elapsedMs).toBe(0)
+      // t2 从出队时刻重新计时：下一个 tick 只累计 10ms，不应被上一任务的 1h 拖成硬超时
+      clock += 10
+      vi.advanceTimersByTime(10)
+      expect(o.getTask(t2.id).status).toBe('running')
+      expect(o.getTask(t1.id).status).toBe('done')
+    } finally {
+      o.dispose()
+      vi.useRealTimers()
+    }
+  })
+
+  it('排队任务未启动即中止：全额释放预扣，不影响其它运行任务', () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    const o = createOrchestrator({ store, ledger, tickMs: 10000, maxConcurrent: 1 })
+    const t1 = o.createTask(config)
+    const t2 = o.createTask(config)
+    expect(ledger.state().held).toBe(80)
+    const aborted = o.abort(t2.id)
+    expect(aborted.status).toBe('aborted')
+    expect(aborted.pointsUsed).toBe(0)
+    expect(aborted.ledger.settled).toBe('released')
+    expect(ledger.state()).toMatchObject({ held: 40, spent: 0, available: 160 })
+    expect(o.getTask(t1.id).status).toBe('running')
+    expect(ledger.entries(t2.id).filter((e) => e.kind === 'reserve')).toHaveLength(1)
+    o.dispose()
+  })
+
+  it('进程重启后原排队任务恢复为 paused，不自动出队、不二次预扣', () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    const o1 = createOrchestrator({ store, ledger, tickMs: 10000, maxConcurrent: 1 })
+    o1.createTask(config)
+    const queued = o1.createTask(config)
+    expect(queued.status).toBe('queued')
+    o1.dispose()
+
+    const o2 = createOrchestrator({ store, ledger, tickMs: 10000, maxConcurrent: 1 })
+    expect(o2.getTask(queued.id).status).toBe('paused')
+    expect(o2.getTask(queued.id).activeCount).toBe(0) // 没有自动出队
+    expect(o2.getTask(queued.id).progress.log.some((l) => l.text.includes('不会自动启动'))).toBe(true)
+    expect(ledger.state().held).toBe(80)
+    // 显式继续后槽位空闲 → 正常启动，但绝不二次预扣
+    expect(o2.resume(queued.id).status).toBe('running')
+    expect(ledger.state().held).toBe(80)
+    expect(ledger.entries(queued.id).filter((e) => e.kind === 'reserve')).toHaveLength(1)
+    o2.dispose()
   })
 })
 
@@ -810,7 +934,8 @@ describe('点数账本事务化 · 预扣 / 结算 / 释放 / 幂等', () => {
     expect(s.available).toBe(100)
     expect(s.ledgerVersion).toBe(LEDGER_VERSION)
     expect(s.available + s.held + s.spent).toBe(s.granted)
-    expect(ledger.health().auditOnlyConsumers).toContain('judge')
+    expect(ledger.health().ledgerConsumers).toContain('judge')
+    expect(ledger.health().auditOnlyConsumers).toHaveLength(0)
   })
 
   it('同一 refId 预扣幂等，金额不同报 E4002，余额不足报 E4001', () => {
@@ -1040,11 +1165,267 @@ describe('385 家基准集标注契约 · 只校验不伪造', () => {
       expect(after.available).toBe(60)
 
       const health = await (await fetch(`${base}/health`)).json()
-      expect(health.version).toBe('0.5.0')
+      expect(health.version).toBe('0.6.0')
       expect(health.points.ledgerVersion).toBe(LEDGER_VERSION)
-      expect(health.billing.auditOnlyConsumers).toContain('judge')
+      expect(health.billing.ledgerConsumers).toContain('judge')
+      expect(health.billing.ledgerConsumers).toContain('write_email')
+      expect(health.billing.auditOnlyConsumers).toHaveLength(0)
       expect(health.baseline.releaseEligible).toBe(false)
       expect(health.t0.judgeFactChain.enabled).toBe(true)
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+describe('网关调用计费闭环 · v0.6.0 reserve / settle / release', () => {
+  const env = () => testEnv({ DEEPSEEK_API_KEY: 'k' })
+  const emailDraft = {
+    subject: 'Hydraulic fittings supply for Rotex',
+    body: 'Saw that you distribute Parker fittings across Benelux, so I am writing to your team directly. We supply hydraulic hose fittings with stable lead times on repeat orders. Would it help if I sent a short quote sheet with FOB terms?',
+    anchor_used: 'you distribute Parker fittings',
+  }
+  const emailReq = (overrides = {}) => ({
+    anchor: 'you distribute Parker fittings across Benelux', product: 'hydraulic hose fittings',
+    advantages: ['stable lead times on repeat orders'], purpose: 'intro', tone: 'concise',
+    maxWords: 90, language: 'en', country: '美国', ...overrides,
+  })
+  const makeLedger = (balance = 200) => {
+    const store = createMemoryStore()
+    return { store, ledger: createLedger({ store, openingBalance: balance }) }
+  }
+  const makeGateway = (ledger, fetchImpl = okFetch(wire())) => createGateway({
+    env: env(), fetchImpl, ledger, sleep: async () => {}, now: () => 1_700_000_000_000,
+  })
+  const failFetch = async () => ({ status: 500, ok: false, json: async () => ({}) })
+
+  it('成功判断：按 token 折算结算整数点，预扣差额退还，流水只有 reserve + settle', async () => {
+    const { ledger } = makeLedger()
+    const g = makeGateway(ledger)
+    const r = await g.judge(judgeInput({ requestId: 'judge-ok-1' }))
+    expect(r.ok).toBe(true)
+    expect(r.billing).toMatchObject({
+      charged: true, scope: 'ledger-v2', refId: 'gw:judge:judge-ok-1', capped: false,
+    })
+    expect(r.billing.estimatedPoints).toBeGreaterThan(0)
+    expect(Number.isInteger(r.billing.chargedPoints)).toBe(true)
+    expect(r.billing.chargedPoints).toBe(r.billing.estimatedPoints)
+    expect(ledger.state()).toMatchObject({ held: 0, spent: r.billing.chargedPoints })
+    expect(ledger.state().available + ledger.state().spent).toBe(200)
+    expect(ledger.entries('gw:judge:judge-ok-1').map((e) => e.kind)).toEqual(['reserve', 'settle'])
+    expect(g.getAudit()[0]).toMatchObject({ billingCharged: true, billingScope: 'ledger-v2' })
+  })
+
+  it('成功写信同样进入账本，且响应不把审计估值说成已扣点', async () => {
+    const { ledger } = makeLedger()
+    const g = makeGateway(ledger, okFetch(emailDraft))
+    const r = await g.writeEmail(emailReq({ requestId: 'email-ok-1' }))
+    expect(r.ok).toBe(true)
+    expect(r.billing).toMatchObject({ charged: true, scope: 'ledger-v2', refId: 'gw:write_email:email-ok-1' })
+    expect(ledger.entries('gw:write_email:email-ok-1').map((e) => e.kind)).toEqual(['reserve', 'settle'])
+  })
+
+  it('未配置 Key：无可用 provider，不预扣、不扣点、如实标 no_provider', async () => {
+    const { ledger } = makeLedger()
+    const g = createGateway({ env: {}, ledger, fetchImpl: okFetch(wire()) })
+    const r = await g.judge(judgeInput())
+    expect(r.errorCodes).toContain('E6005')
+    expect(r.billing).toMatchObject({ charged: false, reason: 'no_provider' })
+    expect(ledger.state()).toMatchObject({ held: 0, spent: 0, available: 200 })
+  })
+
+  it('降级链耗尽 / 内容未过硬约束：预扣全额释放，失败尝试仍留审计', async () => {
+    const { ledger } = makeLedger()
+    const g = makeGateway(ledger, failFetch)
+    const r = await g.judge(judgeInput({ requestId: 'judge-fail-1' }))
+    expect(r.ok).toBe(false)
+    expect(r.billing).toMatchObject({ charged: false, released: true, scope: 'ledger-v2' })
+    expect(ledger.state()).toMatchObject({ held: 0, spent: 0, available: 200 })
+    expect(ledger.entries('gw:judge:judge-fail-1').map((e) => e.kind)).toEqual(['reserve', 'release'])
+    expect(g.getAudit().some((e) => e.degraded && e.billingCharged === false)).toBe(true)
+
+    const g2 = makeGateway(ledger, okFetch({ ...emailDraft, body: emailDraft.body + ' Act now for a free quote!' }))
+    const r2 = await g2.writeEmail(emailReq({ requestId: 'email-fail-1' }))
+    expect(r2.ok).toBe(false)
+    expect(r2.billing.released).toBe(true)
+    expect(ledger.state().spent).toBe(0)
+  })
+
+  it('30 天缓存命中不二次扣点，响应明确标 cache_hit', async () => {
+    const { ledger } = makeLedger()
+    const g = makeGateway(ledger)
+    const r1 = await g.judge(judgeInput({ requestId: 'cache-a' }))
+    const r2 = await g.judge(judgeInput({ requestId: 'cache-b' }))
+    expect(r2.cached).toBe(true)
+    expect(r2.billing).toMatchObject({ charged: false, reason: 'cache_hit' })
+    expect(ledger.state().spent).toBe(r1.billing.chargedPoints)
+    expect(ledger.allEntries().filter((e) => e.kind === 'settle')).toHaveLength(1)
+  })
+
+  it('点数不足：E4001 且不向任何 provider 发起请求', async () => {
+    const { ledger } = makeLedger(1)
+    let calls = 0
+    const g = createGateway({
+      env: env(), ledger, sleep: async () => {},
+      fetchImpl: async () => { calls++; return okFetch(wire())() },
+    })
+    const r = await g.judge(judgeInput({ requestId: 'poor-1' }))
+    expect(r.code).toBe('E4001')
+    expect(r.errorCodes).toContain('E4001')
+    expect(r.billing.charged).toBe(false)
+    expect(calls).toBe(0)
+    expect(ledger.state()).toMatchObject({ held: 0, spent: 0, available: 1 })
+  })
+
+  it('同一 requestId 已结算时拒绝重复调用，绝不二次扣点', async () => {
+    const { ledger } = makeLedger()
+    const g = makeGateway(ledger, okFetch(emailDraft))
+    const r1 = await g.writeEmail(emailReq({ requestId: 'email-idem' }))
+    const r2 = await g.writeEmail(emailReq({ requestId: 'email-idem' }))
+    expect(r1.ok).toBe(true)
+    expect(r2.code).toBe('E4005')
+    expect(r2.errorCodes).toContain('E4005')
+    expect(r2.billing.charged).toBe(false)
+    expect(ledger.state().spent).toBe(r1.billing.chargedPoints)
+    expect(ledger.allEntries().filter((e) => e.kind === 'settle')).toHaveLength(1)
+  })
+
+  it('未注入账本的独立网关仍为 audit-only，不谎报已扣点', async () => {
+    const g = createGateway({ env: env(), fetchImpl: okFetch(wire()), sleep: async () => {} })
+    const r = await g.judge(judgeInput())
+    expect(r.ok).toBe(true)
+    expect(r.billing).toMatchObject({ charged: false, scope: 'audit-only' })
+    expect(g.health().billingMode).toBe('audit-only')
+  })
+
+  it('HTTP：点数不足返回 402（不是可重试的 503 降级）', async () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 1 })
+    const gateway = createGateway({
+      env: env(), ledger, fetchImpl: okFetch(wire()), sleep: async () => {},
+    })
+    const app = createApp({
+      store, ledger, gateway,
+      orchestratorOptions: { tickMs: 10000 },
+    })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    try {
+      const res = await fetch(`${base}/v1/judge`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(judgeInput({ requestId: 'http-poor-1' })),
+      })
+      const body = await res.json()
+      expect(res.status).toBe(402)
+      expect(body.code).toBe('E4001')
+      expect(body.billing.charged).toBe(false)
+      const health = await (await fetch(`${base}/health`)).json()
+      expect(health.billing.ledgerConsumers).toContain('judge')
+      expect(health.billing.reservePoints.T1).toBeGreaterThan(0)
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+describe('评测版本 diff · v0.6.0 纯函数 / 去掉占位字符串', () => {
+  /**
+   * 注意：这里构造的是「纯函数的输入归档」，仅用于验证 diff 算法本身。
+   * 它们不是 385 家人工标注基准集，不写回仓库、不参与任何发布判定。
+   */
+  const run = (overrides = {}) => ({
+    ok: true, status: 'PASSED', baselineVersion: 'eval-fixture-v1', sampleSize: 385,
+    metrics: {
+      provenance_rate: 0.97, signal_precision: 0.93, extraction_recall: 0.8,
+      rule_compliance: 1, kappa: 0.72, spearman_rho: 0.81,
+      schema_pass_rate: 0.995, refusal_rate: 0.02,
+    },
+    ...overrides,
+  })
+  const noData = () => ({ ok: false, status: 'NO_DATA', baselineVersion: 'none', metrics: {}, manifest: baselineManifest() })
+
+  it('占位对象 / 空输入被 E4006 拒绝，不凑出一份假 diff', () => {
+    expect(diffEvalRuns(null, run())).toMatchObject({ ok: false, code: 'E4006', status: 'INVALID_INPUT' })
+    expect(diffEvalRuns(run(), { status: 'PASSED' })).toMatchObject({ ok: false, code: 'E4006' })
+    expect(diffEvalRuns('placeholder', run())).toMatchObject({ ok: false, code: 'E4006' })
+    expect(diffEvalRuns(run(), run())).not.toHaveProperty('code', 'E4006')
+  })
+
+  it('任一归档为 NO_DATA 时是 NO_BASELINE：不生成数值 delta、不宣称无回退', () => {
+    const r = diffEvalRuns(noData(), run())
+    expect(r).toMatchObject({ ok: false, status: 'NO_BASELINE', version: EVAL_DIFF_VERSION, releaseEligible: false })
+    expect(r.rows.every((x) => x.delta === null && !x.regression)).toBe(true)
+    expect(r.statusTransition).toBe('NO_DATA → PASSED')
+  })
+
+  it('两次 PASSED 且指标上升：逐指标 delta 可核验，diff 通过但仍不可发布', () => {
+    const prev = run()
+    const current = run({ baselineVersion: 'eval-fixture-v2', metrics: { ...run().metrics, provenance_rate: 0.99, kappa: 0.75 } })
+    const r = diffEvalRuns(prev, current)
+    expect(r.status).toBe('IMPROVED')
+    expect(r.diffPassed).toBe(true)
+    expect(r.releaseEligible).toBe(false) // 外部阻断项不是 diff 能证明的
+    expect(r.p0Regressions).toHaveLength(0)
+    expect(r.improvements).toContain('provenance_rate')
+    const row = r.rows.find((x) => x.key === 'provenance_rate')
+    expect(row).toMatchObject({ prevValue: 0.97, currentValue: 0.99, delta: 0.02, p0: true })
+    expect(r.sampleSizeDelta).toBe(0)
+  })
+
+  it('P0 指标下降 / 跨阈值 / 已测量变未测量，全部判 regression', () => {
+    const prev = run()
+    const dropped = diffEvalRuns(prev, run({ metrics: { ...run().metrics, provenance_rate: 0.90 } }))
+    expect(dropped.status).toBe('REGRESSION')
+    expect(dropped.p0Regressions).toContain('provenance_rate')
+    expect(dropped.diffPassed).toBe(false)
+    expect(dropped.rows.find((x) => x.key === 'provenance_rate')).toMatchObject({ delta: -0.07, thresholdCrossed: true })
+
+    const lost = diffEvalRuns(prev, run({ metrics: { ...run().metrics, kappa: null } }))
+    expect(lost.rows.find((x) => x.key === 'kappa')).toMatchObject({ measurementLost: true, regression: true })
+  })
+
+  it('门禁状态回退（PASSED → BLOCKED）即使数值全升也判 regression', () => {
+    const r = diffEvalRuns(run(), run({ ok: false, status: 'BLOCKED', metrics: { ...run().metrics, provenance_rate: 1 } }))
+    expect(r.gateRegression).toBe(true)
+    expect(r.status).toBe('REGRESSION')
+    expect(r.diffPassed).toBe(false)
+  })
+
+  it('是纯函数：不修改输入、同输入结果稳定、无时间/随机依赖', () => {
+    const a = run(), b = run({ baselineVersion: 'eval-fixture-v2' })
+    const snapshot = JSON.stringify({ a, b })
+    const r1 = diffEvalRuns(a, b)
+    const r2 = diffEvalRuns(a, b)
+    expect(JSON.stringify({ a, b })).toBe(snapshot)
+    expect(JSON.stringify(r1)).toBe(JSON.stringify(r2))
+    expect(r1.status).toBe('STABLE')
+  })
+
+  it('evaluateBaseline 不再返回「需在 CI 中生成」占位字符串，改为可执行端点', () => {
+    const empty = evaluateBaseline([], 'v1')
+    expect(JSON.stringify(empty)).not.toContain('需在 CI')
+    expect(empty.diffEndpoint).toBe('POST /v1/eval/diff')
+    const manifest = baselineManifest()
+    expect(manifest.diffVersion).toBe(EVAL_DIFF_VERSION)
+    const filled = evaluateBaseline([{ provenance: { matched: 1, total: 1 }, schemaPass: true }], 'v1')
+    expect(JSON.stringify(filled)).not.toContain('需在 CI')
+    expect(filled.diffEndpoint).toBe('POST /v1/eval/diff')
+  })
+
+  it('HTTP：/v1/eval/diff 非法输入 400 E4006，两份空归档返回 NO_BASELINE', async () => {
+    const app = createApp({ store: createMemoryStore(), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    const post = (body) => fetch(`${base}/v1/eval/diff`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    try {
+      const bad = await post({ prev: {}, current: {} })
+      expect(bad.status).toBe(400)
+      expect(bad.body.code).toBe('E4006')
+      const okRes = await post({ prev: noData(), current: noData() })
+      expect(okRes.status).toBe(200)
+      expect(okRes.body.status).toBe('NO_BASELINE')
+      expect(okRes.body.releaseEligible).toBe(false)
+      const gates = await (await fetch(`${base}/v1/eval/gates`)).json()
+      expect(gates.diffEndpoint).toBe('POST /v1/eval/diff')
+      expect(gates.diffVersion).toBe(EVAL_DIFF_VERSION)
     } finally { await new Promise((resolve) => app.server.close(resolve)) }
   })
 })

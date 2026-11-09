@@ -191,7 +191,7 @@ export default function SettingsView() {
               <Card className="p-5">
                 <SectionTitle
                   title="点数账本 · T0 事实链 · 评测契约"
-                  desc="v0.5.0 工程口径：服务端如实暴露能力边界，未标注、未扣费、未接数据源一律标出来"
+                  desc="v0.6.0 工程口径：服务端如实暴露能力边界，未标注、未扣费、未接数据源一律标出来"
                   extra={<Badge tone={gateway?.points ? 'blue' : 'slate'}>{gateway?.points?.ledgerVersion ?? '账本离线'}</Badge>}
                 />
                 <div className="grid grid-cols-4 gap-3 text-[11px]">
@@ -211,13 +211,22 @@ export default function SettingsView() {
                   <p className="flex flex-wrap items-center gap-1.5">
                     <Coins size={12} className="text-amber-600" />
                     账本范围：
-                    <Badge tone="emerald">创建预扣</Badge><Badge tone="emerald">完成/中止结算</Badge><Badge tone="emerald">未启动全额释放</Badge>
+                    <Badge tone="emerald">任务预扣</Badge><Badge tone="emerald">任务结算/释放</Badge>
+                    <Badge tone="blue">judge / write_email 真实调用预扣</Badge><Badge tone="blue">校验通过才结算</Badge>
                     <span>同一 refId 幂等，进程重启不重复扣（AC-03）。</span>
                   </p>
                   <p className="flex flex-wrap items-center gap-1.5">
                     <ShieldCheck size={12} className="text-rose-600" />
+                    <strong className="text-ink">网关计费口径</strong>：
+                    <span>
+                      预扣上限 T0={gateway?.billing?.reservePoints?.T0 ?? '—'} / T1={gateway?.billing?.reservePoints?.T1 ?? '—'} / T2={gateway?.billing?.reservePoints?.T2 ?? '—'} 点；
+                      仅内容校验通过才结算，失败/降级/缓存命中一律全额释放、不扣点；未注入账本的独立网关仍为 audit-only。
+                    </span>
+                  </p>
+                  <p className="flex flex-wrap items-center gap-1.5">
+                    <ShieldCheck size={12} className="text-slate-500" />
                     <strong className="text-ink">明确边界</strong>：
-                    <span>{gateway?.points?.note ?? 'gateway 的 points 是 token 折算的审计估值，不进账本、不代表已扣点。'}</span>
+                    <span>{gateway?.points?.note ?? '账本覆盖云端任务与网关真实调用；审计里的 points 是 token 折算估值，只有 billing.charged=true 才代表实际扣点。'}</span>
                   </p>
                   <p className="flex flex-wrap items-center gap-1.5">
                     <Cpu size={12} className="text-blue-600" />

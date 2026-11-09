@@ -1,6 +1,6 @@
 # LeadPilot 猎客 · B2B 外贸客户开发工作台
 
-基于资料库 PRD《PRD-LeadPilot-B2B外贸客户开发工作台-v1.1》实现的**可运行基线 v0.5.0**：客户端完整主链路 + 真实服务端 LLM 网关 / 采集编排骨架 + 安全边界 / 模型快照锁定 / 持久化（AC-03 闭环）+ T0 规则事实抽取 / 数据源注册表 + **点数账本事务化 / T0 → judge 事实链 / 385 家标注契约 / 前端适配器层收敛**。
+基于资料库 PRD《PRD-LeadPilot-B2B外贸客户开发工作台-v1.1》实现的**可运行基线 v0.6.0**：客户端完整主链路 + 真实服务端 LLM 网关 / 采集编排骨架 + 安全边界 / 模型快照锁定 / 持久化（AC-03 闭环）+ T0 规则事实抽取 / 数据源注册表 + 点数账本事务化 / T0 → judge 事实链 / 385 家标注契约 / 前端适配器层收敛 + **并发队列 FIFO 自动出队 / 网关调用计费闭环 / 评测版本 diff 纯函数**。
 
 一句话：`输入卖什么、卖给谁，10 分钟拿到一份能直接发信的客户名单`。本仓库把「评分可信度」这条产品假设做成了可运行、可单测、可审计的代码；**不含真实数据源采购、Google OAuth 验证与桌面安装包**。
 
@@ -20,11 +20,11 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict（noUnusedLocals / noUnusedParameters）
-npm test                # 96 个单元测试（6 文件，前端 32 + 服务端 64）
-npm run gate            # 发布门禁自检 23 项（账本 / T0 链 / 基准集 / 适配器边界）
+npm test                # 118 个单元测试（6 文件，前端 32 + 服务端 86）
+npm run gate            # 发布门禁自检 27 项（账本 / T0 链 / 基准集 / 适配器边界 / diff / 队列）
 npm run validate:baseline -- --self-test   # 标注导入校验器反例自检
 npm run build           # 类型检查 + 生产构建
-npm run smoke           # 云端端到端冒烟 27 项（需先启动 npm run cloud）
+npm run smoke           # 云端端到端冒烟 36 项（需先启动 npm run cloud）
 npm run verify:restart  # AC-03 真实杀进程 → 重启 → 断点续跑（独立端口 5193）
 ```
 
@@ -32,7 +32,7 @@ npm run verify:restart  # AC-03 真实杀进程 → 重启 → 断点续跑（�
 
 ## 先读这句
 
-> **演示数据不是真实采集结果，E6005 降级不是成功，未锁快照不是可调用，0/6 数据源不是「已接入」，审计里的 points 不是已扣点，导入校验通过不等于评测通过。**
+> **演示数据不是真实采集结果，E6005 降级不是成功，未锁快照不是可调用，0/6 数据源不是「已接入」，审计里的 points 不是已扣点（只有 `billing.charged=true` 才是），导入校验通过不等于评测通过，diff 通过不等于可发布。**
 > 六个数据源适配器、Gmail OAuth 与 Tauri 外壳均未接入；客户记录全部带 `demo: true`，界面常驻黄条。
 > 未配置 API Key → `503 E6005`；只配了 Key 但没锁 `model_version` → `E6008`；两者都满足才发起真实 provider 调用。
 > 385 家人工标注基准集**仓库不提供、代码不生成**；`releaseEligible` 恒为 `false`，`/v1/eval/run` 无标注时返回 `NO_DATA`。
@@ -45,8 +45,10 @@ npm run verify:restart  # AC-03 真实杀进程 → 重启 → 断点续跑（�
 | 合规红线（11.2 / F6-2 / F7-2） | ✅ 真实实现 | 禁词/字数/占位符/退订尾巴校验、四道发送闸门、批量直接发送硬禁用、请求体数据最小化 |
 | 共享模型协议（6.7.3） | ✅ 真实实现 | `shared/model-protocol.json` 为前端 / 网关 / 评测 / T0 抽取 / 账本单一真源 |
 | 云端 LLM 网关（F0） | ✅ 服务端真实实现 | 三级路由、超时/429/5xx 降级链、schema + 证据校验、30 天缓存、熔断、点数折算、调用审计、数据出境策略、PII 硬性剔除、**模型快照锁定** |
-| 云端任务编排（9.1 / F2） | ✅ 服务端真实实现 | 6 阶段状态机、SSE 单向推流、任务游标、暂停/继续/中止、并发上限 3、硬超时、单源失败显式降级、**跨进程恢复（AC-03）** |
+| 云端任务编排（9.1 / F2） | ✅ 服务端真实实现 | 6 阶段状态机、SSE 单向推流、任务游标、暂停/继续/中止、硬超时、单源失败显式降级、**跨进程恢复（AC-03）** |
+| **并发队列（v0.6.0）** | ✅ 真实实现 | 并发上限 3 由唯一 `start()` 闸门强制执行，`queued` 按单调序号 FIFO 自动出队；完成/暂停/中止/重启释放槽位即补位；排队与暂停时长不计入硬超时；前端用服务端权威状态，不把排队谎报成运行中 |
 | **点数账本（F0-6 / AC-03）** | ✅ 真实实现 | `server/ledger.mjs` + `store.mjs` 的账户表 / 流水表：创建预扣 → 完成/中止结算（多退少不补）→ 未启动全额释放；`idem_key` 唯一约束保证幂等；SQLite `BEGIN IMMEDIATE` 事务；跨进程不重复扣 |
+| **网关调用计费闭环（v0.6.0）** | ✅ 真实实现 | `judge / write_email` 有可用 provider 才预扣、内容校验通过才按 token 折算结算整数点，失败/降级/缓存命中/校验拒绝一律全额释放；`requestId` 防重复计费；未注入账本的独立网关仍如实标 `audit-only` |
 | **T0 → judge 事实链（6.7.1 / 6.7.4）** | ✅ 真实实现 | 调用方提供可核验 `sources` 时，T0 规则事实注入 judge Prompt；冲突由代码保守取规则值、置信度归零、证据换 T0 引用并留痕；`no_signal` 维度模型不得改写成确定结论。未提供来源时如实返回 `t0.used=false` |
 | **385 家标注契约（9.5）** | ✅ 契约与校验器真实实现 | `shared/baseline-contract.json` + `server/baseline.mjs`：字段、构成、双标独立性、PII、禁用评分字段全部校验；**不生产任何标注数据**；导入校验通过 ≠ 评测通过 |
 | T0 事实抽取（6.7.1 / F6-1） | ✅ 规则层真实实现 | `server/t0.mjs`：客户类型 / 进口信号 / 规模 / 产品词 / 负面信号 / 开发信锚点；每条 `quote` 逐字可核验；未命中维度 `no_signal` 不补零；不调模型、不联网、不推断 |
@@ -54,6 +56,7 @@ npm run verify:restart  # AC-03 真实杀进程 → 重启 → 断点续跑（�
 | 服务端安全边界 | ✅ 真实实现 | 本地回环默认免鉴权；设 `LEADPILOT_API_TOKEN` 或非本机监听时强制 Bearer（401 E6009）；CORS 白名单；限流（429 E6010）；不安全组合拒绝启动 |
 | 持久化（8.2 / AC-03） | ✅ 真实实现 | `sqlite`（Node 22 内置，WAL）/ `json`（原子 rename）/ `memory`；任务游标、缓存、审计、**账本账户与流水**跨进程恢复 |
 | 评测门禁（9.5） | ✅ 服务端真实实现 | 385 家基准集、8 项 Eval、P0 阻断；无标注返回 `NO_DATA` |
+| **评测版本 diff（v0.6.0）** | ✅ 纯函数真实实现 | `diffEvalRuns(prev, current)` 逐指标算 delta、判 P0 回退 / 跨阈值 / 测量丢失 / 门禁回退；`POST /v1/eval/diff` 可用；无基线返回 `NO_BASELINE` 不伪造 delta；`releaseEligible` 恒 `false` |
 | 前端服务层边界 | ✅ 真实实现 | `src/services/adapters.ts` 为唯一入口，re-export `gateway-client` / `task-runner` / `email-generator`；`npm run gate` 强制校验组件与 store 不得直连实现 |
 | 前端接入与降级 | ✅ 真实实现 | 启动探测、云端网关状态、详情云端判断、写信真实 T1 / 本地模板显式切换、设置页展示账本 / T0 链 / 基准契约、SSE 带 Bearer、执行页逐源「未接入」 |
 | 真实 provider 调用 | 🟡 配置即用 | Key 从服务端环境变量读取，**且必须锁定 `LEADPILOT_MODEL_VERSION_*` 快照**；本仓库不内置 Key、不预置猜测版本号 |
@@ -72,17 +75,18 @@ npm run verify:restart  # AC-03 真实杀进程 → 重启 → 断点续跑（�
 | **POST** | **`/v1/eval/baseline/validate`** | 校验导入数据；不合规 → 400 `E4004`；`releaseEligible` 恒 `false` |
 | GET | `/v1/eval/gates` | 评测门禁清单（含契约版本与导入状态） |
 | POST | `/v1/eval/run` | 跑基准集；无样本返回 `NO_DATA` |
-| POST | `/v1/judge` | 五维判断；可传 `sources` 启用 T0 事实链（响应带 `t0.used` / `reconciliation`）；无 Key → `503 E6005`，未锁快照 → `E6008` |
-| POST | `/v1/email/generate` | T1 写信；可传 `sources` 走 T0 锚点；降级时正文为 `null` |
-| GET/POST | `/v1/tasks` | 创建 / 列出任务；**预扣不足返回 402 `E4001` 且不创建任务**；快照带 `ledger` / `sourceMode` / `dataSources` |
-| GET | `/v1/tasks/:id/events` | SSE 流式事件（`hello/stage/progress/source_warning/done/aborted`） |
+| **POST** | **`/v1/eval/diff`** | **两次评测归档的版本 diff**（纯函数）；非法归档 400 `E4006`；`NO_DATA` 归档返回 `NO_BASELINE`，不生成数值 delta |
+| POST | `/v1/judge` | 五维判断；可传 `sources` 启用 T0 事实链（响应带 `t0.used` / `reconciliation`）、`requestId` 启用计费幂等；无 Key → `503 E6005`，未锁快照 → `E6008`，点数不足 → `402 E4001`，重复 requestId → `409 E4005`；成功响应带 `billing` |
+| POST | `/v1/email/generate` | T1 写信；可传 `sources` 走 T0 锚点、`requestId` 启用计费幂等；降级时正文为 `null`；成功响应带 `billing` |
+| GET/POST | `/v1/tasks` | 创建 / 列出任务；**预扣不足返回 402 `E4001` 且不创建任务**；快照带 `ledger` / `queuePosition` / `activeCount` / `maxConcurrent` / `sourceMode` / `dataSources` |
+| GET | `/v1/tasks/:id/events` | SSE 流式事件（`hello/queued/started/stage/progress/source_warning/paused/resumed/done/aborted`） |
 | POST | `/v1/tasks/:id/pause\|resume\|abort` | 任务控制；收尾时账本结算/释放并写进任务日志 |
 
 `/health` 为探活保留无鉴权；其余 `/v1/*` 在启用 token 或对外监听时一律要求 `Authorization: Bearer <token>`。因为 `EventSource` 不能带 Authorization，前端改用 `fetch` 流式读取 SSE 帧，**绝不把 token 拼进 query**。
 
-错误文案统一「发生了什么 + 可能原因 + 你可以怎么做 + 错误码」（PRD A.2）。错误码：`E6004` PII / 非法来源、`E6005` 无可用 provider、`E6008` 快照未锁定、`E6009` 鉴权失败、`E6010` 限流、`E4001` 点数不足、`E4002` 账本幂等键冲突、`E4003` 账本状态非法、`E4004` 标注导入不合规。
+错误文案统一「发生了什么 + 可能原因 + 你可以怎么做 + 错误码」（PRD A.2）。错误码：`E6004` PII / 非法来源、`E6005` 无可用 provider、`E6008` 快照未锁定、`E6009` 鉴权失败、`E6010` 限流、`E4001` 点数不足、`E4002` 账本幂等键冲突、`E4003` 账本状态非法、`E4004` 标注导入不合规、`E4005` 网关计费键已结算、`E4006` 评测 diff 归档非法。
 
-> **点数口径（v0.5.0 明确边界）**：账本只覆盖云端任务的预扣 / 结算 / 释放。`gateway` 的 `judge` / `write_email` 审计里的 `points` 是按 token 折算的**估值**，不进账本、不代表已扣点；成功响应带 `billing: { charged: false, scope: 'audit-only' }`，`/health.billing.auditOnlyConsumers` 也如实列出。把审计估值扩成真实扣费属于后续独立任务，绝不在文档里含糊过去。
+> **点数口径（v0.6.0）**：云端任务与网关真实调用**共用一本账**。有可用 provider 才预扣（T0/T1/T2 上限 8/16/40 点，见 `billing.gatewayBilling.reservePoints`），内容校验通过才按 token 折算 `ceil` 成整数点结算；失败 / 降级 / 缓存命中 / 校验拒绝一律全额释放，**不扣点**。审计里的 `points` 仍是 token 折算估值，只有 `billing.charged=true` 才代表实际扣点。未注入账本的独立网关（部分单测）仍如实标 `billing.scope='audit-only'`。这是本地测试账本，不是真实支付结算系统。
 
 ## 配置要点
 
@@ -91,7 +95,7 @@ npm run verify:restart  # AC-03 真实杀进程 → 重启 → 断点续跑（�
 LEADPILOT_HOST=127.0.0.1
 LEADPILOT_STORE=sqlite           # 默认；node:sqlite 不可用时自动降级为 json 文件兜底
 LEADPILOT_DB_PATH=./data/leadpilot.db
-LEADPILOT_POINTS_BALANCE=2000    # 开户初始点数（v0.5.0）
+LEADPILOT_POINTS_BALANCE=2000    # 开户初始点数（v0.6.0：任务 + 网关共用）
 
 # 对外部署：以下两项必须同时配置，否则服务拒绝启动
 LEADPILOT_HOST=0.0.0.0
@@ -118,19 +122,19 @@ shared/
 .github/workflows/ci.yml       GitHub Actions：干净检出 / typecheck / gate / 校验器自检 / test / build / smoke / AC-03
 server/
 ├── protocol.mjs       schema / 证据 / PII / 计费 / 缓存键 / Prompt（含 <t0_facts>）/ wire→client
-├── gateway.mjs        三级路由 · 降级链 · 熔断 · 审计 · judge() / writeEmail()
-├── orchestrator.mjs   任务状态机 · SSE · 游标 · 并发/硬超时 · 账本预扣与结算 · 重启恢复
+├── gateway.mjs        三级路由 · 降级链 · 熔断 · 审计 · 计费 reserve/settle/release · judge() / writeEmail()
+├── orchestrator.mjs   任务状态机 · SSE · 游标 · FIFO 并发闸门/硬超时 · 账本预扣与结算 · 重启恢复
 ├── store.mjs          sqlite / json / memory：任务 / 缓存 / 审计 / 账本账户与流水
 ├── ledger.mjs         点数账本：reserve / settle / release / charge / grant，事务化 + 幂等
 ├── baseline.mjs       标注契约解析（json/jsonl/csv）与导入校验器
 ├── t0.mjs             T0 规则抽取 + reconcileWithT0 冲突裁决
 ├── data-sources.mjs   6 类数据源注册表 · health · 显式 demo/blocked
-├── eval.mjs           8 项评测指标、P0 门禁、基准集 manifest
+├── eval.mjs           8 项评测指标、P0 门禁、基准集 manifest、diffEvalRuns() 版本 diff 纯函数
 ├── index.mjs          Node 原生 http 入口：鉴权 / CORS / 限流 / 路由
-└── tests/             64 个服务端测试
+└── tests/             86 个服务端测试
 scripts/
-├── e2e-smoke.mjs              云端端到端冒烟（27 项）
-├── check-release-gates.mjs    发布门禁自检（23 项，含适配器边界与账本重启）
+├── e2e-smoke.mjs              云端端到端冒烟（36 项）
+├── check-release-gates.mjs    发布门禁自检（27 项，含适配器边界 / 账本重启 / diff / 队列）
 ├── validate-baseline.mjs      标注导入校验 CLI（支持 --self-test）
 ├── fixtures/                  仅 INVALID-FIXTURE 反例，禁止作为评测输入
 ├── verify-restart.mjs         AC-03 断言（HTTP + SQLite 原文 + 账本流水比对）
@@ -147,7 +151,7 @@ src/
 └── tests/             32 个前端测试
 docs/
 ├── PM-REVIEW.md       产品评审、范围裁剪、M0 决策建议
-├── ARCHITECTURE.md    技术决策（ADR-001–022）与真实接入清单
+├── ARCHITECTURE.md    技术决策（ADR-001–026）与真实接入清单
 └── PRD-COVERAGE.md    F0–F10 / AC-01–16 兑现度对照
 ```
 
@@ -164,20 +168,24 @@ docs/
 9. **禁止浮动模型指针。** 无具体快照不发起真实调用；评审无数据用 `NO_DATA`，不编造通过。
 10. **可插拔不等于可放行。** 注册表有 ready 实现也只是 `blocked`（ADR-017）。
 11. **忽略本地产物一律锚定根目录。** `.gitignore` 写 `data/` 会连源码 `src/data/` 一起排除（ADR-008 教训）。
-12. **账本范围不得悄悄扩大。** `billing.ledger.scope` 只有 `task_reserve / task_settle / task_release`；gateway 的 `points` 是审计估值，门禁脚本会断言这条边界。
+12. **账本范围必须显式登记。** `billing.ledger.scope` 明列 6 类操作（任务 + 网关各 reserve/settle/release）；`points` 是审计估值，只有 `billing.charged=true` 才是实际扣点；未注入账本时不得宣称已扣点，门禁脚本会断言。
 13. **标注数据不可合成。** 仓库只允许 `INVALID-FIXTURE` 反例；导入校验通过 ≠ 评测通过；`releaseEligible` 未接真实评测前恒 `false`。
 14. **业务层不得直连服务实现。** 组件 / store / App 只从 `@/services/adapters` 取能力，由 `npm run gate` 在 CI 中强制校验（ADR-019）。
+15. **排队状态以服务端为准。** 禁止把 `queued` 乐观标成 `running`；FIFO 用单调序号，不得用带随机后缀的 `id` 排先后（ADR-023）。
+16. **失败调用不扣点，且不留下冻结额。** 任何异常 / 降级 / 内容拒绝路径都必须 `release`；`requestId` 已结算必须显式拒绝而不是幂等重放（ADR-024）。
+17. **diff 只比较真实归档。** 无历史归档就返回 `NO_BASELINE`，不生成数值 delta、不写「需在 CI 中生成」占位说明（ADR-025）。
 
-## 验证记录（2026-11-08 · v0.5.0）
+## 验证记录（2026-11-08 · v0.6.0）
 
-- `npm run typecheck` / `npm run build` 通过；`npm test` → **6 文件 / 96 用例全绿，0 skipped**（前端 32 + 服务端 64）。
-- `npm run gate` → **23/23 自检通过**，并明确输出 `releaseBlocked = true` 与 4 条阻断项（标注集未标注、数据源 0/6、模型快照未注入、OAuth/CASA/采购/人工复核未开始）。
+- `npm run typecheck` / `npm run build` 通过；`npm test` → **6 文件 / 118 用例全绿，0 skipped**（前端 32 + 服务端 86）。
+- `npm run gate` → **27/27 自检通过**，仍明确输出 `releaseBlocked = true` 与 4 条阻断项（标注集未标注、数据源 0/6、模型快照未注入、OAuth/CASA/采购/人工复核未开始）。
 - `npm run validate:baseline -- --self-test` → 校验器确实拒绝 22 处非法标注与空基准集。
-- `npm run smoke` → **27/27 通过**：含点数账本恒等式、`/v1/points`、基准契约与 400 `E4004`、T0→judge 事实链启用 / 非法来源拒绝、402 `E4001` 拒绝建任务、中止结算留痕。
-- `npm run verify:restart` → **AC-03 全链路 PASS**：新增断言「账本预扣已落盘且只有一条 reserve 流水」「跨进程 held/available 不变」「续跑后冻结额不变」。
+- `npm run smoke` → **36/36 通过**：新增并发上限 3 + 第 4 个任务排队位次、槽位释放后队首自动出队、`/health.orchestrator.queueMode`、网关降级不扣点、降级/校验拒绝不消耗点数、`/v1/eval/diff` 400 `E4006` 与 `NO_BASELINE`、diff 端点与契约版本。
+- `npm run verify:restart` → **AC-03 全链路 PASS**：真实杀进程 → 直读 SQLite → 同库重启 → 断点续跑，账本预扣不重复。
+- 网关计费专项：9 个单测覆盖成功结算、写信结算、无 provider 不预扣、失败全额释放、缓存不二次扣、`E4001` 不发请求、`E4005` 幂等拒绝、`audit-only` 独立网关、HTTP 402 映射。
+- 评测 diff 专项：8 个单测覆盖非法输入、无基线、指标改善、P0 回退/跨阈值/测量丢失、门禁回退、纯函数稳定性、占位字符串清除、HTTP 端点。
+- CI：`actions/checkout@v5` / `actions/setup-node@v5` 已升级，干净检出清单补入 `server/gateway.mjs` / `server/orchestrator.mjs` 等易漏文件。
 - 安全活体（v0.3.0 记录）：`HOST=0.0.0.0` 无 token / `CORS=*` → 启动前置拒绝；启用 token 后 401 `E6009` / Bearer 200 / 非白名单 Origin 不回显。
-- GitHub Actions `ci.yml` 新增 `Release gate self-check` 与 `Baseline import validator self-test` 两步，并把 v0.5.0 新文件纳入干净检出检查。**v0.5.0 对应 run `42555702735` 全链路全绿（38 s，10 个步骤全 ✓）**。
-- CI 仅有两条平台级提示（非失败）：`actions/checkout@v4` / `setup-node@v4` 仍以 Node 20 为目标被强制跑在 Node 24；`ubuntu-latest` 将在 2026-10 后迁移到 Ubuntu 26。升级到 `v5` 属低风险维护项，单独提交处理，不与功能改动混做。
 
 > **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地文件都在，所以 typecheck/build/test 全绿；CI 从 git 干净检出时报 `TS2307`。现改为 `/data/` 锚定仓库根，并加 CI 检查。**结论：本地全绿不等于仓库可构建。**
 

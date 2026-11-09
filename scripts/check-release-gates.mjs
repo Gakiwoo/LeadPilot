@@ -1,5 +1,5 @@
 /**
- * 发布门禁自检 · v0.5.0
+ * 发布门禁自检 · v0.6.0
  *
  * 目的：把「哪些能力已真实实现、哪些还没达标」变成可执行的断言，而不是文档里的一句话。
  * 这个脚本只做确定性本地检查，不启动服务、不联网、不调用任何 provider、不生成标注数据。
@@ -15,7 +15,8 @@ import { fileURLToPath } from 'node:url'
 import { protocol } from '../server/protocol.mjs'
 import { createLedger } from '../server/ledger.mjs'
 import { createMemoryStore, createStore } from '../server/store.mjs'
-import { evaluateBaseline, baselineManifest } from '../server/eval.mjs'
+import { evaluateBaseline, baselineManifest, diffEvalRuns } from '../server/eval.mjs'
+import { createOrchestrator } from '../server/orchestrator.mjs'
 import { validateBaselineImport } from '../server/baseline.mjs'
 import { extractFacts, reconcileWithT0 } from '../server/t0.mjs'
 import { createDataSourceRegistry } from '../server/data-sources.mjs'
@@ -136,10 +137,15 @@ function walkTs(dir, out = []) {
     rmSync(dir, { recursive: true, force: true })
   }
 
-  check('账本 scope 与审计估值边界未被悄悄扩大',
-    protocol.billing.ledger.scope.length === 3
-    && protocol.billing.ledger.auditOnlyConsumers.includes('judge')
-    && protocol.billing.ledger.auditOnlyConsumers.includes('write_email'))
+  check('账本 scope 与网关消费方显式列明，未注入账本时不得宣称已扣点',
+    protocol.billing.ledger.scope.length === 6
+    && protocol.billing.ledger.scope.includes('gateway_reserve')
+    && protocol.billing.ledger.ledgerConsumers.includes('judge')
+    && protocol.billing.ledger.ledgerConsumers.includes('write_email')
+    && protocol.billing.ledger.auditOnlyConsumers.length === 0
+    && protocol.billing.gatewayBilling.chargeOn === 'schema_and_content_validation_passed'
+    && protocol.billing.gatewayBilling.releaseOn.includes('degraded')
+    && protocol.billing.gatewayBilling.noChargeOn.includes('cache_hit'))
 }
 
 // 4. T0 → judge 事实链：引用逐字可核验，冲突由代码保守裁决
@@ -173,6 +179,44 @@ function walkTs(dir, out = []) {
   check('数据源注册表如实报告 0/6 已接入',
     ds.total === 6 && ds.readyCount === 0 && ds.mode === 'demo',
     `${ds.readyCount}/${ds.total} · ${ds.mode}`)
+}
+
+// 6. v0.6.0：评测 diff / 并发队列必须是真实实现，不能退回占位说明
+{
+  const archive = (over = {}) => ({
+    ok: true, status: 'PASSED', baselineVersion: 'gate-fixture', sampleSize: 385,
+    metrics: {
+      provenance_rate: 0.97, signal_precision: 0.93, extraction_recall: 0.8,
+      rule_compliance: 1, kappa: 0.72, spearman_rho: 0.81,
+      schema_pass_rate: 0.995, refusal_rate: 0.02,
+    },
+    ...over,
+  })
+  const up = diffEvalRuns(archive(), archive({ baselineVersion: 'gate-fixture-2', metrics: { ...archive().metrics, provenance_rate: 0.99 } }))
+  const down = diffEvalRuns(archive(), archive({ status: 'BLOCKED', ok: false, metrics: { ...archive().metrics, provenance_rate: 0.90 } }))
+  check('评测版本 diff 为可执行纯函数：改善可核验、P0 回退被拦截',
+    up.diffPassed === true && up.rows.find((r) => r.key === 'provenance_rate').delta === 0.02
+    && down.status === 'REGRESSION' && down.p0Regressions.includes('provenance_rate'),
+    `up=${up.status} down=${down.status}`)
+  check('diff 通过仍不解除发布门禁，且 NO_DATA 不伪造 delta',
+    up.releaseEligible === false
+    && diffEvalRuns({ status: 'NO_DATA', metrics: {} }, archive()).status === 'NO_BASELINE'
+    && diffEvalRuns({ status: 'NO_DATA', metrics: {} }, archive()).rows.every((r) => r.delta === null),
+    `releaseEligible=${up.releaseEligible}`)
+  check('源码中不再残留「需在 CI 中读取历史评测归档」占位字符串',
+    !readFileSync(join(ROOT, 'server/eval.mjs'), 'utf8').includes('需在 CI'),
+    'server/eval.mjs')
+
+  const o = createOrchestrator({ tickMs: 10000, maxConcurrent: 1 })
+  const cfg = { keywords: ['gate queue'], markets: ['德国'], depth: 1, targetCount: 10 }
+  const t1 = o.createTask(cfg)
+  const t2 = o.createTask(cfg)
+  const stuckBefore = t2.status === 'queued' && o.getTask(t2.id).queuePosition === 1
+  o.abort(t1.id)
+  const dequeued = o.getTask(t2.id).status === 'running' && o.getTask(t2.id).queuePosition === 0
+  check('并发队列 FIFO 自动出队，queued 不会永久卡死', stuckBefore && dequeued,
+    `before=${t2.status} after=${o.getTask(t2.id).status}`)
+  o.dispose()
 }
 
 const width = Math.max(...results.map((r) => r.name.length))

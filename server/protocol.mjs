@@ -184,6 +184,15 @@ export function pointCost(usage, tier, searchCalls = 0, provider = null) {
   return Math.ceil(usd / protocol.billing.pointValueUsd) * multiplier
 }
 
+/**
+ * 账本计费点数：PRD 公式乘层级系数后可能是小数（T1 = 1.6 倍），
+ * 而账本只接受非负整数。统一向上取整；响应必须同时给出原始折算估值，
+ * 绝不把 1.6 点悄悄说成 1 点或 2 点而不留痕。
+ */
+export function billingPoints(usage, tier, searchCalls = 0, provider = null) {
+  return Math.ceil(pointCost(usage, tier, searchCalls, provider))
+}
+
 /** 结果缓存键：同域名 + 同 prompt 版本 + 同一份原文（30 天 TTL 由网关控制） */
 export function cacheKey(domain, sourceTexts) {
   const hash = createHash('sha256').update(sourceTexts.join('\n')).digest('hex').slice(0, 16)

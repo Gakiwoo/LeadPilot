@@ -264,6 +264,10 @@ export interface DevTask {
   companyIds: string[]
   /** local=本地演示运行器（会写入演示客户）；cloud=云端编排器（真实 SSE，数据源未接入故不产生客户记录） */
   mode?: 'local' | 'cloud'
+  /** v0.6.0：云端编排器并发队列位次；0 表示未排队。仅服务端 SSE / 控制响应提供 */
+  queuePosition?: number
+  /** v0.6.0：服务端并发上限，UI 展示用，不在前端自行假定为 3 */
+  maxConcurrent?: number
 }
 
 export interface Outreach {

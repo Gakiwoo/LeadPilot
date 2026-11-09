@@ -36,14 +36,21 @@ export interface GatewayHealth {
     judgeFactChain?: { enabled: boolean; onConflict: string }
   }
   dataSources?: { mode: 'demo' | 'real'; total: number; configured: number; readyCount: number }
-  /** v0.5.0 服务端账本：只覆盖云端任务预扣/结算/释放，gateway points 为审计估值 */
+  /** v0.6.0 服务端账本：云端任务与网关真实调用共用一本账 */
   points?: {
     account: string; granted: number; held: number; spent: number; available: number
     ledgerVersion: string; persistence: string; accounts: number; entries: number
-    scope: string[]; auditOnlyConsumers: string[]; note: string
+    scope: string[]; ledgerConsumers?: string[]; auditOnlyConsumers: string[]; note: string
   }
-  billing?: { mode: string; scope: string[]; auditOnlyConsumers: string[] }
-  baseline?: { contractVersion: string; importStatus: string; requiredSize: number; releaseEligible: boolean }
+  billing?: {
+    mode: string; version?: string; scope: string[]
+    ledgerConsumers?: string[]; auditOnlyConsumers: string[]
+    reservePoints?: Record<string, number>; releaseOn?: string[]
+  }
+  baseline?: {
+    contractVersion: string; importStatus: string; requiredSize: number; releaseEligible: boolean
+    diffEndpoint?: string; diffVersion?: string
+  }
   reason?: string
 }
 
@@ -96,6 +103,25 @@ export async function extractFactsWithGateway(input: T0ExtractInput): Promise<T0
   }
 }
 
+/** v0.6.0 网关调用计费结果。charged=false 时绝不把审计估值说成已扣点 */
+export interface GatewayBillingResult {
+  charged: boolean
+  scope: string
+  reason?: string
+  note?: string
+  refId?: string
+  reserved?: number
+  estimatedPoints?: number
+  chargedPoints?: number
+  refunded?: number
+  capped?: boolean
+  idempotent?: boolean
+  released?: boolean
+  available?: number | null
+  code?: string | null
+  error?: string
+}
+
 export interface JudgeInput {
   companyId: string
   domain: string
@@ -114,6 +140,8 @@ export interface JudgeInput {
   sources?: T0Source[]
   keywords?: string[]
   markets?: string[]
+  /** v0.6.0：同一 requestId 只允许计费一次；重试请复用同一个 ID */
+  requestId?: string
 }
 
 export interface JudgeResponse {
@@ -137,7 +165,8 @@ export interface JudgeResponse {
     errors?: string[]
     reason?: string
   }
-  billing?: { charged: boolean; scope: string; note: string }
+  billing?: GatewayBillingResult
+  code?: string
   ok: boolean
   degraded?: boolean
   needsConsent?: boolean
@@ -231,6 +260,8 @@ export interface EmailGenerateInput {
   /** 可选：调用方已抓取的官网原文。传入后服务端用 T0 规则抽取可核验锚点，不联网、不调模型 */
   sources?: T0Source[]
   companyId?: string
+  /** v0.6.0：同一 requestId 只允许计费一次；重试请复用同一个 ID */
+  requestId?: string
 }
 
 export interface EmailGenerateResponse {
@@ -238,6 +269,8 @@ export interface EmailGenerateResponse {
   degraded?: boolean
   needsConsent?: boolean
   errorCodes?: string[]
+  code?: string
+  billing?: GatewayBillingResult
   reason?: string
   subject?: string
   body?: string
@@ -269,15 +302,32 @@ export async function generateEmailWithGateway(input: EmailGenerateInput): Promi
   }
 }
 
-/** 云端任务的暂停 / 继续 / 中止（SSE 只做单向推送，控制走独立 POST） */
-export async function controlCloudTask(taskId: string, action: 'pause' | 'resume' | 'abort', cursor?: unknown): Promise<boolean> {
+/** 服务端任务权威状态（v0.6.0：排队位次 / 并发上限一并回传，前端不得自行乐观猜测） */
+export interface CloudTaskStatus {
+  status: 'queued' | 'running' | 'paused' | 'done' | 'failed' | 'aborted'
+  queuePosition: number
+  maxConcurrent: number
+  activeCount: number
+  queuedCount: number
+}
+
+/**
+ * 云端任务的暂停 / 继续 / 中止（SSE 只做单向推送，控制走独立 POST）。
+ * 返回服务端权威 task 状态：v0.5.0 前端把「继续」一律乐观标成 running，
+ * 在并发已满、服务端实际仍为 queued 时会撒谎，v0.6.0 改为以响应为准。
+ */
+export async function controlCloudTask(
+  taskId: string,
+  action: 'pause' | 'resume' | 'abort',
+  cursor?: unknown,
+): Promise<{ ok: boolean; task?: CloudTaskStatus }> {
   try {
-    const res = await jsonFetch<{ ok: boolean }>(`/v1/tasks/${encodeURIComponent(taskId)}/${action}`, {
+    const res = await jsonFetch<{ ok: boolean; task?: CloudTaskStatus }>(`/v1/tasks/${encodeURIComponent(taskId)}/${action}`, {
       method: 'POST', body: JSON.stringify(cursor ? { cursor } : {}),
     }, 4000)
-    return Boolean(res.ok)
+    return { ok: Boolean(res.ok), task: res.task }
   } catch {
-    return false
+    return { ok: false }
   }
 }
 
