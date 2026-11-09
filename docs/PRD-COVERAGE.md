@@ -1,6 +1,10 @@
 # PRD v1.1 兑现度对照 · F0–F10 / AC-01–16
 
-> 基线 v0.7.0 · 2026-11-09 · 图例：✅ 真实实现且可验证 · 🟡 界面/规则/网关真实、外部依赖未接 · ⚠️ 部分实现 · ❌ 未实现
+> 基线 v0.9.0 · 2026-11-09 · 图例：✅ 真实实现且可验证 · 🟡 界面/规则/网关真实、外部依赖未接 · ⚠️ 部分实现 · ❌ 未实现
+>
+> v0.9.0 变更（ADR-032 落地）：**用户指定 URL 抓取**真实实现——`server/fetch.mjs`（robots 遵从 / 每域 ≤1 req/s / 8s 超时 / ≤512KB / 只收 HTML 与纯文本 / 重定向逐跳 SSRF 校验 / 拒绝回环私网），新增 `GET /v1/sources/health`、`POST /v1/sources/fetch`、`POST /v1/batch/fetch-sources`；抓取原文标 `user_directed_fetch`，公司 `origin` 仍 `user_imported`，抓取 ≠ 采集、商业 6 类源仍 `0/6`。**本轮同样没有新增任何可宣称的准确率**，AC 统计不变。
+>
+> v0.8.0 变更（用户拍板）：**不做 385 家人工标注基准集、不做商业数据源采购**。评测口径改为 **integrity + outcome**（可溯源 / 合规 / 一致性 + 真实退信率，零人工、`accuracyClaim` 恒 `false`）；标注契约降级为 legacy（格式与校验器保留），6 类商业数据源仍如实报 `0/6`，改为用户投喂 + 用户指定抓取。`internalPreviewReady` / `externalValidated` / `releaseEligible` 三状态分离，后两者当前均为 false。**本轮没有让任何一条 AC 变 ✅，也没有新增可宣称的准确率**——这是刻意的（ADR-031 / 032）。
 >
 > v0.7.0 变更：**定位拍板为「自动获客」+ 批量 SDR，四项外部依赖重分类为「发布门禁」（判据一条未撤，ADR-027）**、**批量 SDR 管道**（CSV 导入 / T0+judge 批量研判 / mbox 草稿导出 / 结果回写与 3% 退信熔断，ADR-028 / 029）、**`companies` / `outcomes` 统一持久化**（ADR-030）。导入 ≠ 采集、导出 ≠ 发送、内测可跑 ≠ 可发布；数据源仍 `0/6`、标注仍 `NOT_IMPORTED`、`releaseEligible` 恒 `false`。**本轮没有让任何一条 AC 从 🟡 变 ✅**，但把第七节 Go 判据第 5 条「5–10 名种子用户访谈」从「必须等外部条件」变成了「内测期就能做」。
 >
@@ -39,7 +43,7 @@
 | AC-01 | 任务配置 + 额度预扣一致 | 🟡 | 预扣点数 = 数量 × `billing.depthPointsPerCompany[depth]`，界面预估与服务端一致；**云端任务创建前由 `ledger.reserve()` 真实幂等预扣，不足返回 402 `E4001` 且不创建任务**，收尾按达成结算并退还差额（ADR-021）。前端本地 `pointsBalance` 仍是演示计数器，与服务端账本不是同一账本，故未升 ✅ |
 | AC-02 | 40s 首条 / 12min 完成 / 可暂停继续中止 | 🟡 | 暂停/继续/中止在**云端编排器**真实生效并保留游标，SSE 事件可核验；游标已落盘可跨进程恢复；耗时由演示 tick 驱动，不代表真实性能，硬超时按 L1–L4 分别 10/25/50/90 分钟 |
 | AC-03 | 杀进程后断点续跑、额度不重复扣 | ✅（单实例） | `server/store.mjs` 落 `tasks/cache/audit/ledger_accounts/ledger_entries` 到 SQLite（或 JSON 兜底）。`hydrate()` 把重启前活跃任务降为 `paused`，保留 `cursor / pointsUsed / progress / ledger` 并追加恢复日志；显式点击继续才断点续跑。**v0.5.0 新增账本断言**：预扣已落盘且只有一条 `reserve` 流水、跨进程 `held/available` 不变、续跑后冻结额不变。单测 + sqlite 双实例 + `verify:restart` 活体全链路覆盖。**多实例部署仍需共享库 + 租约，见 ADR-013** |
-| AC-04 | 抽检 50 家：真实率/类型准确率/邮箱有效率 | ❌ | 演示数据不适用；且口径需先修正（见 PM-REVIEW 二.2）。评测代码已就绪（8 项指标 + P0 门禁），缺的是 385 家人工标注集 |
+| AC-04 | 抽检 50 家：真实率/类型准确率/邮箱有效率 | ❌ | v0.8.0 决策：**不做 385 人工标注集，因此不再以「抽检准确率」作为验收**。替代口径为 integrity（可溯源/合规/一致性）+ outcome（真实退信率 ≤3%），代码已落地（`evaluateIntegrity` / `evaluateOutcome`），但当前无真实原文与真实发送样本 → `NO_DATA`。任何以人工真值为前提的指标（准确率 / Kappa / AUC）永久不宣称 |
 | AC-05 | 任务内无重复域名 / 跨任务去重 | ⚠️ | 演示运行器按已有域名过滤新结果；三重指纹（域名 + 公司名归一化 + 国家）未实现 |
 | AC-06 | 五维证据链可追溯原始来源 | ✅ | 详情抽屉逐维展开，每条证据含原文、URL、抓取时间；证据伪造会被丢弃 |
 | AC-07 | 无海关数据市场显示「推断」，缺失维度灰显 | ✅ | 德国/欧盟客户走权重转移，不显示 0 分；缺失维度显示「无数据」+ 置信度说明 |
@@ -53,7 +57,7 @@
 | AC-15 | Win10/11 安装、无 SmartScreen、自动更新 | ❌ | 需 EV 签名 + Tauri updater |
 | AC-16 | 离线看详情 / 编辑开发信存待发队列 / 联网同步 | ⚠️ | localStorage 保证刷新后数据仍在；「待发队列」在 MVP 无发送能力时无意义（见 PM-REVIEW 二.3） |
 
-**统计（AC-01–16）**：✅ 6 项 · 🟡 3 项 · ⚠️ 4 项 · ❌ 3 项。版本演进：v0.1.0 ✅5 / 🟡2 / ⚠️5 / ❌4 → v0.2.0 ✅5 / 🟡3 / ⚠️5 / ❌3（AC-02 ⚠️→🟡、AC-03 ❌→⚠️，F0 🟡→✅）→ v0.3.0 **AC-03 ⚠️→✅** → v0.4.0 / v0.5.0 / v0.6.0 / v0.7.0 统计不变：这几轮补的是工程正确性（账本、事实链、契约、边界、队列、计费、diff、批量管道），**没有让任何一条 AC 从 🟡 变 ✅**，这是刻意的。
+**统计（AC-01–16）**：✅ 6 项 · 🟡 3 项 · ⚠️ 4 项 · ❌ 3 项。版本演进：v0.1.0 ✅5 / 🟡2 / ⚠️5 / ❌4 → v0.2.0 ✅5 / 🟡3 / ⚠️5 / ❌3（AC-02 ⚠️→🟡、AC-03 ❌→⚠️，F0 🟡→✅）→ v0.3.0 **AC-03 ⚠️→✅** → v0.4.0 / v0.5.0 / v0.6.0 / v0.7.0 统计不变：这几轮补的是工程正确性（账本、事实链、契约、边界、队列、计费、diff、批量管道），**没有让任何一条 AC 从 🟡 变 ✅**，这是刻意的。→ v0.8.0 统计仍不变：**决策换掉了「怎么验收」（integrity + outcome），没有新增任何可宣称的准确率**；AC-04 的 ❌ 是决策结果，不是待办。
 
 ## 二·补、v0.3.0 工程化基线（非 PRD 功能项，但影响可交付性）
 
@@ -66,7 +70,10 @@
 | 模型快照锁定 | ✅ | `E6008` + `-latest` 拒绝 + health 暴露 `pinned`，2 个单测覆盖 |
 | 持久化与 AC-03 | ✅ | sqlite / json / memory 三实现，4 个单测覆盖（含 sqlite 文件双实例恢复）；另有**真实杀进程 → 重启**活体验证 11/11 PASS（恢复游标/点数与 SQLite 落盘值逐项一致，resume 从原游标续跑） |
 | 安全边界活体验证 | ✅ | 两种不安全启动组合各 exit 1；Bearer 401 / 200、非白名单 Origin 不回显均实测通过 |
-| 版本号一致性 | ✅ | `package.json` / `package-lock.json` / `/health` / README / 三份 docs 统一 v0.7.0；单测改为从 `package.json` 读取，不再硬编码 |
+| 版本号一致性 | ✅ | `package.json` / `package-lock.json` / `/health` / README / 三份 docs 统一 v0.9.0；单测从 `package.json` 读取，不再硬编码 |
+| 评测口径 integrity + outcome（v0.8.0） | ✅ 代码可执行 | `shared/model-protocol.json` 的 `evalGates.integrity`（`integrity-gate-v1`）/ `outcome`（`outcome-gate-v1`）/ `releasePolicy`（`release-policy-v2`）+ `server/eval.mjs` 四个纯函数 + 4 个 HTTP 端点；无真实样本返回 `NO_DATA`，`accuracyClaim` 恒 `false`。**替代的是「验收证据」，不是「准确率」**（ADR-031） |
+| 用户指定 URL 抓取（v0.9.0） | ✅ 真实实现 | `server/fetch.mjs`（`user-directed-fetch-v1`）：只抓用户显式 URL、robots 遵从、每域限速、超时/大小上限、SSRF 拒绝回环私网、HTML→文本 + PII 清洗 + sha256；14 个单测 + 6 项门禁断言 + 3 项冒烟；抓取原文标 `user_directed_fetch`，公司 `origin` 仍 `user_imported`（ADR-032） |
+| 标注契约降级 legacy（v0.8.0） | ✅ 保留不删 | `shared/baseline-contract.json` 标 `status=legacy` / `enabled=false`；双人独立标注约束与导入校验器原样保留，将来真导入人工标注可直接复用 |
 | 批量 SDR 管道（v0.7.0） | ✅ 内测可用 | `server/batch.mjs` 6 个端点 + `companies` / `outcomes` 两张表；8 个单测 + 10 项门禁断言 + 6 项冒烟；定位与判据由 `npm run gate` 静态锁定（ADR-027–030） |
 | 并发队列（v0.6.0） | ✅ | `server/orchestrator.mjs` 唯一 `start()` 闸门 + `pumpQueue()` FIFO 补位 + 单调 `seq`；5 个单测 + 3 项冒烟 + 1 条门禁断言；前端用服务端权威状态，不谎报排队（ADR-023） |
 | 网关计费闭环（v0.6.0） | ✅ | `createGateway({ ledger })`：reserve → settle / release；9 个单测 + 3 项冒烟 + 门禁 scope 断言；`E4005` 幂等拒绝 / `E4001` 402（ADR-024） |
@@ -76,7 +83,7 @@
 | T0 → judge 事实链（v0.5.0） | ✅ | `<t0_facts>` 注入 Prompt、冲突代码裁决、缓存键带规则版本、全路径带 `t0.used`；5 个单测 + 2 项冒烟（ADR-022）。**前端演示数据不伪造 sources** |
 | 385 家标注契约（v0.5.0） | ✅（契约/校验器） | `shared/baseline-contract.json` + `server/baseline.mjs`；`GET /v1/eval/baseline/contract`、`POST /v1/eval/baseline/validate`；反例夹具 + CLI 自检 + 门禁断言。**标注数据仍为 0，评测仍 `NO_DATA`**（ADR-020） |
 | 前端服务层边界（v0.5.0） | ✅ | `adapters.ts` 唯一 re-export 入口；`npm run gate` 静态扫描组件/store/App 禁止直连实现，CI 强制执行（ADR-019） |
-| 发布门禁脚本（v0.7.0） | ✅ | `scripts/check-release-gates.mjs` **37 项**自检，覆盖账本幂等、跨进程恢复、T0 冲突裁决、基准反例、适配器边界、数据源 0/6、diff 纯函数、队列自动出队，以及新增的定位锁定 / 导入≠采集 / 导出≠发送 / 前后端白名单一致性 / 熔断 / Go 判据未撤；输出 `releaseBlocked=true` 与四项阻断，`LEADPILOT_REQUIRE_BASELINE=1` 时才真正卡 CI |
+| 发布门禁脚本（v0.9.0） | ✅ | `scripts/check-release-gates.mjs` **54 项**自检，覆盖账本幂等、跨进程恢复、T0 冲突裁决、基准反例、适配器边界、数据源 0/6、diff 纯函数、队列自动出队、定位锁定 / 导入≠采集 / 导出≠发送 / 熔断，以及 v0.8.0 新增的「无样本必须 `NO_DATA` / 小样本不得 PASSED / 退信率超限必须 BLOCKED / 发布状态三分离 / 产品文案禁止宣称准确率」与 v0.9.0 新增的「只抓用户指定 URL / robots 遵从 / 限速 / SSRF 命中不发起请求 / 抓取 ≠ 采集」；输出 `releaseBlocked=true` 与四条阻断（integrity / outcome / provider 快照 / OAuth·EV·法务），`LEADPILOT_REQUIRE_BASELINE=1` 时才真正卡 CI |
 | CI 加固（v0.4.0） | ✅ | `Tracked sources sanity` 防止 `.gitignore` 再次误伤；`AC-03 process restart` 用 `scripts/verify-restart.sh` 真实杀进程 → 直读 SQLite → 同库重启 → 恢复值逐项比对 → 断点续跑 |
 | T0 规则事实抽取 | ✅ | `server/t0.mjs` + 共享协议 `t0Extraction` 词表；8 个单测 + 3 项冒烟覆盖可核验引用 / 不补零 / PII 清洗 / 写信锚点接入（ADR-016） |
 | 数据源适配器注册表 | ✅（契约） | `server/data-sources.mjs`：6 类源 health、显式 `demo` / `blocked`、`collect()` 聚合去重；5 个单测 + 2 项冒烟。**真实实现仍未接入**（ADR-017） |
@@ -101,9 +108,9 @@
 
 ### P0 · 阻塞发布
 
-1. **数据源接入**：编排器、SSE、游标、并发、硬超时、**单实例持久化（AC-03 已闭环）**与**6 类源注册契约**均已真实实现；仍缺 6 类 `DataSourceAdapter` 的真实实现、代理池与 Playwright 集群、页面快照对象存储、客户端写入契约（ADR-017 的 `blocked` 放行条件），以及多实例部署时的共享库 / 任务租约。
+1. **数据源（v0.8.0 决策：不做商业采购）**：编排器、SSE、游标、并发、硬超时、单实例持久化（AC-03）与 6 类源注册契约均已真实实现；**不再采购商业数据源**。替代路径：用户投喂（CSV / 粘贴，`source_url + fetched_at + raw_text` 三件套已接入 T0）+ 用户指定公开页面抓取（`server/fetch.mjs`，v0.9.0 已实现：robots / 限速 / SSRF / HTML→文本）+ 免费公开富化（GLEIF / Wikidata / 各国注册库）。商业 6 类源保持 `0/6` 如实上报；新增抓取能力单独计数，不并入 0/6。多实例部署时的共享库 / 任务租约仍缺，但内测单实例不需要。
 2. **网关生产化**：路由、降级链、熔断、schema/证据校验、缓存、点数折算、审计、PII 与地域策略、**快照锁定**、**云端任务点数账本事务**已真实实现；仍缺 DPA / ZDR 签署、BYOK 的 DPAPI 存储、**把 `judge` / `write_email` 的审计估值接入账本**（需先定义预扣上界、失败退款、缓存命中口径，ADR-021 明确列为独立任务）、按 385 家基准集跑分后冻结 provider 组合与具体快照 ID。
-3. **评测数据**：8 项 Eval、P0 门禁、`NO_DATA` 保护、**385 家标注导入契约与校验器**已真实实现；仍缺 **385 家人工标注基准集**（2 名外贸背景标注员 + 第三人裁决）、把真实预测与标注配对跑全量评测、线上分布漂移监控；**T0 抽取词表也须在该基准集上校准 `extraction_recall ≥ 0.70` 后冻结**。**这是人力关键路径，不是代码任务**。
+3. **评测数据（v0.8.0 决策：不做 385 标注）**：8 项 Eval 计算、P0 门禁、`NO_DATA` 保护、标注导入契约与校验器原样保留（legacy）；**不再要求人工标注**。替代证据：integrity（可溯源率 / 规则遵从 / schema / 逐字核验 / 跨运行一致性）+ outcome（真实发送硬退信率 ≤3%）。仍缺的是**真实原文样本与真实发送样本**（Phase B / D），不是标注人力；任何以人工真值为前提的指标（准确率 / Kappa / AUC）永久不宣称。
 4. **Gmail 接入**：OAuth 2.0 + PKCE loopback、`gmail.compose` 草稿、refresh_token 的 DPAPI 加密、账号体检。
 5. **桌面外壳与发布**：Tauri 2、SQLite 与 migration、DPAPI、托盘通知、EV 代码签名、增量自动更新。
 6. **合规前置**：数据源授权合同、Google OAuth 验证申请、DPA / ZDR、PIPL 与 GDPR 专项法律意见。

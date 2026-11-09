@@ -42,7 +42,7 @@ jobs:
             shared/model-protocol.json shared/baseline-contract.json \
             server/index.mjs server/store.mjs server/t0.mjs server/data-sources.mjs \
             server/ledger.mjs server/baseline.mjs server/eval.mjs server/protocol.mjs \
-            server/gateway.mjs server/orchestrator.mjs server/batch.mjs \
+            server/gateway.mjs server/orchestrator.mjs server/batch.mjs server/fetch.mjs \
             scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh \
             scripts/check-release-gates.mjs scripts/validate-baseline.mjs \
             scripts/fixtures/invalid-baseline-sample.json; do

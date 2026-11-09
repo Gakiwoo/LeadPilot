@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.7.0 · 2026-11-09（ADR-027–030 为本次新增；CI run `42592728273` 全绿）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-031 评测口径与 v0.8.0 决策保留）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -341,6 +341,36 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **决策**：`server/store.mjs` 三种实现（sqlite / json / memory）统一新增 `companyUpsert/companyGet/companyList/companyDelete` 与 `outcomeAppend/outcomeList`；SQLite 新增 `companies` / `outcomes` 两张表并对 `outcomes.at` 建索引。批量管道与编排器**共用同一 store / gateway / ledger**，不产生第二本账。
 
 **边界**：`companies` 只存调用方导入的线索与研判结果；`outcomes` 只存事件元数据，不存邮件正文、不存发件人身份。AC-03 的任务游标 / 账本恢复路径不变，`npm run verify:restart` 在新增两张表后仍全链路 PASS。
+
+---
+
+## ADR-031 · 评测口径改为 integrity + outcome，385 标注契约降级 legacy（v0.8.0）
+
+**背景**：用户拍板不做 385 家人工标注基准集。人工标注测的是「准确率」，没有人类真值就无法测，任何零人工方案都不能宣称 accuracy。
+
+**决策**：
+- `shared/model-protocol.json` 新增 `evalGates.integrity`（`integrity-gate-v1`）：可溯源率 ≥95%、规则遵从 100%、schema 合法率 ≥99%、证据逐字可核验率 ≥95%、拒答率 ≤5%，全部由代码计算，`minSamples=100`，无真实样本返回 `NO_DATA`。
+- 新增 `evalGates.outcome`（`outcome-gate-v1`）：真实发送硬退信率 ≤3%（P0）、回复率仅观测；`minSamples=30`，样本不足标 `INSUFFICIENT`。
+- 新增 `evaluateConsistency()`：同一输入两次运行结果一致率 ≥0.98，证明可复现，不做准确率推断。
+- `evaluateBaseline()` 与 `shared/baseline-contract.json` 保留为 legacy（`status=legacy` / `enabled=false`），标注导入校验器与双人独立标注约束原样保留，将来真导入人工标注可直接复用。
+- 新增 `releaseStatus()` 三状态：`internalPreviewReady`（integrity PASSED）、`externalValidated`（outcome PASSED）、`releaseEligible`（恒 `false`，正式发布仍需外部合规项）。三者互不等价。
+- `npm run gate` 增加断言：无样本必须 `NO_DATA`、证据不足必须 `BLOCKED`、小样本不得 PASSED、退信率超限必须 BLOCKED、发布状态三分离、**产品文案不得出现准确率数字断言**（`src/` + README 静态扫描）。
+
+**后果**：产品对外口径中「准确率 / Kappa / AUC」永久不可用；`integrity` 通过只证明没编造、没违规、可复现；`outcome` 达标只证明邮箱质量与发送合规。**本 ADR 修订 ADR-020 的验收口径**：契约保留、不再作为当前发布前置。同时修订 ADR-016 的「T0 词表须随 385 家基准集校准后冻结」：改为在用户投喂的真实原文样本上校准 `extraction_recall`，不再依赖人工标注。
+
+## ADR-032 · 商业数据源不做采购：用户投喂 + 用户指定抓取 + 免费富化（v0.8.0 决策，v0.9.0 落地）
+
+**背景**：用户拍板不做商业数据源采购（6 类源保持 `0/6`）。但「不做采购」不等于「继续用手填演示数据」，否则评分链永远没有真实原文。v0.9.0 已把「用户指定 URL 抓取」真正落地为代码。
+
+**决策**：
+- 唯一数据入口：用户投喂（CSV / 粘贴，`source_url + fetched_at + raw_text` 三件套已接入 T0）+ **用户指定公开页面抓取**（`server/fetch.mjs`，`user-directed-fetch-v1`）+ 免费公开富化（GLEIF LEI / Wikidata / 各国开放注册库，逐条带来源与抓取时间；富化仍是后续任务）。
+- 抓取器硬约束：只抓调用方显式指定的 URL（不发现、不爬全站、不猜地址、不抓登录后内容）；robots.txt 遵从（命中 `Disallow` → `E4013`，404/410 放行，401/403 禁止）；每域 ≤1 req/s；超时 8s、响应 ≤512KB、正文 ≤20000 字；重定向最多 3 次且每次重定向都重新做 SSRF 校验；只接受 `text/html` / `application/xhtml+xml` / `text/plain`；**拒绝回环 / 私网 / link-local / 保留段地址（含 DNS 解析到私网），命中即 `E4011` 且不发起任何请求**；抓取结果经 `sanitizeContext` 去 PII 后进入 T0，并带 `source_url + fetched_at + sha256` 三件套。
+- 商业 6 类源继续 `unconfigured`，`health()` 如实报 `0/6`；抓取器**单独计数**（`/v1/sources/health`、`/health.fetch`、`/health.batch.userDirectedFetch`），不并入 6 类源凑数。
+- 抓取失败（robots 拒绝 / 超时 / 反爬 / 内容类型）逐行标 `missing_source` 并记录 `sourceFetchError`，**绝不生成看起来像真公司的候选**，也不拿演示文本补齐。
+- 批量管道新增 `POST /v1/batch/fetch-sources`：只对已导入且缺原文的公司执行，抓取成功把原文写回 company（`sourceOrigin=user_directed_fetch`），公司 `origin` 仍是 `user_imported`。
+- 合规边界：只抓用户指定 URL、不抓登录后内容、限速、原文可删除；PII 入库登记并在发模型前剥离（`stripPiiForModel` 与 `sanitizeContext` 双闸门）。
+
+**后果**：`origin` 仍只能 `user_imported`；抓取得到的来源标 `user_directed_fetch`，**不得写成 `system_collected`**。`npm run gate` 断言：robots 遵从、限速 > 0、SSRF 命中不发起请求、批量抓取后公司 origin 不变、文档固化。合规上仍需就 robots / ToS / PIPL·GDPR 取得法律意见（保留在 `releasePolicy.remainingExternalBlockers`）。**本 ADR 修订 ADR-017 的接入路径**：不是「等 6 类 adapter」，而是「先让用户指定的真实页面进入评分链」。
 
 ---
 

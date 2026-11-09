@@ -250,3 +250,67 @@ PRD v1.1 是一份**架构判断正确、工程纪律清楚**的文档，尤其�
 3. **内测可跑 ≠ 可发布**：可以拿去见种子用户、验证第七节第 5 条「证据链展开率」，但不得对外宣称准确率、不得签正式 SLA。
 4. **降级不进成功桶**：未配 Key / 未锁快照时 T0 规则事实可以交付，但明确 `E6005 / E6008`，不写回模型判断、不计入 `succeeded`。
 5. **下一笔钱和人力不变**：仍应放在「385 家标注集 + 数据源沙箱」。本轮只把研发关键路径缩短，**没有让任何一条 AC 从 🟡 变 ✅，没有解除任何一条 Go 判据，也没有缩短标注员到位、OAuth 申请、数据源合同、EV 采购任何一天**。
+
+---
+
+## 十四、v0.8.0 决策变更：放弃 385 标注与商业数据源，改「integrity + outcome」（用户拍板）
+
+**v0.8.0 决策**：不做 385 家人工标注基准集、不做商业数据源采购。这不是把门禁关掉，而是把「用人工标注测准确率」换成「用代码可算的完整性与真实业务结果做验证」。**证据仍然必须是真的，只是不再需要人工真值。**
+
+### 能替换什么、替换不了什么
+
+| 原门禁 | 能不能被技术替代 | v0.8.0 口径 |
+|---|---|---|
+| 385 家人工标注（测准确率） | **不能**：准确率必须有人类真值，任何「零人工」方案都不能宣称 accuracy | 删除该前置；标注契约保留为 legacy 通道；产品文案禁止出现准确率数字断言，由 `npm run gate` 静态扫描锁定 |
+| P0 准确率阻断 | 部分可替代 | 改为 integrity：可溯源率 / 规则遵从率 / schema 合法率 / 证据逐字可核验率，全部代码可算，证明「没编造、没违规」 |
+| 评测回归 | 可替代 | 同一输入跨运行一致率 + `diffEvalRuns` 跨版本回退检测，证明「可复现」而非「判得准」 |
+| 业务效果验证 | **可以且更客观** | outcome：用户真实发送后的硬退信率（≤3%）。无需任何标注，且贴近产品北极星 PRW |
+| 商业数据源采购 | 可替代（换来源，不换诚实） | 用户投喂（CSV / 粘贴）+ 用户指定公开页面抓取 + 免费公开富化（GLEIF / Wikidata / 各国注册库）；6 类商业源仍如实报 0/6，新增能力单独计数 |
+
+### 代码侧落地
+
+- `shared/model-protocol.json` 新增 `evalGates.integrity`（`integrity-gate-v1`）、`evalGates.outcome`（`outcome-gate-v1`）、`evalGates.releasePolicy`（`release-policy-v2`）。
+- `server/eval.mjs` 新增 `evaluateIntegrity()` / `evaluateOutcome()` / `evaluateConsistency()` / `releaseStatus()`；`evaluateBaseline()` 保留为 legacy，不删除。
+- `shared/baseline-contract.json` 标 `status: legacy`、`enabled: false`，导入校验器与双人独立标注约束**原样保留**（将来真导入人工标注可直接复用）。
+- 新端点：`POST /v1/eval/integrity`、`POST /v1/eval/outcome`、`GET /v1/eval/integrity/gates`、`GET /v1/eval/outcome/gates`。
+- `npm run gate` 新增断言：无样本必须 NO_DATA、证据不足必须 BLOCKED、小样本不得 PASSED、退信率超限必须 BLOCKED、发布状态三分离、产品文案不得宣称准确率。
+
+### 三个状态必须分清
+
+| 标志 | 含义 | 当前 |
+|---|---|---|
+| `internalPreviewReady` | integrity 门禁 PASSED（真实原文证据 ≥100 条、P0 全绿） | false（暂无真实原文样本） |
+| `externalValidated` | outcome 门禁 PASSED（真实发送 ≥30 封、退信率 ≤3%） | false（暂无真实发送样本） |
+| `releaseEligible` | 正式发布资格：仍需 provider 快照 / OAuth / EV 签名 / 法务意见 | 恒 false |
+
+### 对第七节判据的处置
+
+第七节原文保留。**第 1 条（数据源合同）与第 3 条（385 标注启动）由本决策取消**，不再作为发布前置；**第 2 条（OAuth 验证申请）、第 4 条（EV 签名）、第 5 条（种子用户访谈）继续有效**。OAuth 与 EV 签名并未被本决策取消，`OAuth` / `EV 签名` 仍出现在 `npm run gate` 的静态断言里。
+
+### 必须写进产品口径的四句话
+
+1. **不做标注 = 放弃「准确率」这张牌**：不得对外宣称准确率、Kappa、AUC 等任何以人工真值为前提的指标。
+2. **integrity 通过 ≠ 判得准**：它只证明没编造、没违规、可复现。
+3. **outcome 达标 ≠ 产品可发布**：退信率只证明邮箱质量与发送合规；正式发布仍需外部合规项。
+4. **商业数据源 0/6 不变**：用户投喂 + 用户指定抓取是唯一来源，必须如实标注 `origin=user_imported` / `user_directed_fetch`，不得写成系统采集。
+
+---
+
+## 十五、v0.9.0 抓取落地：用户指定 URL，不是自动采集
+
+v0.8.0 决策后，评测口径已经换成 integrity + outcome，但「真实原文从哪来」还缺最后一环。v0.9.0 把 ADR-032 的**用户指定 URL 抓取**做成可运行的代码（`server/fetch.mjs`），产品口径同步收紧：
+
+| 问题 | 之前 | v0.9.0 |
+|---|---|---|
+| 真实原文 | 只能用户手动复制粘贴进 CSV 的 `raw_text` | 用户给出官网 URL，系统代抓（`POST /v1/sources/fetch`、`POST /v1/batch/fetch-sources`），原文进入 T0 → judge |
+| 抓取边界 | 无 | 只抓用户显式 URL；robots 遵从（Disallow → `E4013`）；每域 ≤1 req/s；8s 超时 / ≤512KB / 正文 ≤2 万字符；只收 HTML/纯文本；重定向逐跳重做 SSRF 校验 |
+| 安全 | 无 | 回环 / 私网 / link-local / 保留段（含 DNS 解析到私网）→ `E4011`，**不发起任何请求** |
+| 来源诚实 | 导入行可能缺原文 | 抓取成功写回 `rawText/sourceUrl/fetchedAt` 并标 `sourceOrigin=user_directed_fetch`；公司 `origin` 仍 `user_imported`；失败逐条 `missing_source` + `sourceFetchError` |
+| 0/6 数据源 | 0/6 | 仍 0/6；抓取器**单独计数**（`/v1/sources/health`、`/health.fetch`、`/health.batch.userDirectedFetch`） |
+
+**必须写进产品口径的四句话（v0.9.0）**：
+
+1. **抓取 ≠ 采集**：只在用户已有名单上补官网原文，不发现公司、不爬全站、不猜 URL；商业 6 类源仍 `0/6`。
+2. **robots 与私网是硬边界**：命中即拒绝（`E4013` / `E4011`），不接受「先抓了再说」。
+3. **失败逐条降级**：抓不到就 `missing_source`，页面内容不完整就如实标注 `truncated`，绝不拿演示文本补齐。
+4. **抓取只补原文，不改评分规则**：T0 仍是确定性规则，模型判断仍需 Key + 锁定快照；抓取成功不解除任何发布门禁。
