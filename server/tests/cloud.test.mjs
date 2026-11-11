@@ -20,6 +20,7 @@ import {
   createBatchPipeline, normalizeDomain, isDomain, parseCsv, validateRows,
   buildMbox, checkExportGates, computeBounceRate, BATCH_VERSION,
 } from '../batch.mjs'
+import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { rmSync, readFileSync } from 'node:fs'
@@ -1788,5 +1789,34 @@ describe('v0.9.0 · 用户指定 URL 抓取（抓取 ≠ 采集）', () => {
       expect(all.fetch.version).toBe('user-directed-fetch-v1')
       expect(all.batch.userDirectedFetch.origin).toBe('user_directed_fetch')
     } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+})
+
+describe('P0-1 · 畸形请求不得终结服务进程', () => {
+  it('非法 URL 返回 400 E5002，之后 /health 仍可正常响应', async () => {
+    const app = createApp({ store: createMemoryStore(), security: { loopback: true } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const port = app.server.address().port
+    try {
+      // 必须用原始 socket：fetch / http.request 会在客户端先把路径规范化掉
+      const raw = await new Promise((resolve, reject) => {
+        const socket = connect(port, '127.0.0.1', () => {
+          socket.write('GET //[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+        })
+        let data = ''
+        socket.setTimeout(3000, () => { socket.destroy(); reject(new Error('socket timeout')) })
+        socket.on('data', (d) => { data += d.toString('utf8') })
+        socket.on('end', () => resolve(data))
+        socket.on('error', reject)
+      })
+      expect(raw).toMatch(/^HTTP\/1\.1 400/)
+      expect(raw).toContain('E5002')
+      const health = await fetch(`http://127.0.0.1:${port}/health`)
+      expect(health.status).toBe(200)
+      expect((await health.json()).ok).toBe(true)
+    } finally {
+      await new Promise((resolve) => app.server.close(resolve))
+      app.store.close?.()
+    }
   })
 })

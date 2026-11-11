@@ -67,23 +67,55 @@ const IPV4_BLOCKED = [
   ['224.0.0.0', 4], ['240.0.0.0', 4],
 ].map(([base, prefix]) => ({ base: ipv4ToInt(base), prefix }))
 
-/** 私网 / 回环 / link-local / 保留段判定（地址字面量） */
+function isIpv4BlockedInt(v4) {
+  return IPV4_BLOCKED.some(({ base, prefix }) => {
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
+    return (v4 & mask) === (base & mask)
+  })
+}
+
+/** 把 IPv6 字面量（含 :: 压缩与嵌入 IPv4）展开成 8 个 16 位组；无法解析返回 null */
+function ipv6Groups(raw) {
+  let s = raw
+  const v4Tail = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s)
+  if (v4Tail) {
+    const n = ipv4ToInt(v4Tail[1])
+    if (n === null) return null
+    s = `${s.slice(0, -v4Tail[1].length)}${((n >>> 16) & 0xffff).toString(16)}:${(n & 0xffff).toString(16)}`
+  }
+  const halves = s.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : []
+  const parts = [...head, ...tail]
+  if (parts.some((x) => !/^[0-9a-f]{1,4}$/.test(x))) return null
+  const groups = parts.map((x) => parseInt(x, 16))
+  if (halves.length === 1) return groups.length === 8 ? groups : null
+  if (groups.length >= 8) return null
+  return [...groups.slice(0, head.length), ...Array(8 - groups.length).fill(0), ...groups.slice(head.length)]
+}
+
+/**
+ * 私网 / 回环 / link-local / 保留段判定（地址字面量）。
+ * P0-2：WHATWG URL 会把 [::ffff:127.0.0.1] 规范化成 ::ffff:7f00:1，
+ * 旧实现只认点分十进制的 mapped 形式，把回环误判为公网（SSRF 直通内网）。
+ */
 export function isPrivateAddress(ip) {
   const v = String(ip ?? '').trim().toLowerCase().replace(/^\[|\]$/g, '')
   if (!v) return false
   const v4 = ipv4ToInt(v)
-  if (v4 !== null) {
-    return IPV4_BLOCKED.some(({ base, prefix }) => {
-      const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
-      return (v4 & mask) === (base & mask)
-    })
+  if (v4 !== null) return isIpv4BlockedInt(v4)
+  if (!v.includes(':')) return false
+  const g = ipv6Groups(v)
+  if (!g) return true // 无法解析的 IPv6 字面量一律保守拒绝
+  // IPv4-mapped（::ffff:a.b.c.d / ::ffff:xx:xx）：取末 32 位按 IPv4 规则判定
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) {
+    return isIpv4BlockedInt(((g[6] << 16) | g[7]) >>> 0)
   }
-  // IPv4-mapped IPv6（::ffff:127.0.0.1）
-  const mapped = v.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/)
-  if (mapped) return isPrivateAddress(mapped[1])
-  if (v === '::' || v === '::1') return true
-  if (/^f[cd][0-9a-f]{2}:/.test(v)) return true // fc00::/7 unique local
-  if (/^fe[89ab][0-9a-f]:/.test(v)) return true // fe80::/10 link-local
+  // :: / ::1 / IPv4-compatible（::a.b.c.d）整段保守拒绝
+  if (g.slice(0, 6).every((x) => x === 0)) return true
+  if ((g[0] & 0xfe00) === 0xfc00) return true // fc00::/7 unique local
+  if ((g[0] & 0xffc0) === 0xfe80) return true // fe80::/10 link-local
   return false
 }
 
@@ -306,6 +338,12 @@ export function createFetcher(opts = {}) {
   async function loadRobots(url) {
     if (!robotsEnabled()) return { status: 'disabled', groups: [], allowAll: true, note: 'robots 校验被环境变量关闭' }
     const robotsUrl = new URL('/robots.txt', url.origin)
+    // P0-2：robots.txt 同样是一次出站请求，必须复用 SSRF 校验并复核 DNS（防重绑定）
+    const hostCheck = await assertPublicHost(robotsUrl, { resolveHost })
+    if (!hostCheck.ok) {
+      counters.ssrfBlocked++
+      return { status: 'ssrf-blocked', groups: [], allowAll: false, note: `robots.txt 主机校验未通过：${hostCheck.reason}` }
+    }
     try {
       const res = await fetchImpl(robotsUrl.href, {
         method: 'GET',
@@ -336,6 +374,12 @@ export function createFetcher(opts = {}) {
     let current = startUrl
     const chain = []
     for (let i = 0; i <= L.maxRedirects; i++) {
+      // P0-2：连接前再解析一次，拦截「校验时公网、连接前改指私网」的 DNS 重绑定
+      const recheck = await assertPublicHost(current, { resolveHost })
+      if (!recheck.ok) {
+        counters.ssrfBlocked++
+        return { ...recheck, redirects: chain }
+      }
       let res
       try {
         res = await fetchImpl(current.href, {
@@ -390,6 +434,9 @@ export function createFetcher(opts = {}) {
       return { ...hostCheck, url: target.href }
     }
     const robots = await robotsFor(target)
+    if (robots.status === 'ssrf-blocked') {
+      return fail('E4011', `robots.txt 主机校验未通过，拒绝抓取：${robots.note ?? ''}`, { url: target.href })
+    }
     if (!robots.allowAll) {
       const verdict = robotsAllows(robots.groups, target.pathname + target.search)
       if (!verdict.allowed) {

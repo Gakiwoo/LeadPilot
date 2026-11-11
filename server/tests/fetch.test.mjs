@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   createFetcher, parseTargetUrl, parseRobots, robotsAllows, htmlToText,
-  isPrivateAddress, FETCH_VERSION, FETCH_ORIGIN,
+  isPrivateAddress, assertPublicHost, FETCH_VERSION, FETCH_ORIGIN,
 } from '../fetch.mjs'
 import { protocol } from '../protocol.mjs'
 import { createBatchPipeline } from '../batch.mjs'
@@ -265,5 +265,53 @@ describe('v0.9.0 · 批量管道接入用户指定抓取（抓取 ≠ 采集）'
     const r = await pipeline.fetchSources({ limit: 5 })
     expect(r.ok).toBe(false)
     expect(r.code).toBe('E4008')
+  })
+})
+
+describe('P0-2 · SSRF 绕过回归（IPv4-mapped IPv6 / DNS 重绑定 / robots 入口）', () => {
+  it('规范化后的 IPv4-mapped IPv6 判为私网，抓取被拒且不发起任何请求', async () => {
+    for (const ip of ['::ffff:7f00:1', '::ffff:127.0.0.1', '::7f00:1']) {
+      expect(isPrivateAddress(ip), ip).toBe(true)
+    }
+    expect(isPrivateAddress('2001:4860:4860::8888')).toBe(false)
+    const check = await assertPublicHost(new URL('http://[::ffff:127.0.0.1]/'))
+    expect(check.ok).toBe(false)
+    expect(check.code).toBe('E4011')
+
+    const { fetcher, calls } = setup({})
+    const r = await fetcher.fetchOne('http://[::ffff:127.0.0.1]/secret')
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('E4011')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('DNS 重绑定：校验后改指私网时，连 robots.txt 都不发出', async () => {
+    let n = 0
+    const rebind = async () => {
+      n += 1
+      return n === 1 ? PUBLIC_ADDRESS : [{ address: '127.0.0.1', family: 4 }]
+    }
+    const { fetcher, calls } = setup({}, { resolveHost: rebind })
+    const r = await fetcher.fetchOne('https://rebind.example/about')
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('E4011')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('连接阶段再解析到私网：目标页不被请求，只有已放行的 robots 请求', async () => {
+    let n = 0
+    const late = async () => {
+      n += 1
+      return n >= 3 ? [{ address: '10.0.0.8', family: 4 }] : PUBLIC_ADDRESS
+    }
+    const { fetcher, calls } = setup({
+      'https://late.example/robots.txt': notFound(),
+      'https://late.example/about': page('<html><body>secret</body></html>'),
+    }, { resolveHost: late })
+    const r = await fetcher.fetchOne('https://late.example/about')
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('E4011')
+    expect(calls.some((u) => u.includes('/about'))).toBe(false)
+    expect(calls.every((u) => u.includes('/robots.txt'))).toBe(true)
   })
 })

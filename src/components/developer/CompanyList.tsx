@@ -46,18 +46,24 @@ export default function CompanyList() {
   const batchDraft = () => {
     const targets = selectedCompanies.filter((c) => ['A', 'B'].includes(c.contacts[0]?.grade ?? '')).slice(0, 50)
     if (!targets.length) { showToast('选中客户中没有 A/B 级可发信邮箱，未创建草稿', 'warn'); return }
+    let created = 0
+    let blocked = 0
     for (const c of targets) {
       const mail = generateEmails(c, settings.profile, { purpose: 'intro', tone: 'concise', length: 'short' })[0]
-      addOutreach({
+      const r = addOutreach({
         id: `out_${Date.now()}_${c.id}`, companyId: c.id, contactId: c.contacts[0]?.id ?? '',
         subject: mail.subject, bodyText: mail.body, bodyHtml: `<pre>${mail.body}</pre>`,
         language: 'en', purpose: 'intro', status: 'draft',
         personalizationTags: mail.tags, validation: mail.validation,
         createdAt: new Date().toISOString(), demo: true,
       })
+      if (r.ok) created += 1
+      else blocked += 1
     }
-    showToast(`已为 ${targets.length} 家创建本地草稿（演示：未调用 Gmail API）；批量直接发送不提供`, 'ok')
-    clearSelection()
+    showToast(blocked
+      ? `已为 ${created} 家创建本地草稿，${blocked} 家因状态不可流转被拒（退订/无效为不可逆终态）`
+      : `已为 ${created} 家创建本地草稿（演示：未调用 Gmail API）；批量直接发送不提供`, blocked ? 'warn' : 'ok')
+    if (created) clearSelection()
   }
 
   return (

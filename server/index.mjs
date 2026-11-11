@@ -159,21 +159,28 @@ export function createApp(opts = {}) {
   }
 
   const server = createServer(async (req, res) => {
-    applyCors(req, res)
-    const url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`)
-    const path = url.pathname
-    const method = req.method ?? 'GET'
-
-    if (method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return }
-    if (!rateOk(req, res)) {
-      return fail(res, 429, 'E6010', '请求过于频繁', `同一 IP 每分钟超过 ${sec.rateLimit} 次`, '稍后重试或调高 LEADPILOT_RATE_LIMIT')
-    }
-    // /health 供探活与前端启动探测，其余 /v1/* 全部要求鉴权（配置了 token 或对外监听时）
-    if (!(method === 'GET' && path === '/health') && !authOk(req)) {
-      return fail(res, 401, 'E6009', '访问令牌缺失或无效', '服务端要求携带有效令牌', '在请求头加 Authorization: Bearer <LEADPILOT_API_TOKEN>')
-    }
-
+    // P0-1：CORS / URL 解析 / 限流 / 鉴权必须全部落在 try 内。此前 new URL() 在 try 之外，
+    // 畸形请求会在 async handler 里抛出未处理拒绝，直接终结进程（一个请求即可远程 DoS）。
     try {
+      applyCors(req, res)
+      let url
+      try {
+        url = new URL(req.url ?? '/', `http://${HOST}:${PORT}`)
+      } catch {
+        return fail(res, 400, 'E5002', '请求路径无法解析', 'URL 格式非法', '检查请求路径后重试')
+      }
+      const path = url.pathname
+      const method = req.method ?? 'GET'
+
+      if (method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return }
+      if (!rateOk(req, res)) {
+        return fail(res, 429, 'E6010', '请求过于频繁', `同一 IP 每分钟超过 ${sec.rateLimit} 次`, '稍后重试或调高 LEADPILOT_RATE_LIMIT')
+      }
+      // /health 供探活与前端启动探测，其余 /v1/* 全部要求鉴权（配置了 token 或对外监听时）
+      if (!(method === 'GET' && path === '/health') && !authOk(req)) {
+        return fail(res, 401, 'E6009', '访问令牌缺失或无效', '服务端要求携带有效令牌', '在请求头加 Authorization: Bearer <LEADPILOT_API_TOKEN>')
+      }
+
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
           ok: true, service: 'leadpilot-cloud', version: '0.9.0',
@@ -489,6 +496,15 @@ export function createApp(opts = {}) {
       if (msg === 'INVALID_JSON') return fail(res, 400, 'E5002', '请求体不是合法 JSON', '序列化失败或内容被截断', '检查请求体格式')
       if (msg === 'BODY_TOO_LARGE') return fail(res, 413, 'E5002', '请求体过大', '超过 256 KB 限制', '压缩或分批提交')
       return fail(res, 500, 'E5002', '服务内部错误', msg, '查看服务端日志并重试')
+    }
+  })
+
+  // P0-1：HTTP 解析层的畸形请求行 / 请求头也不能让进程退出，返回 400 后关闭连接
+  server.on('clientError', (_err, socket) => {
+    if (socket.writable) {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    } else {
+      socket.destroy()
     }
   })
 

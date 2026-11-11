@@ -86,7 +86,7 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict（noUnusedLocals / noUnusedParameters）
-npm test                # 146 个用例 / 7 文件 / 0 skipped（前端 32 + 服务端 114）
+npm test                # 153 个用例 / 8 文件 / 0 skipped（前端 35 + 服务端 118）
 npm run gate            # 发布门禁 54 项自检，输出 releaseBlocked=true
 npm run build           # 类型检查 + 生产构建
 npm run smoke           # 48 项云端端到端冒烟（需先启动 npm run cloud）
@@ -294,7 +294,7 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | 检查 | 结果（v0.9.0） |
 |---|---|
 | `npm run typecheck` / `npm run build` | 通过；版本号从 `package.json` 读取，不再硬编码 |
-| `npm test` | **146 / 146 全绿，0 skipped**（7 文件） |
+| `npm test` | **153 / 153 全绿，0 skipped**（8 文件） |
 | `npm run gate` | **54 / 54 自检通过**，输出 `releaseBlocked=true` |
 | `npm run smoke` | **48 / 48 通过**（隔离端口 5199） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |

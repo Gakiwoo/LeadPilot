@@ -127,7 +127,7 @@ interface AppState {
   updateCompany(id: string, patch: Partial<Company>): void
   setCompanyStatus(id: string, to: CompanyStatus, opts?: { batch?: boolean; confirmed?: boolean; note?: string }): { ok: boolean; needsConfirm?: boolean; message?: string }
   batchSetStatus(ids: string[], to: CompanyStatus, confirmed?: boolean): { ok: boolean; needsConfirm?: boolean; message?: string }
-  addOutreach(o: Outreach): void
+  addOutreach(o: Outreach): { ok: boolean; message?: string }
   updateOutreach(id: string, patch: Partial<Outreach>): void
   updateSettings(patch: Partial<Settings>): void
   addBlacklist(value: string): void
@@ -486,12 +486,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { ok: true }
   },
 
-  addOutreach: (o) => set((s) => ({
-    outreach: [o, ...s.outreach],
-    companies: s.companies.map((c) => c.id === o.companyId
-      ? applyTransition(c, 'drafted', { operator: '系统', automated: true, note: '本地草稿队列已创建（演示）' })
-      : c),
-  })),
+  addOutreach: (o) => {
+    const company = get().companies.find((c) => c.id === o.companyId)
+    if (!company) return { ok: false, message: '客户不存在，草稿未创建' }
+    // P0-3：建草稿是自动流转，必须过状态机。此前直接 applyTransition 会绕开
+    // canTransition 的 E3001，把已退订/无效的不可逆终态客户强行改回 drafted。
+    const check = canTransition({ from: company.status, to: 'drafted', automated: true })
+    if (!check.allowed) return { ok: false, message: check.message ?? '当前状态不允许创建草稿' }
+    set((s) => ({
+      outreach: [o, ...s.outreach],
+      companies: s.companies.map((c) => c.id === o.companyId
+        ? applyTransition(c, 'drafted', { operator: '系统', automated: true, note: '本地草稿队列已创建（演示）' })
+        : c),
+    }))
+    return { ok: true }
+  },
   updateOutreach: (id, patch) => set((s) => ({ outreach: s.outreach.map((o) => o.id === id ? { ...o, ...patch } : o) })),
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
   addBlacklist: (value) => set((s) => ({ settings: { ...s.settings, blacklist: Array.from(new Set([...s.settings.blacklist, value])) } })),

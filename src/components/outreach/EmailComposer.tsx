@@ -114,13 +114,17 @@ export default function EmailComposer({ company, onClose }: { company: Company |
       showToast(`发送前校验未通过：${validation.issues[0]}`, 'error'); return
     }
     const body = edited || current.body
-    addOutreach({
+    const r = addOutreach({
       id: `out_${Date.now()}`, companyId: company.id, contactId: company.contacts[0]?.id ?? '',
       subject: current.subject, bodyText: body, bodyHtml: `<pre>${body}</pre>`,
       language: 'en', purpose, status: 'draft',
       personalizationTags: current.tags, validation: validation ?? current.validation,
       createdAt: new Date().toISOString(), demo: true,
     })
+    if (!r.ok) {
+      showToast(r.message ?? '当前状态不允许创建草稿，草稿未创建', 'error')
+      return
+    }
     onClose()
     showToast('已写入本地草稿队列，状态自动回写「已生成草稿」；演示模式未调用 Gmail API', 'ok')
   }
