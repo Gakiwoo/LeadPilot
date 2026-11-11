@@ -293,11 +293,20 @@
       "endpoint": "POST /v1/import/outcomes",
       "autoTransitions": { "draft_created": "drafted", "email_sent": "sent", "hard_bounce": "bounced", "reply_detected": "replied" },
       "allowedEvents": ["sent", "bounced", "replied", "unsubscribed", "invalid"],
+      "allowedFrom": {
+        "$comment": "P2 · 发送结果只能沿业务时间线单向流转，禁止 replied→sent→bounced 这类任意回退；'*' 表示任意非终态（终态另有不可逆硬拦）。",
+        "sent": ["new", "drafted"],
+        "bounced": ["sent", "drafted"],
+        "replied": ["sent", "drafted", "delivered", "opened"],
+        "unsubscribed": ["*"],
+        "invalid": ["*"]
+      },
       "terminalStatuses": ["unsubscribed", "invalid"],
       "requiresConfirmation": ["unsubscribed", "invalid"],
       "bounceWindow": 100,
       "bounceFormula": "bounced / (sent + bounced)，窗口内累计；样本为 0 时 rate=null，不伪造 0%",
-      "releaseGate": "bounceRate > 0.03 → circuitOpen=true，后续草稿导出返回 423 E4010"
+      "releaseGate": "bounceRate > 0.03 → circuitOpen=true，后续草稿导出返回 423 E4010",
+      "$note": "drafted 由 exportDrafts 内部按 statusAfterExport 落盘，不是外部可回写的 outcome 事件，故不在 allowedEvents 内；前端 AUTOMATIC_TRANSITIONS 含 drafted 描述的是可自动到达的状态，二者不矛盾。"
     }
   },
   "fetchPolicy": {
@@ -318,7 +327,7 @@
       "userAgent": "LeadPilotBot/0.9 (+user-directed fetch; https://github.com/Gakiwoo/LeadPilot)",
       "cacheMs": 3600000,
       "maxBytes": 65536,
-      "$note": "robots.txt 404/410 视为放行；401/403 与命中 Disallow 视为禁止（E4013）；网络失败/5xx 放行但显式标注 unavailable。"
+      "$note": "robots.txt 404/410 视为放行；401/403 与命中 Disallow 视为禁止（E4013）；3xx 逐跳重判 URL 合法性与 SSRF，缺 Location / 目标非法 / 超 maxRedirects 一律 fail-closed 禁止抓取；仅网络失败与 5xx 放行但显式标注 unavailable。"
     },
     "allowedContentTypes": ["text/html", "application/xhtml+xml", "text/plain"],
     "ssrf": {

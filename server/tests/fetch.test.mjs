@@ -363,3 +363,113 @@ describe('P1-01 · 连接 pin 到已验证 IP（DNS 重绑定彻底消除）', (
     }
   })
 })
+
+describe('B3-1 · 安全 P2 收口（robots 3xx 逐跳重判 / 跨请求限速 / 单次上限）', () => {
+  it('robots.txt 3xx 跳向私网：逐跳重判 SSRF，目标页绝不发起请求', async () => {
+    const { fetcher, calls } = setup({
+      'https://example.com/robots.txt': redirect('http://127.0.0.1/robots.txt'),
+      'https://example.com/about': page('<html><body>secret</body></html>'),
+    })
+    const r = await fetcher.fetchOne('https://example.com/about')
+    expect(r.ok).toBe(false)
+    expect(r.code).toBe('E4011')
+    expect(calls).toEqual(['https://example.com/robots.txt'])
+  })
+
+  it('robots.txt 3xx 正常逐跳：跳到含 Disallow 的站点也不 fail-open', async () => {
+    const { fetcher, calls } = setup({
+      'https://example.com/robots.txt': redirect('https://cdn.example/robots.txt'),
+      'https://cdn.example/robots.txt': robots('User-agent: *\nDisallow: /about\n'),
+      'https://example.com/about': page('<html><body>secret</body></html>'),
+    })
+    const r = await fetcher.fetchOne('https://example.com/about')
+    expect(r.code).toBe('E4013')
+    expect(calls.some((u) => u.includes('/about'))).toBe(false)
+    expect(calls).toContain('https://cdn.example/robots.txt')
+  })
+
+  it('robots.txt 3xx 缺 Location / 超跳数：fail-closed 拒绝抓取', async () => {
+    const noLocation = await setup({
+      'https://example.com/robots.txt': response('', { status: 302 }),
+      'https://example.com/about': page('<html><body>secret</body></html>'),
+    }).fetcher.fetchOne('https://example.com/about')
+    expect(noLocation.code).toBe('E4013')
+    expect(noLocation.reason).toMatch(/缺少 Location|拒绝放行/)
+
+    const loop = await setup({
+      'https://example.com/robots.txt': redirect('https://example.com/robots.txt'),
+      'https://example.com/about': page('<html><body>secret</body></html>'),
+    }, { limits: { maxRedirects: 2 } }).fetcher.fetchOne('https://example.com/about')
+    expect(loop.code).toBe('E4013')
+    expect(loop.reason).toMatch(/超过 2 次上限|拒绝放行/)
+  })
+
+  it('robots.txt 401/403 不再因 groups=[] 被误判为放行', async () => {
+    for (const status of [401, 403]) {
+      const { fetcher, calls } = setup({
+        'https://example.com/robots.txt': response('', { status }),
+        'https://example.com/about': page('<html><body>secret</body></html>'),
+      })
+      const r = await fetcher.fetchOne('https://example.com/about')
+      expect(r.code, String(status)).toBe('E4013')
+      expect(calls.some((u) => u.includes('/about')), String(status)).toBe(false)
+    }
+  })
+
+  it('每域限速状态跨请求保持：两次 fetchMany 连续抓同一域名仍等待间隔', async () => {
+    const sleeps = []
+    const fetcher = createFetcher({
+      fetchImpl: async (url) => (String(url).includes('robots.txt')
+        ? notFound() : page('<html><body>ok</body></html>')),
+      resolveHost,
+      now: () => 1_000_000,
+      sleep: async (ms) => { sleeps.push(ms) },
+    })
+    const first = await fetcher.fetchMany(['https://example.com/a'])
+    expect(first.summary.fetched).toBe(1)
+    expect(sleeps).toHaveLength(0)
+    const second = await fetcher.fetchMany(['https://example.com/b'])
+    expect(second.summary.fetched).toBe(1)
+    expect(sleeps.length).toBeGreaterThan(0)
+    expect(sleeps[0]).toBeGreaterThan(0)
+  })
+
+  it('maxUrlsPerRequest 只能收紧不能放宽：调用方传 9999 仍受配置上限约束', async () => {
+    const { fetcher } = setup({}, { limits: { maxUrlsPerRequest: 2 } })
+    const urls = ['https://example.com/a', 'https://example.com/b', 'https://example.com/c']
+    const widened = await fetcher.fetchMany(urls, { maxUrlsPerRequest: 9999 })
+    expect(widened.ok).toBe(false)
+    expect(widened.code).toBe('E4011')
+    expect(widened.reason).toMatch(/调用方只能收紧/)
+    const tightened = await fetcher.fetchMany(urls, { maxUrlsPerRequest: 1 })
+    expect(tightened.ok).toBe(false)
+    expect(tightened.reason).toMatch(/单次最多抓取 1 个/)
+  })
+
+  it('batch.fetchSources 按契约分批，且不再用 targets.length 覆盖单次上限', async () => {
+    const calls = []
+    const stub = {
+      version: FETCH_VERSION,
+      origin: FETCH_ORIGIN,
+      health: () => ({ counters: { fetched: 0, failed: 0, robotsBlocked: 0, ssrfBlocked: 0, lastFetchAt: null } }),
+      fetchMany: async (urls, options) => {
+        calls.push({ urls: [...urls], options })
+        return {
+          ok: false,
+          fetched: [],
+          failed: urls.map((url) => ({ ok: false, url, code: 'E4012', reason: 'stub' })),
+          summary: { requested: urls.length, fetched: 0, failed: urls.length },
+        }
+      },
+    }
+    const store = createMemoryStore()
+    const pipeline = createBatchPipeline({ store, gateway: null, fetcher: stub })
+    pipeline.importCompanies({
+      rows: Array.from({ length: 12 }, (_, i) => ({ company_name: `C${i}`, domain: `c${i}.example` })),
+    })
+    const r = await pipeline.fetchSources({ limit: 12 })
+    expect(calls.map((c) => c.urls.length)).toEqual([10, 2])
+    expect(calls.every((c) => c.options === undefined || c.options.maxUrlsPerRequest === undefined)).toBe(true)
+    expect(r.summary.requested).toBe(12)
+  })
+})

@@ -211,6 +211,12 @@ export function checkExportGates(items, ctx = {}) {
   const circuitOpen = Boolean(ctx.circuitOpen)
   const dailyLimit = Number(ctx.dailyLimit ?? CFG.export.draftExportDailyLimit)
   let usedToday = Number(ctx.exportedToday ?? 0)
+  // B3-0（假设 #4 核查）：G2 不能只靠前端自觉。服务端同时接收调用方黑名单，
+  // 并联合客户库里的不可逆终态做硬拦截，直接调 /v1/export/eml 也绕不过去。
+  const blacklist = Array.isArray(ctx.blacklist)
+    ? ctx.blacklist.map((b) => String(b).toLowerCase().trim()).filter(Boolean) : []
+  const terminalDomains = Array.isArray(ctx.terminalDomains)
+    ? ctx.terminalDomains.map((d) => String(d).toLowerCase().trim()).filter(Boolean) : []
 
   if (!Array.isArray(items) || !items.length) {
     return { allowed, blocked, errors: ['items 为空'], circuitOpen, exportedToday: usedToday }
@@ -222,6 +228,14 @@ export function checkExportGates(items, ctx = {}) {
     else {
       const to = String(item.to ?? '').trim()
       if (!EMAIL_RE.test(to)) reasons.push('收件人邮箱非法')
+      const email = to.toLowerCase()
+      const emailDomain = email.split('@')[1] ?? ''
+      if (blacklist.some((b) => (b.startsWith('@') ? emailDomain === b.slice(1) : email === b))) {
+        reasons.push('收件人命中黑名单/退订（G2，全局禁止发送）')
+      }
+      if (terminalDomains.includes(String(item.domain ?? '').toLowerCase().trim())) {
+        reasons.push('客户已处于退订/无效终态（G2，不可逆，禁止导出）')
+      }
       const grade = String(item.grade ?? '').toUpperCase()
       if (grade === 'D') reasons.push('D 级联系人禁止发信（PRD 11.2）')
       if (grade === 'C' && item.confirmed !== true) reasons.push('C 级联系人需逐条人工确认（PRD 11.2）')
@@ -397,9 +411,27 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       const url = /^https?:\/\//i.test(raw) ? raw : `https://${c.domain}`
       return { domain: c.domain, url }
     })
-    const batch = await fetcher.fetchMany(targets.map((t) => t.url), { maxUrlsPerRequest: targets.length })
-    const fetchedByKey = new Map((batch.fetched ?? []).map((r) => [normalizeUrlKey(r.url), r]))
-    const failedByKey = new Map((batch.failed ?? []).map((r) => [normalizeUrlKey(r.url), r]))
+    // P2 · 分批调用抓取器：每批不超过 fetchPolicy.maxUrlsPerRequest，
+    // 且绝不再用 targets.length 覆盖抓取器自身的单次上限（旧实现会绕过契约限制）。
+    const perCall = Math.max(1, Math.trunc(Number(protocol.fetchPolicy.maxUrlsPerRequest) || 10))
+    const fetched = []
+    const failed = []
+    for (let i = 0; i < targets.length; i += perCall) {
+      const slice = targets.slice(i, i + perCall)
+      const part = await fetcher.fetchMany(slice.map((t) => t.url))
+      const partFetched = part.fetched ?? []
+      const partFailed = part.failed ?? []
+      fetched.push(...partFetched)
+      failed.push(...partFailed)
+      // 整批被拒（上限 / 参数非法）时逐条如实标注，不伪装成「抓取未返回结果」
+      if (part.ok === false && !partFetched.length && !partFailed.length) {
+        for (const t of slice) {
+          failed.push({ url: t.url, code: part.code ?? 'E4012', reason: part.reason ?? '抓取被拒绝' })
+        }
+      }
+    }
+    const fetchedByKey = new Map(fetched.map((r) => [normalizeUrlKey(r.url), r]))
+    const failedByKey = new Map(failed.map((r) => [normalizeUrlKey(r.url), r]))
     const items = []
     for (const t of targets) {
       const key = normalizeUrlKey(t.url)
@@ -568,9 +600,18 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
     if (ctx.exportedToday >= ctx.draftExportDailyLimit) {
       return { ok: false, code: 'E4009', reason: `今日草稿导出已达 ${ctx.draftExportDailyLimit} 封上限` }
     }
+    const items = Array.isArray(payload.items) ? payload.items : []
+    const terminalDomains = []
+    for (const item of items) {
+      const domain = normalizeDomain(item?.domain ?? '')
+      const rec = domain ? store.companyGet(domain) : null
+      if (rec && CFG.outcomes.terminalStatuses.includes(rec.status)) terminalDomains.push(domain)
+    }
     const gates = checkExportGates(payload.items, {
       circuitOpen: ctx.circuitOpen, bounceRate: ctx.bounce.rate,
       exportedToday: ctx.exportedToday, dailyLimit: ctx.draftExportDailyLimit,
+      blacklist: Array.isArray(payload.blacklist) ? payload.blacklist : [],
+      terminalDomains,
     })
     if (gates.errors?.length) return { ok: false, code: 'E4009', errors: gates.errors }
     if (!gates.allowed.length) {
@@ -582,6 +623,20 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
     }
     const content = buildMbox(gates.allowed, { now: now() })
     const at = now()
+    // B3-2：此前只在响应里写 statusAfterExport，客户库状态从未落盘。
+    // 导出的草稿确实应进入 drafted（≠ sent），且不可逆终态绝不改写。
+    for (const item of gates.allowed) {
+      const domain = normalizeDomain(item?.domain ?? '')
+      const rec = domain ? store.companyGet(domain) : null
+      if (!rec || CFG.outcomes.terminalStatuses.includes(rec.status)) continue
+      store.companyUpsert(domain, {
+        ...rec, status: CFG.export.statusAfterExport,
+        statusLog: [...(rec.statusLog ?? []), {
+          from: rec.status, to: CFG.export.statusAfterExport, at: iso(at), automated: true,
+          note: '草稿已导出（exported-not-sent），状态按契约落盘 drafted，绝不等于已发送',
+        }],
+      })
+    }
     // 导出是审计事件，不是发送事件；不参与退信率分子/分母，也绝不把状态置为 sent
     store.outcomeAppend({ domain: '*', event: 'exported', at, meta: { count: gates.allowed.length, format: 'mbox' } })
     const filename = `leadpilot-drafts-${iso(at).slice(0, 10)}.mbox`
@@ -615,6 +670,18 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       if (!rec) { rejected.push({ index: i, domain, event, code: 'E4010', reasons: ['该域名不在已导入客户库中'] }); return }
       if (CFG.outcomes.terminalStatuses.includes(rec.status)) {
         rejected.push({ index: i, domain, event, code: 'E4010', reasons: [`当前状态 ${rec.status} 为不可逆终态，任何任务与账号均不可再流转（PRD F8）`] }); return
+      }
+      // P2 · 结果回写必须沿业务时间线单向流转：replied→sent→bounced 这类任意回退会
+      // 污染退信率/回复率统计。约束来自 shared 协议，缺失定义时一律拒绝（fail-closed）。
+      const allowedFrom = CFG.outcomes.allowedFrom?.[event]
+      if (!Array.isArray(allowedFrom)) {
+        rejected.push({ index: i, domain, event, code: 'E4010', reasons: [`事件 ${event} 缺少 allowedFrom 流转约束，拒绝回写（fail-closed）`] }); return
+      }
+      if (!allowedFrom.includes('*') && !allowedFrom.includes(rec.status)) {
+        rejected.push({
+          index: i, domain, event, code: 'E4010',
+          reasons: [`状态不可回退：${rec.status} → ${event} 不在业务时间线内（允许前驱：${allowedFrom.join(' / ')}）`],
+        }); return
       }
       const at = Number.isFinite(Number(e?.at)) && Number(e?.at) > 0 ? Number(e.at) : now()
       store.outcomeAppend({ domain, event, at, meta: { operator: String(e?.operator ?? '本地用户'), note: String(e?.note ?? '') } })

@@ -20,11 +20,14 @@ function Toast() {
     warn: { cls: 'border-amber-200 bg-amber-50 text-amber-800', icon: <AlertTriangle size={15} className="text-amber-600" /> },
     error: { cls: 'border-rose-200 bg-rose-50 text-rose-800', icon: <XCircle size={15} className="text-rose-600" /> },
   }[toast.tone]
+  // B3-5 · 屏幕阅读器必须能读到提示；告警用 assertive，其余用 polite
+  const urgent = toast.tone === 'error' || toast.tone === 'warn'
   return (
-    <div className={`lp-fade fixed bottom-5 right-5 z-[60] flex max-w-[440px] items-start gap-2.5 rounded-xl border px-3.5 py-3 text-[12px] shadow-lg ${styles.cls}`}>
+    <div role={urgent ? 'alert' : 'status'} aria-live={urgent ? 'assertive' : 'polite'} aria-atomic="true"
+      className={`lp-fade fixed bottom-5 right-5 z-[60] flex max-w-[440px] items-start gap-2.5 rounded-xl border px-3.5 py-3 text-[12px] shadow-lg ${styles.cls}`}>
       <span className="mt-0.5 shrink-0">{styles.icon}</span>
       <span className="leading-5">{toast.message}</span>
-      <button onClick={clearToast} className="ml-1 shrink-0 opacity-50 hover:opacity-100"><X size={13} /></button>
+      <button onClick={clearToast} aria-label="关闭提示" className="ml-1 shrink-0 opacity-50 hover:opacity-100"><X size={13} /></button>
     </div>
   )
 }
@@ -65,12 +68,16 @@ export default function App() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
+        {/* B3-5 · 演示/降级提示全站常驻，不再只覆盖 3 个子页 */}
+        <div className="shrink-0 border-b border-amber-100 bg-amber-50/70 px-6 py-1.5 text-[11px] leading-4 text-amber-800">
+          <strong>演示模式</strong>·客户记录与商业数据源为演示（0/6）·云端网关与任务编排为真实服务，未配 Key 时模型判断明确返回 E6005 降级·Gmail 未接入，导出 ≠ 发送
+        </div>
         <main className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
           {activeView === 'developer' && <DeveloperView />}
           {activeView === 'crm' && <CrmView />}
           {activeView === 'outreach' && <OutreachView />}
           {activeView === 'settings' && <SettingsView />}
-          <div className="mt-6 border-t border-line pt-3 text-center text-[10px] leading-4 text-slate-400">
+          <div className="mt-6 border-t border-line pt-3 text-center text-[11px] leading-4 text-slate-400">
             LeadPilot 猎客 · PRD v1.1 · 评分引擎 / 状态机 / 合规校验 / 云端网关与任务编排为真实实现
             {gateway == null || gateway.mode === 'offline'
               ? ' · 云端服务不可达（offline）：请启动 npm run cloud，这不是 E6005 未配 Key'

@@ -82,17 +82,17 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
               <span className={gatewayResult.degraded ? 'text-amber-800' : 'text-emerald-800'}>
                 {gatewayResult.degraded ? '云端判断已降级 · 当前分数未经模型校验（E6005）' : '云端判断已完成 · 客户端二次校验通过'}
               </span>
-              <span className="ml-auto text-[10px] font-normal text-slate-500">{new Date(gatewayResult.at).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+              <span className="ml-auto text-[11px] font-normal text-slate-500">{new Date(gatewayResult.at).toLocaleTimeString('zh-CN', { hour12: false })}</span>
             </div>
-            <div className="mt-1.5 flex flex-wrap gap-1.5 pl-5 text-[10px] text-slate-600">
+            <div className="mt-1.5 flex flex-wrap gap-1.5 pl-5 text-[11px] text-slate-600">
               {gatewayResult.provider && <span className="lp-chip">provider {gatewayResult.provider}</span>}
               {gatewayResult.model && <span className="lp-chip">model {gatewayResult.model}</span>}
               <span className="lp-chip">可溯源率 {Math.round(gatewayResult.provenance * 100)}%</span>
               {gatewayResult.cached && <span className="lp-chip">命中 30 天缓存 · 0 点</span>}
               {gatewayResult.points !== undefined && !gatewayResult.cached && <span className="lp-chip">消耗 {gatewayResult.points} 点</span>}
             </div>
-            {gatewayResult.reason && <p className="mt-1.5 pl-5 text-[10px] leading-4 text-amber-800">{gatewayResult.reason}</p>}
-            <p className="mt-1.5 pl-5 text-[10px] leading-4 text-slate-500">
+            {gatewayResult.reason && <p className="mt-1.5 pl-5 text-[11px] leading-4 text-amber-800">{gatewayResult.reason}</p>}
+            <p className="mt-1.5 pl-5 text-[11px] leading-4 text-slate-500">
               {gatewayResult.degraded
                 ? '按 PRD F0-4：不静默回退、不编造模型结论，分数改区间显示并下调置信度。配置 API Key 后重新点击即可走真实链路。'
                 : '模型只输出离散枚举与证据，分数仍由本地代码按固定公式合成；证据引用须能在官网原文中命中。'}
@@ -118,7 +118,7 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
                   <div className="truncate text-[11px] text-muted">{DIMENSION_LABELS[k].zh}</div>
                   <div className="mt-1 flex items-baseline gap-1">
                     <span className="text-[20px] font-semibold tabular-nums text-ink">{d.displayValue}</span>
-                    {d.hasData && !['size', 'contact'].includes(k) && <span className="text-[10px] text-muted">/100</span>}
+                    {d.hasData && !['size', 'contact'].includes(k) && <span className="text-[11px] text-muted">/100</span>}
                   </div>
                   <div className="mt-1.5"><ScoreBar value={d.score} compact /></div>
                   <div className="mt-1.5 flex items-center justify-between text-[9px] text-muted">
@@ -142,7 +142,7 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
                 <div className="mt-3 grid grid-cols-3 gap-2">
                   {d.meta.map((m, i) => (
                     <div key={i} className="rounded-lg bg-canvas px-2.5 py-1.5">
-                      <p className="text-[10px] text-muted">{m.label}</p>
+                      <p className="text-[11px] text-muted">{m.label}</p>
                       <p className="mt-0.5 text-[11px] font-medium text-ink">{m.value}</p>
                     </div>
                   ))}
@@ -152,14 +152,14 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
                   {d.evidences.length ? d.evidences.slice(0, 4).map((e, i) => (
                     <div key={i} className="mb-1.5 rounded-lg border border-line bg-white px-2.5 py-2">
                       <p className="text-[11px] leading-4 text-slate-700">「{e.quote}」</p>
-                      <p className="mt-1 text-[10px] text-muted">{e.label ?? '原文片段'} · {e.sourceUrl} · 抓取于 {e.fetchedAt}</p>
+                      <p className="mt-1 text-[11px] text-muted">{e.label ?? '原文片段'} · {e.sourceUrl} · 抓取于 {e.fetchedAt}</p>
                     </div>
                   )) : <p className="text-[11px] text-muted">该维度无可核验证据，已按缺失维度处理，不按 0 分计入。</p>}
                 </div>
               </Card>
             )
           })()}
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
             <span>综合分公式：</span>
             {DIMS.map((k) => (
               <span key={k} className={`lp-chip ${sc.weights[k] === 0 ? 'opacity-40 line-through' : ''}`}>
@@ -200,15 +200,15 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
                     <span className="truncate font-mono text-[12px] text-ink">{ct.value}</span>
                     <span className="ml-auto"><GradeBadge grade={ct.grade} /></span>
                   </div>
-                  <p className="mt-1.5 text-[10px] leading-4 text-muted">{GRADE_LABELS[ct.grade].desc}</p>
-                  <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-muted">
+                  <p className="mt-1.5 text-[11px] leading-4 text-muted">{GRADE_LABELS[ct.grade].desc}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted">
                     <span className="lp-chip">{ct.ownerName ?? '职位不明'} {ct.title ?? ''}</span>
                     <span className="lp-chip">验证 {ct.verifyCode}</span>
                     <span className="lp-chip">来源 {ct.source}</span>
                   </div>
                 </div>
               ))}
-              <div className="mt-3 flex items-start gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-2 text-[10px] leading-4 text-emerald-800">
+              <div className="mt-3 flex items-start gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-2 text-[11px] leading-4 text-emerald-800">
                 <ShieldCheck size={12} className="mt-0.5 shrink-0" />
                 <span>数据最小化：发往模型的请求体已硬性剔除 {minimized.removed.join(' / ')}（PRD 11.4.1）。</span>
               </div>
@@ -221,7 +221,7 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
           {c.tradeRecords.length ? (
             <Card className="overflow-hidden">
               <table className="w-full text-[11px]">
-                <thead className="bg-canvas text-[10px] text-muted"><tr><th className="px-3 py-2 text-left font-medium">日期</th><th className="px-3 py-2 text-left font-medium">HS 编码</th><th className="px-3 py-2 text-left font-medium">品名</th><th className="px-3 py-2 text-left font-medium">原产地</th><th className="px-3 py-2 text-left font-medium">货值</th><th className="px-3 py-2 text-left font-medium">来源</th></tr></thead>
+                <thead className="bg-canvas text-[11px] text-muted"><tr><th className="px-3 py-2 text-left font-medium">日期</th><th className="px-3 py-2 text-left font-medium">HS 编码</th><th className="px-3 py-2 text-left font-medium">品名</th><th className="px-3 py-2 text-left font-medium">原产地</th><th className="px-3 py-2 text-left font-medium">货值</th><th className="px-3 py-2 text-left font-medium">来源</th></tr></thead>
                 <tbody>{c.tradeRecords.map((t) => (
                   <tr key={t.id} className="border-t border-line">
                     <td className="px-3 py-2 tabular-nums">{t.tradeDate}</td><td className="px-3 py-2 font-mono">{t.hsCode}</td>

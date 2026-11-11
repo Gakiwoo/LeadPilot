@@ -8,7 +8,7 @@ import {
   INTEGRITY_GATE_VERSION, OUTCOME_GATE_VERSION, RELEASE_POLICY_VERSION,
 } from '../eval.mjs'
 import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft, buildJudgeMessages } from '../protocol.mjs'
-import { createApp } from '../index.mjs'
+import { createApp, verifyToken, createRateLimiter } from '../index.mjs'
 import { createStore, createMemoryStore, sqliteAvailable } from '../store.mjs'
 import { extractFacts, validateT0Input, T0_RULES_VERSION } from '../t0.mjs'
 import { createDataSourceRegistry, SOURCE_DEFS } from '../data-sources.mjs'
@@ -621,12 +621,14 @@ describe('持久化 · AC-03 跨进程续跑与额度不重复扣', () => {
     expect(s.taskGet('t1')).toBeNull()
   })
 
-  it.skipIf(!sqliteAvailable)('sqlite 文件在两个独立 store 实例之间恢复任务 / 缓存 / 审计', () => {
+  // B3-3：不再 it.skipIf。node:sqlite 不可用时必须验证 json 兜底同样能跨实例恢复，
+  // 绝不静默跳过让 CI 显示「0 skipped」的假绿。
+  it('持久化 store 跨实例恢复任务 / 缓存 / 审计（sqlite 或 json 兜底，绝不跳过）', () => {
     const dir = join(tmpdir(), `leadpilot-${Date.now()}-${Math.random().toString(36).slice(2)}`)
     const dbPath = join(dir, 'leadpilot.db')
     try {
       const s1 = createStore({ mode: 'sqlite', dbPath })
-      expect(s1.mode).toBe('sqlite')
+      expect(s1.mode).toBe(sqliteAvailable ? 'sqlite' : 'json')
       s1.taskUpsert('task_x', { id: 'task_x', status: 'running', cursor: { offset: 9 }, progress: { log: [] } })
       s1.cacheSet('cache_x', { judgement: 'ok' }, 86400000)
       s1.auditAppend({ taskType: 'judge', points: 3 })
@@ -992,12 +994,14 @@ describe('点数账本事务化 · 预扣 / 结算 / 释放 / 幂等', () => {
     expect(kinds).toEqual(['reserve', 'release'])
   })
 
-  it.skipIf(!sqliteAvailable)('SQLite 账本在两个独立 store 实例之间恢复，重启不重复扣', () => {
+  // B3-3：同上，sqlite 缺失时走 json 兜底并照样断言「重启不重复扣」
+  it('持久化账本跨实例恢复、重启不重复扣（sqlite 或 json 兜底，绝不跳过）', () => {
     const dir = join(tmpdir(), `leadpilot-ledger-${Date.now()}-${Math.random().toString(36).slice(2)}`)
     const dbPath = join(dir, 'ledger.db')
     const stores = []
     try {
       const s1 = createStore({ mode: 'sqlite', dbPath }); stores.push(s1)
+      expect(s1.mode).toBe(sqliteAvailable ? 'sqlite' : 'json')
       const l1 = createLedger({ store: s1, openingBalance: 80 })
       l1.reserve({ refId: 'persisted', amount: 30 })
       s1.close()
@@ -2053,6 +2057,250 @@ describe('B2 · 安全 P1 行为级反例', () => {
     } finally {
       await new Promise((resolve) => app.server.close(resolve))
       app.store.close?.()
+    }
+  })
+})
+
+describe('B3-0 · 导出链 G2 与状态落盘行为级反例', () => {
+  it('服务端导出闸门按调用方黑名单（邮箱 / 域名）与客户终态硬拦 G2', () => {
+    const byEmail = checkExportGates([validDraft()], { blacklist: ['buyer@acme.example'] })
+    expect(byEmail.allowed).toHaveLength(0)
+    expect(byEmail.blocked[0].reasons.join()).toContain('G2')
+    const byDomain = checkExportGates([validDraft()], { blacklist: ['@acme.example'] })
+    expect(byDomain.blocked[0].reasons.join()).toContain('G2')
+    const byTerminal = checkExportGates([validDraft()], { terminalDomains: ['acme.example'] })
+    expect(byTerminal.blocked[0].reasons.join()).toContain('终态')
+  })
+
+  it('直接调 exportDrafts：黑名单拦截、退订终态客户仍禁止导出', () => {
+    const store = createMemoryStore()
+    const p = createBatchPipeline({ store, gateway: null })
+    p.importCompanies({ rows: [{ company_name: 'Acme', domain: 'acme.example' }] })
+    const blocked = p.exportDrafts({ items: [validDraft()], blacklist: ['buyer@acme.example'] })
+    expect(blocked.ok).toBe(false)
+    expect(JSON.stringify(blocked.blocked)).toContain('G2')
+    p.importOutcomes({ events: [{ domain: 'acme.example', event: 'unsubscribed', confirmed: true }] })
+    const terminal = p.exportDrafts({ items: [validDraft()] })
+    expect(terminal.ok).toBe(false)
+    expect(JSON.stringify(terminal.blocked)).toContain('G2')
+  })
+
+  it('导出成功后 statusAfterExport 真实落盘为 drafted，且绝不等于 sent', () => {
+    const store = createMemoryStore()
+    const p = createBatchPipeline({ store, gateway: null })
+    p.importCompanies({ rows: [{ company_name: 'Acme', domain: 'acme.example' }] })
+    const r = p.exportDrafts({ items: [validDraft()] })
+    expect(r.ok).toBe(true)
+    const rec = store.companyGet('acme.example')
+    expect(rec.status).toBe('drafted')
+    expect(rec.statusLog.at(-1)).toMatchObject({ to: 'drafted', automated: true })
+    expect(rec.status).not.toBe('sent')
+  })
+})
+
+describe('B3-1 · 安全 P2 收口（恒定时间令牌 / 回环 CORS / 限流表有界）', () => {
+  const listen = async (opts) => {
+    const app = createApp(opts)
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    return { app, base: `http://127.0.0.1:${app.server.address().port}` }
+  }
+  const close = async (app) => {
+    await new Promise((resolve) => app.server.close(resolve))
+    app.store.close?.()
+  }
+
+  it('verifyToken：任意长度输入都不抛异常，前缀正确也不得通过', () => {
+    const token = 's3cr3t-token-2026'
+    expect(verifyToken(token, token)).toBe(true)
+    for (const guess of ['', 's', 's3cr3t', 's3cr3t-token', 's3cr3t-token-2026-extra',
+      'S3CR3T-TOKEN-2026', token.repeat(400), 'x'.repeat(5000)]) {
+      expect(() => verifyToken(guess, token)).not.toThrow()
+      expect(verifyToken(guess, token), guess.slice(0, 20)).toBe(false)
+    }
+    // 直接 timingSafeEqual(Buffer.from(a), Buffer.from(b)) 在长度不等时会抛 RangeError，
+    // 把本该 401 的请求变成 500；这里必须始终是 false。
+    expect(verifyToken(undefined, token)).toBe(false)
+    expect(verifyToken(token, '')).toBe(false)
+  })
+
+  it('配置 token 后：长度不等 / 前缀相同的错误令牌一律 401，正确令牌 200', async () => {
+    const { app, base } = await listen({
+      store: createMemoryStore(),
+      security: { token: 's3cr3t', loopback: false, cors: ['http://127.0.0.1:5180'], rateLimit: 100 },
+    })
+    try {
+      for (const guess of ['s3cr3', 's3cr3t-extra', 'x'.repeat(4000), 'S3CR3T']) {
+        const res = await fetch(`${base}/v1/gateway/health`, { headers: { authorization: `Bearer ${guess}` } })
+        expect(res.status, guess.slice(0, 12)).toBe(401)
+        expect((await res.json()).code).toBe('E6009')
+      }
+      const ok = await fetch(`${base}/v1/gateway/health`, { headers: { authorization: 'Bearer s3cr3t' } })
+      expect(ok.status).toBe(200)
+    } finally { await close(app) }
+  })
+
+  it('回环下 CORS=* 也不回显通配：剔除为显式白名单并在 /health 如实上报', async () => {
+    const { app, base } = await listen({
+      store: createMemoryStore(),
+      security: { token: '', loopback: true, cors: ['*'], rateLimit: 100 },
+    })
+    try {
+      for (const origin of ['https://evil.example', 'http://127.0.0.1:5180']) {
+        const res = await fetch(`${base}/v1/gateway/health`, { headers: { origin } })
+        expect(res.headers.get('access-control-allow-origin')).not.toBe('*')
+      }
+      const h = await (await fetch(`${base}/health`)).json()
+      expect(h.security.cors).not.toContain('*')
+      expect(h.security.corsWildcardRejected).toBe(true)
+    } finally { await close(app) }
+  })
+
+  it('限流表有界：大量不同 IP 不会无限膨胀，淘汰后仍正确限流', () => {
+    let t = 1_700_000_000_000
+    const limiter = createRateLimiter({ limit: 2, now: () => t, maxEntries: 8 })
+    for (let i = 0; i < 500; i += 1) limiter.check(`198.51.100.${i % 250}`, null)
+    expect(limiter.stats().entries).toBeLessThanOrEqual(8)
+    expect(limiter.stats().evictions).toBeGreaterThan(0)
+
+    const ip = '203.0.113.9'
+    const res = { setHeader: () => {} }
+    expect(limiter.check(ip, res)).toBe(true)
+    expect(limiter.check(ip, res)).toBe(true)
+    expect(limiter.check(ip, res)).toBe(false)
+    t += 60_001
+    expect(limiter.check(ip, res)).toBe(true)
+  })
+})
+
+describe('B3-2 · 持久化与状态机 P2 收口', () => {
+  const taskConfig = { keywords: ['fittings'], markets: ['德国'], depth: 1, targetCount: 10 }
+
+  it('hydrate 恢复日志幂等：连续重启不再反复追加，也不把历史任务算成本次恢复', () => {
+    const store = createMemoryStore()
+    const o1 = createOrchestrator({ store, tickMs: 10000 })
+    const t = o1.createTask(taskConfig)
+    expect(t.status).toBe('running')
+    o1.dispose()
+
+    const o2 = createOrchestrator({ store, tickMs: 10000 })
+    expect(o2.recoveredActiveIds).toContain(t.id)
+    const log2 = o2.getTask(t.id).progress.log
+    expect(log2.at(-1).text).toContain('额度不重复扣减')
+    o2.dispose()
+
+    const o3 = createOrchestrator({ store, tickMs: 10000 })
+    const log3 = o3.getTask(t.id).progress.log
+    expect(log3).toHaveLength(log2.length)
+    expect(o3.recoveredIds).toContain(t.id)          // 历史任务仍在载入列表
+    expect(o3.recoveredActiveIds).toHaveLength(0)     // 但不是「本次恢复」
+    o3.dispose()
+  })
+
+  it('/health.persistence：recoveredTasks 只报本次降级任务，restoredTasks 如实报载入总数', async () => {
+    const store = createMemoryStore()
+    const o = createOrchestrator({ store, tickMs: 10000 })
+    o.createTask(taskConfig)
+    o.dispose()
+    const first = createApp({ store, orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => first.server.listen(0, '127.0.0.1', resolve))
+    let body
+    try {
+      body = await (await fetch(`http://127.0.0.1:${first.server.address().port}/health`)).json()
+    } finally {
+      await new Promise((resolve) => first.server.close(resolve))
+    }
+    expect(body.persistence.recoveredTasks).toBe(1)
+    expect(body.persistence.restoredTasks).toBe(1)
+
+    const second = createApp({ store, orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => second.server.listen(0, '127.0.0.1', resolve))
+    let again
+    try {
+      again = await (await fetch(`http://127.0.0.1:${second.server.address().port}/health`)).json()
+    } finally {
+      await new Promise((resolve) => second.server.close(resolve))
+    }
+    expect(again.persistence.recoveredTasks).toBe(0)
+    expect(again.persistence.restoredTasks).toBe(1)
+  })
+
+  it('状态机单向：replied→sent / new→bounced / new→replied 一律拒绝，合法链仍可回写', () => {
+    const store = createMemoryStore()
+    const p = createBatchPipeline({ store, gateway: null })
+    p.importCompanies({ rows: [{ company_name: 'Acme', domain: 'acme.example' }] })
+
+    const earlyBounce = p.importOutcomes({ events: [{ domain: 'acme.example', event: 'bounced' }] })
+    expect(earlyBounce.applied).toHaveLength(0)
+    expect(earlyBounce.rejected[0].reasons.join()).toMatch(/状态不可回退|业务时间线/)
+
+    const sent = p.importOutcomes({ events: [{ domain: 'acme.example', event: 'sent' }] })
+    expect(sent.applied).toHaveLength(1)
+    const replied = p.importOutcomes({ events: [{ domain: 'acme.example', event: 'replied' }] })
+    expect(replied.applied).toHaveLength(1)
+    expect(store.companyGet('acme.example').status).toBe('replied')
+
+    const rollback = p.importOutcomes({ events: [{ domain: 'acme.example', event: 'sent' }] })
+    expect(rollback.applied).toHaveLength(0)
+    expect(rollback.rejected[0].reasons.join()).toMatch(/状态不可回退/)
+    expect(store.companyGet('acme.example').status).toBe('replied')
+
+    // 终态不可逆仍优先于流转约束
+    const terminal = p.importOutcomes({ events: [{ domain: 'acme.example', event: 'unsubscribed', confirmed: true }] })
+    expect(terminal.applied).toHaveLength(1)
+    const afterTerminal = p.importOutcomes({ events: [{ domain: 'acme.example', event: 'sent' }] })
+    expect(afterTerminal.rejected[0].reasons.join()).toMatch(/不可逆终态/)
+  })
+
+  it('allowedFrom 契约完整：每个 allowedEvent 都必须有流转约束，缺失即 fail-closed', () => {
+    const o = protocol.batchPipeline.outcomes
+    for (const event of o.allowedEvents) {
+      expect(Array.isArray(o.allowedFrom?.[event]), event).toBe(true)
+    }
+    expect(o.allowedFrom.sent).toContain('drafted')
+    expect(o.allowedFrom.bounced).toContain('sent')
+    expect(o.allowedFrom.bounced).not.toContain('replied')
+    expect(o.allowedFrom.replied).not.toContain('bounced')
+  })
+
+  it('memory 账本事务：多步写中途失败时账户与流水整体回滚，不留半写状态', () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    ledger.state() // 先完成开户；此后 reserve 的 append 即事务内「账户已改、流水未写」的失败点
+    const before = ledger.peek()
+    const entriesBefore = ledger.allEntries(500).length
+    const originalAppend = store.ledgerAppend.bind(store)
+    store.ledgerAppend = () => { throw new Error('模拟第二步写入失败') }
+    expect(() => ledger.reserve({ refId: 'tx-rollback', amount: 30 })).toThrow(/模拟第二步/)
+    store.ledgerAppend = originalAppend
+    expect(ledger.peek().held).toBe(before.held)
+    expect(ledger.peek().available).toBe(before.available)
+    expect(ledger.allEntries(500)).toHaveLength(entriesBefore)
+    // 回滚后账本仍可用，幂等键没有残留
+    expect(ledger.entries('tx-rollback')).toHaveLength(0)
+  })
+
+  it('json 账本事务：失败回滚后磁盘与内存一致，不落下半写文件', () => {
+    const dir = join(tmpdir(), `leadpilot-b3-tx-${Date.now()}`)
+    const filePath = join(dir, 'store.json')
+    const store = createStore({ mode: 'json', dbPath: filePath })
+    try {
+      const ledger = createLedger({ store, openingBalance: 200 })
+      ledger.state() // 先完成开户
+      const before = ledger.peek()
+      const originalAppend = store.ledgerAppend.bind(store)
+      store.ledgerAppend = () => { throw new Error('模拟磁盘事务中途失败') }
+      expect(() => ledger.reserve({ refId: 'tx-json', amount: 30 })).toThrow(/模拟/)
+      store.ledgerAppend = originalAppend
+      const onDisk = JSON.parse(readFileSync(filePath, 'utf8'))
+      expect(ledger.peek().held).toBe(before.held)
+      expect(onDisk.ledgerEntries.some((e) => String(e.ref_id).includes('tx-json'))).toBe(false)
+      // 后续正常写入仍可落盘
+      expect(ledger.reserve({ refId: 'tx-json-ok', amount: 10 }).ok).toBe(true)
+      const after = JSON.parse(readFileSync(filePath, 'utf8'))
+      expect(after.ledgerEntries.some((e) => String(e.ref_id).includes('tx-json-ok'))).toBe(true)
+    } finally {
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

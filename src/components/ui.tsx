@@ -1,4 +1,7 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import {
+  cloneElement, isValidElement, useEffect, useId, useRef,
+  type ButtonHTMLAttributes, type ReactElement, type ReactNode,
+} from 'react'
 import { AlertTriangle, Info, X } from 'lucide-react'
 import { GRADE_LABELS, STATUS_DEFS } from '@/domain/constants'
 import type { CompanyStatus, ContactGrade } from '@/types'
@@ -22,7 +25,9 @@ export function Badge({ children, tone = 'slate', className = '' }: { children: 
 }
 
 export function StatusBadge({ status }: { status: CompanyStatus }) {
-  const d = STATUS_DEFS.find((x) => x.key === status) ?? STATUS_DEFS[0]
+  // STATUS_DEFS 非空是常量事实，但 `find(...)[0]` 在开启 noUncheckedIndexedAccess 后是
+  // `CompanyStatusDef | undefined`：这里显式兜底，避免「状态值不在表里」时整页崩白。
+  const d = STATUS_DEFS.find((x) => x.key === status) ?? STATUS_DEFS[0] ?? { key: status, zh: String(status), en: String(status), tone: 'slate', terminal: false }
   return <Badge tone={d.tone as Tone}>{d.zh}</Badge>
 }
 
@@ -80,11 +85,26 @@ export function Card({ children, className = '' }: { children: ReactNode; classN
 }
 
 export function Field({ label, hint, children, required }: { label: string; hint?: string; children: ReactNode; required?: boolean }) {
+  const id = useId()
+  const labelId = `${id}-label`
+  const hintId = hint ? `${id}-hint` : undefined
+  // B3-5 · 单一控件（input/select/textarea）用 htmlFor 显式关联；
+  // 复合控件组（关键词 chips、多选按钮组等）改用 role=group + aria-labelledby，
+  // 避免把 label 指向一个 div 造成「有 label 但没有可访问名称」的假无障碍。
+  const singleControl = isValidElement(children) && typeof children.type === 'string'
+    && ['input', 'select', 'textarea'].includes(children.type)
+  const control = singleControl
+    ? cloneElement(children as ReactElement<Record<string, unknown>>, {
+        id, 'aria-labelledby': labelId, 'aria-describedby': hintId,
+      })
+    : children
   return (
-    <div>
-      <label className="lp-label">{label}{required && <span className="ml-0.5 text-rose-500">*</span>}</label>
-      {children}
-      {hint && <p className="mt-1 text-[11px] leading-4 text-muted">{hint}</p>}
+    <div role={singleControl ? undefined : 'group'} aria-labelledby={singleControl ? undefined : labelId}>
+      {singleControl
+        ? <label htmlFor={id} id={labelId} className="lp-label">{label}{required && <span className="ml-0.5 text-rose-500">*</span>}</label>
+        : <span id={labelId} className="lp-label">{label}{required && <span className="ml-0.5 text-rose-500">*</span>}</span>}
+      {control}
+      {hint && <p id={hintId} className="mt-1 text-[11px] leading-4 text-muted">{hint}</p>}
     </div>
   )
 }
@@ -131,17 +151,52 @@ export function Toggle({ checked, onChange, label, desc }: { checked: boolean; o
   )
 }
 
+/**
+ * B3-5 · 抽屉 / 弹窗的 dialog 语义与焦点陷阱。
+ * Esc 关闭由 App 的全局 keydown 统一处理，这里只负责：打开时移入焦点、
+ * Tab / Shift+Tab 在对话框内循环、关闭后把焦点还给触发元素。
+ */
+function useDialogA11y(open: boolean) {
+  const ref = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+  useEffect(() => {
+    if (!open) return
+    const previous = document.activeElement as HTMLElement | null
+    const focusable = () => Array.from(ref.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? [])
+    focusable()[0]?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return
+      const items = focusable()
+      if (!items.length) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (e.shiftKey && first && document.activeElement === first) { e.preventDefault(); last?.focus() }
+      else if (!e.shiftKey && last && document.activeElement === last) { e.preventDefault(); first?.focus() }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      previous?.focus?.()
+    }
+  }, [open])
+  return { ref, titleId }
+}
+
 export function Drawer({ open, onClose, title, subtitle, children, footer, width = '60%' }: {
   open: boolean; onClose(): void; title: ReactNode; subtitle?: ReactNode; children: ReactNode; footer?: ReactNode; width?: string
 }) {
+  const dialog = useDialogA11y(open)
   if (!open) return null
   return (
     <div className="fixed inset-0 z-40 flex">
       <div className="flex-1 bg-ink/20 backdrop-blur-[1px]" onClick={onClose} />
-      <div className="lp-slide flex h-full flex-col bg-white shadow-drawer" style={{ width }}>
+      <div ref={dialog.ref} role="dialog" aria-modal="true" aria-labelledby={dialog.titleId}
+        className="lp-slide flex h-full flex-col bg-white shadow-drawer" style={{ width }}>
         <div className="flex items-start justify-between gap-4 border-b border-line px-6 py-4">
           <div className="min-w-0">
-            <div className="truncate text-[16px] font-semibold text-ink">{title}</div>
+            <div id={dialog.titleId} className="truncate text-[16px] font-semibold text-ink">{title}</div>
             {subtitle && <div className="mt-1 text-[12px] text-muted">{subtitle}</div>}
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-muted hover:bg-slate-100 hover:text-ink" aria-label="关闭"><X size={17} /></button>
@@ -156,13 +211,16 @@ export function Drawer({ open, onClose, title, subtitle, children, footer, width
 export function Modal({ open, onClose, title, children, footer, width = '640px' }: {
   open: boolean; onClose(): void; title: string; children: ReactNode; footer?: ReactNode; width?: string
 }) {
+  const dialog = useDialogA11y(open)
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/25 p-6" onClick={onClose}>
-      <div className="lp-fade flex max-h-[88vh] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" style={{ maxWidth: width }} onClick={(e) => e.stopPropagation()}>
+      <div ref={dialog.ref} role="dialog" aria-modal="true" aria-labelledby={dialog.titleId}
+        className="lp-fade flex max-h-[88vh] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+        style={{ maxWidth: width }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
-          <h3 className="text-[15px] font-semibold text-ink">{title}</h3>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-muted hover:bg-slate-100"><X size={17} /></button>
+          <h3 id={dialog.titleId} className="text-[15px] font-semibold text-ink">{title}</h3>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-muted hover:bg-slate-100" aria-label="关闭"><X size={17} /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
         {footer && <div className="border-t border-line bg-slate-50/70 px-5 py-3">{footer}</div>}

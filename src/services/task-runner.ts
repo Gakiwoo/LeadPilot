@@ -20,7 +20,7 @@ export interface TaskRunner {
 }
 
 const emptyProgress = (depth: TaskConfig['depth']): TaskProgress => ({
-  stage: TASK_STAGES[0], stageIndex: 0, candidates: 0, stored: 0, qualified: 0,
+  stage: TASK_STAGES[0] ?? '', stageIndex: 0, candidates: 0, stored: 0, qualified: 0,
   etaRange: [4, 8],
   sources: ([
     { name: '搜索引擎（SerpAPI 兼容）', hits: 0, failures: 0, status: 'ok' },
@@ -42,7 +42,8 @@ export function createTaskRunner(
   callbacks: RunnerCallbacks,
 ): TaskRunner {
   let progress = emptyProgress(task.config.depth)
-  progress.log[1].text = `任务启动 · ${DEPTH_CONFIG[task.config.depth].label} · 目标 ${task.config.targetCount} 家`
+  const startLine = progress.log[1]
+  if (startLine) startLine.text = `任务启动 · ${DEPTH_CONFIG[task.config.depth].label} · 目标 ${task.config.targetCount} 家`
   let emitted = 0
   let paused = false
   let aborted = false
@@ -72,11 +73,11 @@ export function createTaskRunner(
 
     const log = [...progress.log]
     if (tick === 4) log.push({ at: new Date().toLocaleTimeString('zh-CN', { hour12: false }), level: 'warn', text: '海关数据源不可用：配额用尽。本次结果基于其余数据源，完整性约 78%（不允许静默降级）' })
-    if (stageIndex !== progress.stageIndex) log.push({ at: new Date().toLocaleTimeString('zh-CN', { hour12: false }), level: 'info', text: `进入阶段：${TASK_STAGES[stageIndex]}` })
+    if (stageIndex !== progress.stageIndex) log.push({ at: new Date().toLocaleTimeString('zh-CN', { hour12: false }), level: 'info', text: `进入阶段：${TASK_STAGES[stageIndex] ?? ''}` })
     log.push({ at: new Date().toLocaleTimeString('zh-CN', { hour12: false }), level: 'info', text: `新增 ${batch.length} 家达标客户 · 已入库 ${stored}` })
 
     progress = {
-      stage: TASK_STAGES[stageIndex], stageIndex, candidates: Math.round(candidates),
+      stage: TASK_STAGES[stageIndex] ?? '', stageIndex, candidates: Math.round(candidates),
       stored, qualified, etaRange, sources, log: log.slice(-80),
     }
 

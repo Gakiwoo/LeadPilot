@@ -1,6 +1,7 @@
 import { Compass, LayoutGrid, Mail, Settings2, RotateCcw, Radar, CircleDot } from 'lucide-react'
 import { useAppStore, type ViewKey } from '@/store/useAppStore'
 import { ADAPTER_STATUS } from '@/services/adapters'
+import pkg from '../../package.json'
 
 const NAV: { key: ViewKey; label: string; en: string; icon: typeof Compass }[] = [
   { key: 'developer', label: '客户开发', en: 'Developer', icon: Compass },
@@ -24,7 +25,7 @@ export default function Sidebar() {
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-500 text-white shadow-sm"><Radar size={18} /></div>
         <div>
           <div className="text-[15px] font-semibold leading-4 tracking-tight text-ink">LeadPilot <span className="font-normal text-muted">猎客</span></div>
-          <div className="mt-1 text-[10px] tracking-wide text-muted">B2B 客户开发工作台</div>
+          <div className="mt-1 text-[11px] tracking-wide text-muted">B2B 客户开发工作台</div>
         </div>
       </div>
 
@@ -41,7 +42,7 @@ export default function Sidebar() {
             >
               <Icon size={16} className={active ? 'text-brand-600' : 'text-slate-400'} />
               <span className="text-[13px]">{label}</span>
-              <span className={`ml-auto text-[10px] ${active ? 'text-brand-500' : 'text-slate-300'}`}>{en}</span>
+              <span className={`ml-auto text-[11px] ${active ? 'text-brand-500' : 'text-slate-300'}`}>{en}</span>
             </button>
           )
         })}
@@ -52,7 +53,7 @@ export default function Sidebar() {
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-700">
             <CircleDot size={12} className={gateway?.online ? 'text-emerald-500' : 'text-amber-500'} /> 接入状态
           </div>
-          <button onClick={() => probeGateway()} disabled={probing} className="text-[10px] text-brand-600 hover:underline disabled:opacity-50">
+          <button onClick={() => probeGateway()} disabled={probing} className="text-[11px] text-brand-600 hover:underline disabled:opacity-50">
             {probing ? '检测中…' : '重新检测'}
           </button>
         </div>
@@ -66,7 +67,7 @@ export default function Sidebar() {
           <li className="flex items-center justify-between"><span>Gmail API</span><span className="text-amber-600">未接入</span></li>
           <li className="flex items-center justify-between"><span>评分引擎</span><span className="text-emerald-600">本地运行</span></li>
         </ul>
-        <p className="mt-2 border-t border-line pt-2 text-[10px] leading-4 text-slate-400">
+        <p className="mt-2 border-t border-line pt-2 text-[11px] leading-4 text-slate-400">
           {gateway?.online
             ? gateway.mode === 'configured'
               ? '网关已配置 Key，可发起真实判断；未配置的 provider 仍留空位。'
@@ -85,7 +86,7 @@ export default function Sidebar() {
         >
           <RotateCcw size={12} /> 重置演示数据
         </button>
-        <p className="mt-2 text-center text-[10px] text-slate-300">v0.1.0 · M1/M2 客户端基线</p>
+        <p className="mt-2 text-center text-[11px] text-slate-300">v{pkg.version}·内部预览</p>
       </div>
     </aside>
   )

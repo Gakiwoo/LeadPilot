@@ -319,6 +319,8 @@ export function buildDemoCompanies(count = 48): Company[] {
   const out: Company[] = []
   for (let i = 0; i < count; i++) {
     const base = SEEDS[i % SEEDS.length]
+    // SEEDS 为空是编程错误：宁可少造数据，也不对 undefined 取属性
+    if (!base) break
     const variant = Math.floor(i / SEEDS.length)
     const suffix = variant === 0 ? '' : ` ${['North', 'Industrial', 'Global', 'Regional'][variant - 1] ?? ''}`.trim()
     const name = variant === 0 ? base.name : `${base.name}${suffix ? ` · ${suffix}` : ''}`
@@ -335,7 +337,7 @@ export function buildDemoCompanies(count = 48): Company[] {
     if (s.fakeCitation) {
       scoreCard.warnings.push('E6004 演示引用无法在原文核验，相关判断已整条丢弃并回退规则分')
     }
-    const status = (['new', 'new', 'drafted', 'sent', 'replied', 'interested', 'quoted', 'won', 'bounced', 'unsubscribed'] as const)[i % 10]
+    const status = ((['new', 'new', 'drafted', 'sent', 'replied', 'interested', 'quoted', 'won', 'bounced', 'unsubscribed'] as const)[i % 10]) ?? 'new'
     const firstSeen = new Date(Date.UTC(2026, 10, 6 - (i % 6), 8 + (i % 8), 12)).toISOString()
     out.push({
       id, domain, name, nameLocal: undefined, country: s.country, flag: s.flag, city: s.city,
@@ -355,8 +357,8 @@ export function buildDemoCompanies(count = 48): Company[] {
       }],
       followups: status === 'quoted' ? [{ id: `fu_${id}`, dueDate: '2026-11-12', content: '报价后跟进', channel: '邮件', done: false }] : [],
     })
-    if (status !== 'new') {
-      const c = out[out.length - 1]
+    const c = out[out.length - 1]
+    if (status !== 'new' && c) {
       c.statusLog.push({
         id: `sl_${id}_s`, from: 'new', to: status, operator: '本地用户', automated: false,
         note: '演示状态', createdAt: firstSeen,

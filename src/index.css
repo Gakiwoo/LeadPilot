@@ -13,7 +13,9 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
-body { min-width: 1024px; }
+/* B3-5 · 不再强制 1024px：窄屏下由各表格容器横向滚动，页面本身不再被撑爆。
+   布局仍是桌面优先（侧栏 + 主区），未做移动端重排，如实标注而非宣称响应式。 */
+body { min-width: 320px; }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }

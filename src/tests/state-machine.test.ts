@@ -33,8 +33,9 @@ describe('PRD F8 · 12 态状态机', () => {
     const next = applyTransition(company(), 'drafted', { operator: '系统', automated: true, note: '建草稿成功' })
     expect(next.status).toBe('drafted')
     expect(next.statusLog).toHaveLength(1)
-    expect(next.statusLog[0]).toMatchObject({ from: 'new', to: 'drafted', operator: '系统', automated: true, note: '建草稿成功' })
-    expect(next.statusLog[0].createdAt).toBeTruthy()
+    const entry = next.statusLog[0]
+    expect(entry).toMatchObject({ from: 'new', to: 'drafted', operator: '系统', automated: true, note: '建草稿成功' })
+    expect(entry?.createdAt).toBeTruthy()
   })
 
   it('已发送 3 天无回复 → 建议二次触达', () => {

@@ -7,7 +7,9 @@
  *      本服务不保存任何凭据、不记录客户原文或邮箱；任务游标、缓存与审计落本地持久化存储。
  */
 import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { createGateway } from './gateway.mjs'
 import { createOrchestrator, MAX_CONCURRENT } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
@@ -27,6 +29,8 @@ import {
   validateBaselineImport, checkLabeledBaseline,
 } from './baseline.mjs'
 
+// B3-4：版本号从 package.json 读取，/health 不再硬编码字面量（README 早已这样声明）
+const PKG_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 const PORT = Number(process.env.LEADPILOT_PORT ?? 5181)
 const HOST = process.env.LEADPILOT_HOST ?? '127.0.0.1'
 const MAX_BODY = 256 * 1024
@@ -41,6 +45,74 @@ const DEFAULT_SECURITY = {
   loopback: IS_LOOPBACK,
   cors: CORS_LIST,
   rateLimit: RATE_LIMIT,
+}
+
+const RATE_TABLE_MAX = 4096
+
+/**
+ * P2 · 令牌恒定时间比较：先做等长 SHA-256 摘要再比较。
+ * 直接 timingSafeEqual(Buffer.from(a), Buffer.from(b)) 在长度不等时会抛 RangeError
+ * （把 401 变成 500），且逐字符比较会泄漏前缀；摘要后两者都消失。
+ * 任意长度输入都不抛异常，超长直接拒绝，避免用巨型 header 做 CPU DoS。
+ */
+export function verifyToken(supplied, expected) {
+  const a = String(supplied ?? '')
+  const b = String(expected ?? '')
+  if (!a || !b || a.length > 4096 || b.length > 4096) return false
+  const ha = createHash('sha256').update(a, 'utf8').digest()
+  const hb = createHash('sha256').update(b, 'utf8').digest()
+  return timingSafeEqual(ha, hb)
+}
+
+/**
+ * P2 · 限流表有界：旧实现每个 IP 一条记录、过期后只重置计数不删 key，
+ * 长时间运行 / 大量不同来源会无限膨胀。这里优先淘汰已过期项，
+ * 仍超上限时按插入顺序淘汰最旧项，并把淘汰次数暴露给行为级反例。
+ */
+export function createRateLimiter({ limit, now = () => Date.now(), maxEntries = RATE_TABLE_MAX } = {}) {
+  const cap = Math.max(1, Number(limit) || 1)
+  const ceiling = Math.max(1, Number(maxEntries) || RATE_TABLE_MAX)
+  const hits = new Map() // ip -> { count, resetAt }
+  let evictions = 0
+
+  function prune(current, keepIp = null) {
+    if (hits.size <= ceiling) return
+    for (const [ip, rec] of hits) {
+      if (ip === keepIp) continue
+      if (current >= rec.resetAt) { hits.delete(ip); evictions += 1 }
+    }
+    if (hits.size > ceiling) {
+      let overflow = hits.size - ceiling
+      for (const ip of hits.keys()) {
+        if (overflow <= 0) break
+        if (ip === keepIp) continue
+        hits.delete(ip)
+        evictions += 1
+        overflow -= 1
+      }
+    }
+  }
+
+  return {
+    check(ip, res) {
+      const current = now()
+      let rec = hits.get(ip)
+      if (!rec || current >= rec.resetAt) {
+        rec = { count: 0, resetAt: current + 60_000 }
+        hits.set(ip, rec)
+      }
+      // 插入后也要收敛，保证「任意时刻」表大小都 ≤ 上限；
+      // keepIp 保护正在计数的来源，避免淘汰把活跃计数清零而绕过限流。
+      prune(current, ip)
+      rec.count += 1
+      if (rec.count > cap) {
+        res?.setHeader?.('Retry-After', String(Math.max(1, Math.ceil((rec.resetAt - current) / 1000))))
+        return false
+      }
+      return true
+    },
+    stats: () => ({ entries: hits.size, evictions, maxEntries: ceiling, limit: cap }),
+  }
 }
 
 export function createApp(opts = {}) {
@@ -60,24 +132,30 @@ export function createApp(opts = {}) {
   const batch = opts.batch ?? createBatchPipeline({ store, gateway, fetcher })
   // 允许测试注入独立的安全上下文，不污染进程级默认值
   const sec = { ...DEFAULT_SECURITY, ...(opts.security ?? {}) }
-  const hits = new Map() // ip -> { count, resetAt }
+  // P2 · 回环下也不回显 ACAO:*：本机无 token 时，通配等于任意网页都能读取本机 API 响应。
+  // 启动前置校验只拦「非回环 + *」，此处把通配从有效白名单里剔除并如实上报，绝不静默放行。
+  const rawCors = Array.isArray(sec.cors) ? sec.cors : []
+  const corsWildcardRejected = rawCors.includes('*')
+  const explicitCors = rawCors.map((x) => String(x ?? '').trim()).filter((x) => x && x !== '*')
+  sec.cors = explicitCors.length ? explicitCors : ['http://127.0.0.1:5180']
+  const rateLimiter = createRateLimiter({ limit: sec.rateLimit })
 
   function securityInfo() {
     return {
       mode: sec.token ? 'token' : 'local-open',
       loopback: sec.loopback,
       cors: sec.cors,
+      corsWildcardRejected,
       rateLimitPerMinute: sec.rateLimit,
-      note: '仅本机回环且未设置令牌时免鉴权；对外监听必须配置 LEADPILOT_API_TOKEN 且 CORS 不得为 *。',
+      rateTable: rateLimiter.stats(),
+      note: '仅本机回环且未设置令牌时免鉴权；对外监听必须配置 LEADPILOT_API_TOKEN；CORS 通配 * 在任何模式下都不回显，会被剔除为显式白名单。',
     }
   }
 
   /** 每个请求按 Origin 白名单决定 Allow-Origin，绝不默认通配 */
   function applyCors(req, res) {
     const origin = req.headers?.origin
-    const allowed = sec.cors.includes('*')
-      ? '*'
-      : (origin && sec.cors.includes(origin) ? origin : (sec.cors[0] ?? 'http://127.0.0.1:5180'))
+    const allowed = origin && sec.cors.includes(origin) ? origin : (sec.cors[0] ?? 'http://127.0.0.1:5180')
     res.setHeader('Access-Control-Allow-Origin', allowed)
     res.setHeader('Vary', 'Origin')
   }
@@ -92,20 +170,12 @@ export function createApp(opts = {}) {
     if (!sec.token) return sec.loopback
     const bearer = String(req.headers?.authorization ?? '')
     const supplied = bearer.startsWith('Bearer ') ? bearer.slice(7) : String(req.headers?.['x-leadpilot-token'] ?? '')
-    return supplied.length > 0 && supplied === sec.token
+    // P2 · 恒定时间比较（等长摘要），不按字符短路、不泄漏令牌长度差异
+    return verifyToken(supplied, sec.token)
   }
 
   function rateOk(req, res) {
-    const ip = req.socket?.remoteAddress ?? 'unknown'
-    const now = Date.now()
-    let rec = hits.get(ip)
-    if (!rec || now >= rec.resetAt) { rec = { count: 0, resetAt: now + 60_000 }; hits.set(ip, rec) }
-    rec.count += 1
-    if (rec.count > sec.rateLimit) {
-      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((rec.resetAt - now) / 1000))))
-      return false
-    }
-    return true
+    return rateLimiter.check(req.socket?.remoteAddress ?? 'unknown', res)
   }
 
   function json(res, status, body) {
@@ -197,7 +267,7 @@ export function createApp(opts = {}) {
 
       if (method === 'GET' && path === '/health') {
         return json(res, 200, {
-          ok: true, service: 'leadpilot-cloud', version: '0.9.0',
+          ok: true, service: 'leadpilot-cloud', version: PKG_VERSION,
           gateway: gateway.health(),
           orchestrator: (() => {
             const list = orchestrator.listTasks()
@@ -214,7 +284,10 @@ export function createApp(opts = {}) {
           persistence: {
             mode: store.mode,
             durable: store.mode !== 'memory',
-            recoveredTasks: orchestrator.recoveredIds?.length ?? 0,
+            // P2 · recoveredTasks 只报「本次启动真正从活跃态降级恢复」的任务，
+            // 不再把全部历史任务都算成恢复；restoredTasks 单独如实报载入总数。
+            recoveredTasks: orchestrator.recoveredActiveIds?.length ?? 0,
+            restoredTasks: orchestrator.recoveredIds?.length ?? 0,
           },
           points: ledger.health(),
           billing: {
@@ -527,7 +600,7 @@ export function createApp(opts = {}) {
     }
   })
 
-  return { server, gateway, orchestrator, store, ledger, batch }
+  return { server, gateway, orchestrator, store, ledger, batch, rateLimiter }
 }
 
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href

@@ -171,7 +171,7 @@ export default function EmailComposer({ company, onClose }: { company: Company |
           <span className="ml-auto text-[11px] text-muted">一版主打价格/交期，一版主打技术/定制</span>
         </div>
 
-        {mails.length > 0 && (
+        {mails.length > 0 && current && (
           <>
             <div className="flex gap-1.5">
               {mails.map((m, i) => (
@@ -197,7 +197,7 @@ export default function EmailComposer({ company, onClose }: { company: Company |
               <div className="rounded-lg border border-line p-3">
                 <p className="mb-1.5 text-[11px] font-medium text-ink">个性化依据</p>
                 <div className="flex flex-wrap gap-1.5">{current.tags.map((t) => <Badge key={t} tone="brand">{t}</Badge>)}</div>
-                <p className="mt-2 text-[10px] leading-4 text-muted">首句必须引用一条可核验的公开事实；事实抓准比文采重要 3 倍以上（PRD F6-5）。</p>
+                <p className="mt-2 text-[11px] leading-4 text-muted">首句必须引用一条可核验的公开事实；事实抓准比文采重要 3 倍以上（PRD F6-5）。</p>
               </div>
               <div className={`rounded-lg border p-3 ${validation?.passed ? 'border-emerald-200 bg-emerald-50/50' : 'border-rose-200 bg-rose-50/50'}`}>
                 <p className="mb-1.5 flex items-center gap-1 text-[11px] font-medium text-ink">
@@ -205,13 +205,13 @@ export default function EmailComposer({ company, onClose }: { company: Company |
                   发送前校验（代码执行，不经过模型）
                 </p>
                 {validation ? (
-                  <ul className="space-y-0.5 text-[10px] leading-4 text-slate-700">
+                  <ul className="space-y-0.5 text-[11px] leading-4 text-slate-700">
                     <li>字数 {validation.wordCount}/{validation.maxWords} 词 · 禁词 {validation.bannedHits.length} 处</li>
                     <li>退订尾巴 {validation.hasUnsubscribe ? '✓' : '✗'} · 真实身份 {validation.hasSenderIdentity ? '✓' : '✗'} · 未填占位符 {validation.hasPlaceholder ? '✗' : '✓'}</li>
                     <li>个性化锚点 {validation.hasPersonalization ? '✓' : '✗'}</li>
                     {!validation.passed && <li className="pt-1 text-rose-700">{validation.issues.join('；')}</li>}
                   </ul>
-                ) : <p className="text-[10px] text-muted">生成后自动校验</p>}
+                ) : <p className="text-[11px] text-muted">生成后自动校验</p>}
               </div>
             </div>
           </>

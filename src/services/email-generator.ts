@@ -47,7 +47,7 @@ export function pickAnchor(company: Company): { text: string; tags: string[] } {
 }
 
 function subjectFor(company: Company, product: string): string {
-  const shortName = company.name.split(/[\s·]/)[0].slice(0, 16)
+  const shortName = (company.name.split(/[\s·]/)[0] ?? company.name).slice(0, 16)
   return `${product} supply for ${shortName}`
 }
 
@@ -89,7 +89,7 @@ export function generateEmails(
   ]
 
   return (['A', 'B'] as const).map((variant, i) => {
-    const body = injectComplianceFooter(bodies[i], profile)
+    const body = injectComplianceFooter(bodies[i] ?? bodies[0] ?? '', profile)
     const validation = validateEmail(body, {
       maxWords: EMAIL_LENGTH_LIMIT[opts.length],
       requirePersonalization: true,

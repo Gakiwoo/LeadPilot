@@ -227,6 +227,33 @@ export function robotsAllows(groups, pathAndQuery, opts = {}) {
   return { allowed: Boolean(best.allow), matched: best }
 }
 
+/**
+ * P2 · robots 裁决统一收口：只有 allowAll=true（显式放行，如 404 / 5xx 且有标注）
+ * 或 status='ok' 且规则允许才放行。旧实现把 401/403/3xx 都塞进 groups=[] /
+ * allowAll:false，接着 robotsAllows([]) 返回 true —— 禁止类响应反而放行。
+ */
+export function robotsVerdict(robots, pathAndQuery) {
+  if (!robots || robots.allowAll) return { blocked: false, matched: null }
+  if (robots.status !== 'ok') {
+    return {
+      blocked: true,
+      code: robots.status === 'ssrf-blocked' ? 'E4011' : 'E4013',
+      reason: `robots.txt 未通过校验（${robots.status}）：${robots.note ?? '无法判定，按禁止处理'}`,
+      matched: null,
+    }
+  }
+  const verdict = robotsAllows(robots.groups, pathAndQuery)
+  if (!verdict.allowed) {
+    return {
+      blocked: true,
+      code: 'E4013',
+      reason: `robots.txt 禁止抓取 ${verdict.matched?.path ?? pathAndQuery}`,
+      matched: verdict.matched,
+    }
+  }
+  return { blocked: false, matched: null }
+}
+
 /* --------------------------------------------------------------- HTML→文本 */
 
 const ENTITIES = {
@@ -376,9 +403,29 @@ export function createFetcher(opts = {}) {
   const resolveHost = opts.resolveHost
   const now = opts.now ?? (() => Date.now())
   const sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+  const ROBOTS_CACHE_MAX = 512
+  const HOST_LIMIT_MAX = 2048
   const robotsCache = new Map()
+  // P2 · 每域限速状态必须是实例级：旧实现每次 fetchMany 都新建 lastByHost，
+  // 连续两次请求抓同一域名时「每域 1 req/s」形同虚设。
+  const lastByHost = new Map()
   const counters = { fetched: 0, failed: 0, robotsBlocked: 0, ssrfBlocked: 0, lastFetchAt: null }
   const L = { ...FETCH_LIMITS, ...(opts.limits ?? {}) }
+
+  /** P2 · 两个缓存都要有界：过期项先淘汰，仍超上限时按插入顺序淘汰最旧项 */
+  function pruneCaches(current) {
+    for (const [origin, rec] of robotsCache) if (current >= rec.expiresAt) robotsCache.delete(origin)
+    if (robotsCache.size > ROBOTS_CACHE_MAX) {
+      let extra = robotsCache.size - ROBOTS_CACHE_MAX
+      for (const origin of robotsCache.keys()) { robotsCache.delete(origin); if (--extra <= 0) break }
+    }
+    // 已过限速窗口的时间戳无需保留，Map 只留「最近一个窗口内访问过的域」
+    for (const [host, at] of lastByHost) if (current - at >= L.perDomainMinIntervalMs) lastByHost.delete(host)
+    if (lastByHost.size > HOST_LIMIT_MAX) {
+      let extra = lastByHost.size - HOST_LIMIT_MAX
+      for (const host of lastByHost.keys()) { lastByHost.delete(host); if (--extra <= 0) break }
+    }
+  }
 
   const publicPolicy = () => ({
     version: FETCH_VERSION,
@@ -396,34 +443,104 @@ export function createFetcher(opts = {}) {
     userAgent: P.robots.userAgent,
   })
 
+  /**
+   * P2 · robots.txt 的 3xx 必须逐跳重判，绝不 fail-open：
+   * 旧实现把任何 !res.ok（含 301/302/307/308）当成 unavailable + allowAll:true，
+   * 站点一个 302 就能让 Disallow 完全失效，且重定向目标从未过 SSRF 校验。
+   * 现在每跳都重新 parseTargetUrl / assertPublicHost / pin 已验证 IP；
+   * 缺 Location、目标非法、超跳数一律 fail-closed（拒绝抓取）。
+   */
   async function loadRobots(url) {
     if (!robotsEnabled()) return { status: 'disabled', groups: [], allowAll: true, note: 'robots 校验被环境变量关闭' }
-    const robotsUrl = new URL('/robots.txt', url.origin)
-    // P0-2：robots.txt 同样是一次出站请求，必须复用 SSRF 校验并复核 DNS（防重绑定）
-    const hostCheck = await assertPublicHost(robotsUrl, { resolveHost })
-    if (!hostCheck.ok) {
-      counters.ssrfBlocked++
-      return { status: 'ssrf-blocked', groups: [], allowAll: false, note: `robots.txt 主机校验未通过：${hostCheck.reason}` }
-    }
-    try {
-      const res = await doFetch(robotsUrl.href, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(Math.min(L.timeoutMs, 5000)),
-        headers: { 'user-agent': P.robots.userAgent, accept: 'text/plain' },
-      }, hostCheck.addresses, Math.min(L.timeoutMs, 5000))
-      if (res.status === 404 || res.status === 410) return { status: 'missing', groups: [], allowAll: true }
-      if (res.status === 401 || res.status === 403) return { status: 'forbidden', groups: [], allowAll: false, note: `robots.txt HTTP ${res.status}，视为禁止` }
-      if (!res.ok) return { status: 'unavailable', groups: [], allowAll: true, note: `robots.txt HTTP ${res.status}，无法判定，按放行处理并标注` }
+    let current = new URL('/robots.txt', url.origin)
+    const chain = []
+    const timeout = Math.min(L.timeoutMs, 5000)
+    const robotsInit = () => ({
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeout),
+      headers: { 'user-agent': P.robots.userAgent, accept: 'text/plain' },
+    })
+    for (let hop = 0; hop <= L.maxRedirects; hop++) {
+      // P0-2：每一跳都是一次出站请求，必须独立做 SSRF 校验并复核 DNS（防重绑定）
+      const hostCheck = await assertPublicHost(current, { resolveHost })
+      if (!hostCheck.ok) {
+        counters.ssrfBlocked++
+        return {
+          status: 'ssrf-blocked', groups: [], allowAll: false, redirects: chain,
+          note: `robots.txt 主机校验未通过：${hostCheck.reason}`,
+        }
+      }
+      let res
+      try {
+        res = await doFetch(current.href, robotsInit(), hostCheck.addresses, timeout)
+      } catch (err) {
+        // 网络失败 / 超时沿用 shared 契约：放行，但显式标注 unavailable
+        return {
+          status: 'unavailable', groups: [], allowAll: true, redirects: chain,
+          note: `robots.txt 抓取失败：${String(err?.message ?? err)}`,
+        }
+      }
+      if (res.status === 404 || res.status === 410) {
+        return { status: 'missing', groups: [], allowAll: true, redirects: chain }
+      }
+      if (res.status === 401 || res.status === 403) {
+        return {
+          status: 'forbidden', groups: [], allowAll: false, redirects: chain,
+          note: `robots.txt HTTP ${res.status}，视为禁止`,
+        }
+      }
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers?.get?.('location')
+        if (!location) {
+          return {
+            status: 'redirect-blocked', groups: [], allowAll: false, redirects: chain,
+            note: `robots.txt HTTP ${res.status} 重定向缺少 Location，拒绝放行`,
+          }
+        }
+        if (hop === L.maxRedirects) {
+          return {
+            status: 'redirect-blocked', groups: [], allowAll: false, redirects: chain,
+            note: `robots.txt 重定向超过 ${L.maxRedirects} 次上限，拒绝放行`,
+          }
+        }
+        let next
+        try { next = new URL(location, current) } catch {
+          return {
+            status: 'redirect-blocked', groups: [], allowAll: false, redirects: chain,
+            note: 'robots.txt 重定向目标无法解析，拒绝放行',
+          }
+        }
+        const parsed = parseTargetUrl(next.href)
+        if (!parsed.ok) {
+          counters.ssrfBlocked++
+          return {
+            status: 'ssrf-blocked', groups: [], allowAll: false, redirects: chain,
+            note: `robots.txt 重定向目标被 SSRF 策略拒绝：${parsed.reason}`,
+          }
+        }
+        chain.push(current.href)
+        current = parsed.url
+        continue
+      }
+      if (!res.ok) {
+        return {
+          status: 'unavailable', groups: [], allowAll: true, redirects: chain,
+          note: `robots.txt HTTP ${res.status}，无法判定，按放行处理并标注`,
+        }
+      }
       const { buffer } = await readLimited(res, L.robotsMaxBytes)
-      return { status: 'ok', groups: parseRobots(buffer.toString('utf8')), allowAll: false }
-    } catch (err) {
-      return { status: 'unavailable', groups: [], allowAll: true, note: `robots.txt 抓取失败：${String(err?.message ?? err)}` }
+      return { status: 'ok', groups: parseRobots(buffer.toString('utf8')), allowAll: false, redirects: chain }
+    }
+    return {
+      status: 'redirect-blocked', groups: [], allowAll: false, redirects: chain,
+      note: 'robots.txt 重定向链异常，拒绝放行',
     }
   }
 
   async function robotsFor(url) {
     const origin = url.origin
+    pruneCaches(now())
     const cached = robotsCache.get(origin)
     if (cached && now() < cached.expiresAt) return cached.value
     const value = await loadRobots(url)
@@ -466,15 +583,14 @@ export function createFetcher(opts = {}) {
         if (!parsed.ok) return { ...parsed, redirects: chain }
         const hostCheck = await assertPublicHost(parsed.url, { resolveHost })
         if (!hostCheck.ok) return { ...hostCheck, redirects: chain }
-        // 重定向目标同样是「用户未显式指定」的跳转：robots 必须重新裁决
+        // 重定向目标同样是「用户未显式指定」的跳转：robots 必须重新裁决（含 3xx / 401 / 403 阻断态）
         const nextRobots = await robotsFor(parsed.url)
-        if (!nextRobots.allowAll) {
-          const verdict = robotsAllows(nextRobots.groups, parsed.url.pathname + parsed.url.search)
-          if (!verdict.allowed) {
-            return fail('E4013', `robots.txt 禁止重定向目标 ${verdict.matched?.path ?? parsed.url.pathname}`, {
-              url: startUrl.href, redirects: chain,
-            })
-          }
+        const verdict = robotsVerdict(nextRobots, parsed.url.pathname + parsed.url.search)
+        if (verdict.blocked) {
+          return fail(verdict.code, `robots.txt 禁止重定向目标：${verdict.reason}`, {
+            url: startUrl.href, redirects: chain,
+            robots: { status: nextRobots.status, note: nextRobots.note },
+          })
         }
         chain.push(current.href)
         current = parsed.url
@@ -495,17 +611,14 @@ export function createFetcher(opts = {}) {
       return { ...hostCheck, url: target.href }
     }
     const robots = await robotsFor(target)
-    if (robots.status === 'ssrf-blocked') {
-      return fail('E4011', `robots.txt 主机校验未通过，拒绝抓取：${robots.note ?? ''}`, { url: target.href })
-    }
-    if (!robots.allowAll) {
-      const verdict = robotsAllows(robots.groups, target.pathname + target.search)
-      if (!verdict.allowed) {
-        counters.robotsBlocked++
-        return fail('E4013', `robots.txt 禁止抓取 ${verdict.matched?.path ?? target.pathname}`, {
-          url: target.href, robots: { status: robots.status, matched: verdict.matched, note: robots.note },
-        })
-      }
+    // P2 · 统一裁决：401/403/3xx 链异常/SSRF 命中都不得因 groups=[] 被误判为放行
+    const verdict = robotsVerdict(robots, target.pathname + target.search)
+    if (verdict.blocked) {
+      if (verdict.code === 'E4013') counters.robotsBlocked++
+      return fail(verdict.code, verdict.reason, {
+        url: target.href,
+        robots: { status: robots.status, matched: verdict.matched, note: robots.note },
+      })
     }
 
     const fetched = await followAndFetch(target)
@@ -557,13 +670,23 @@ export function createFetcher(opts = {}) {
   async function fetchMany(rawUrls, opts = {}) {
     const input = Array.isArray(rawUrls) ? rawUrls : []
     if (!input.length) return { ok: false, code: 'E4011', reason: 'urls 必须是非空数组', version: FETCH_VERSION, origin: FETCH_ORIGIN }
-    const limit = opts.maxUrlsPerRequest ?? L.maxUrlsPerRequest
+    // P2 · 调用方只能收紧单次上限，绝不能放宽：旧实现直接被 opts 覆盖，
+    // batch.fetchSources 传 targets.length 就把契约的 maxUrlsPerRequest 撑到了 maxUrlsPerBatch。
+    const requested = Number(opts.maxUrlsPerRequest)
+    const limit = Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.trunc(requested), L.maxUrlsPerRequest)
+      : L.maxUrlsPerRequest
     if (input.length > limit) {
-      return { ok: false, code: 'E4011', reason: `单次最多抓取 ${limit} 个 URL，请分批`, version: FETCH_VERSION, origin: FETCH_ORIGIN }
+      return {
+        ok: false, code: 'E4011',
+        reason: `单次最多抓取 ${limit} 个 URL（配置上限 ${L.maxUrlsPerRequest}，调用方只能收紧），请分批`,
+        version: FETCH_VERSION, origin: FETCH_ORIGIN,
+      }
     }
+    pruneCaches(now())
     const seen = new Set()
     const results = []
-    const lastByHost = new Map()
+    // lastByHost 为实例级：跨请求连续抓同一域名也能维持每域最小间隔
     for (const raw of input) {
       const key = typeof raw === 'string' ? raw.trim() : String(raw ?? '')
       if (!key) { results.push(fail('E4011', 'URL 为空', { url: '' })); continue }

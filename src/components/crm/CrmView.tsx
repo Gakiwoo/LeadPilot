@@ -4,7 +4,7 @@ import type { Company, CompanyStatus } from '@/types'
 import { STATUS_DEFS } from '@/domain/constants'
 import { toCsv, downloadCsv } from '@/domain/compliance'
 import { useAppStore } from '@/store/useAppStore'
-import { Badge, Button, Card, EmptyState, GradeBadge, SectionTitle, StatTile, StatusBadge } from '@/components/ui'
+import { Badge, Button, Card, DemoBanner, EmptyState, GradeBadge, SectionTitle, StatTile, StatusBadge } from '@/components/ui'
 
 const BOARD_COLUMNS: CompanyStatus[] = ['new', 'drafted', 'sent', 'replied', 'interested', 'won']
 
@@ -59,6 +59,7 @@ export default function CrmView() {
 
   return (
     <div className="space-y-3">
+      <DemoBanner text="CRM 主表的客户、状态与跟进记录均为本地演示数据，不会同步到任何远端；状态与备注可直接编辑并保存在本机，不涉及真实邮件系统。" />
       <div className="grid grid-cols-5 gap-3">
         <StatTile label="客户总数" value={stats.total} sub="自动归集：产生过行为即入主表" />
         <StatTile label="已发送" value={stats.sent} sub="发送不额外计费" />
@@ -72,7 +73,7 @@ export default function CrmView() {
           <button onClick={() => setView('table')} className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium ${view === 'table' ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50'}`}><LayoutList size={13} /> 表格视图</button>
           <button onClick={() => setView('board')} className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium ${view === 'board' ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50'}`}><KanbanSquare size={13} /> 看板视图</button>
           <span className="ml-auto flex items-center gap-1.5">
-            <Button size="sm" onClick={() => showToast('已保存为「我的视图」（演示：视图配置持久化在桌面版）')}><Save size={12} /> 保存视图</Button>
+            <Button size="sm" onClick={() => showToast('演示：视图配置未持久化，刷新后恢复默认视图', 'warn')}><Save size={12} /> 保存视图</Button>
             <Button size="sm" onClick={exportAll}><Download size={12} /> 导出 CSV</Button>
           </span>
         </div>
@@ -81,7 +82,7 @@ export default function CrmView() {
       {view === 'table' ? (
         <Card className="overflow-hidden">
           <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
-            <SectionTitle title="CRM 主表" desc="状态、备注、自定义字段支持行内编辑，不弹窗" />
+            <SectionTitle title="CRM 主表" desc="备注支持行内编辑；状态请在看板视图拖拽流转；下次跟进与归属任务为只读" />
             <Badge tone="brand">{crmCompanies.length} 行</Badge>
           </div>
           {crmCompanies.length === 0 ? (
@@ -89,20 +90,20 @@ export default function CrmView() {
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1000px] text-[12px]">
-                <thead className="bg-canvas text-[10px] uppercase tracking-wide text-muted">
+                <thead className="bg-canvas text-[11px] uppercase tracking-wide text-muted">
                   <tr>{['公司名', '国家', '综合分', '联系方式', '状态', '最后联系', '下次跟进', '归属任务', '备注（行内可编辑）'].map((h) => <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>)}</tr>
                 </thead>
                 <tbody>
                   {crmCompanies.map((c: Company) => (
                     <tr key={c.id} className="border-t border-line hover:bg-slate-50/60">
-                      <td className="px-3 py-2 font-medium text-ink">{c.name}<div className="text-[10px] font-normal text-muted">{c.domain}</div></td>
+                      <td className="px-3 py-2 font-medium text-ink">{c.name}<div className="text-[11px] font-normal text-muted">{c.domain}</div></td>
                       <td className="px-3 py-2">{c.flag} {c.country}</td>
                       <td className="px-3 py-2 font-semibold tabular-nums">{c.scoreCard.totalDisplay}</td>
                       <td className="px-3 py-2"><GradeBadge grade={c.contacts[0]?.grade ?? 'D'} /></td>
                       <td className="px-3 py-2"><StatusBadge status={c.status} /></td>
                       <td className="px-3 py-2 text-[11px] text-muted">{c.lastContactAt ? c.lastContactAt.slice(0, 10) : '—'}</td>
                       <td className="px-3 py-2 text-[11px] text-amber-700">{c.nextFollowAt ?? '—'}</td>
-                      <td className="px-3 py-2 font-mono text-[10px] text-muted">{c.sourceTaskId}</td>
+                      <td className="px-3 py-2 font-mono text-[11px] text-muted">{c.sourceTaskId}</td>
                       <td className="px-3 py-2"><input value={c.note} onChange={(e) => updateCompany(c.id, { note: e.target.value })} placeholder="点击输入备注" className="w-full rounded border border-transparent bg-transparent px-1.5 py-1 text-[11px] outline-none hover:border-line focus:border-brand-500 focus:bg-white" /></td>
                     </tr>
                   ))}
@@ -129,8 +130,8 @@ export default function CrmView() {
                     <div key={c.id} draggable onDragStart={(e) => e.dataTransfer.setData('text/plain', c.id)}
                       className="cursor-grab rounded-lg border border-line bg-white px-2.5 py-2 shadow-sm active:cursor-grabbing">
                       <p className="truncate text-[11px] font-medium text-ink">{c.name}</p>
-                      <p className="mt-0.5 text-[10px] text-muted">{c.flag} {c.country} · {c.contacts[0]?.grade} 级</p>
-                      <div className="mt-1.5 flex items-center justify-between"><span className="text-[12px] font-semibold tabular-nums text-brand-600">{c.scoreCard.totalDisplay}</span><span className="text-[10px] text-muted">{def.zh}</span></div>
+                      <p className="mt-0.5 text-[11px] text-muted">{c.flag} {c.country} · {c.contacts[0]?.grade} 级</p>
+                      <div className="mt-1.5 flex items-center justify-between"><span className="text-[12px] font-semibold tabular-nums text-brand-600">{c.scoreCard.totalDisplay}</span><span className="text-[11px] text-muted">{def.zh}</span></div>
                     </div>
                   ))}
                 </div>
@@ -162,10 +163,13 @@ export default function CrmView() {
             <TrendingUp size={14} /> 演示洞察：有海关进口记录的客户回复率约为无记录客户的 2.1 倍
           </div>
           <div className="mt-3 space-y-1.5">
-            {companies.filter((c) => c.followups.length).slice(0, 5).map((c) => (
+            {companies.flatMap((c) => {
+              const first = c.followups[0]
+              return first ? [{ company: c, followup: first }] : []
+            }).slice(0, 5).map(({ company: c, followup }) => (
               <div key={c.id} className="flex items-center gap-2 rounded-lg border border-line px-2.5 py-1.5 text-[11px]">
                 <span className="font-medium text-ink">{c.name}</span>
-                <span className="ml-auto text-amber-700">{c.followups[0].dueDate} · {c.followups[0].content}</span>
+                <span className="ml-auto text-amber-700">{followup.dueDate} · {followup.content}</span>
               </div>
             ))}
             {companies.filter((c) => c.followups.length).length === 0 && <p className="text-[11px] text-muted">暂无跟进任务</p>}

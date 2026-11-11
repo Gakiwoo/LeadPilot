@@ -17,6 +17,13 @@
 
 **建议顺序**：先堵 3 个 P0 并补反例测试（约 1 天），再收口计费/缓存/合规链路的 P1（约 2–3 天），最后做文档与 UI/UX 收口（约 2 天）。详见第 8 节。
 
+> **修复进展（B1 → B3 已执行完毕）**：第 1 节的评分与问题清单是**评估当时**的快照，保留不改以留痕。
+> - B1（第 11 节）：3 个 P0 全修 + 行为级反例，活体转负例。
+> - B2（第 12 节）：17 项 P1 全修 + 18 个反例。
+> - B3（第 13 节）：29 项 P2 + 17 项 P3 全修 + 28 个反例，含「门禁假保证」根因、`noUncheckedIndexedAccess` 开启、a11y 基线。
+> - 验证基线：`199` 单测 / `60` 门禁 / `48` 冒烟 / AC-03 PASS，全部实跑。
+> - **未变**：`releaseEligible` 恒 `false`、`accuracyClaim` 恒 `false`、0/6 商业数据源——工程正确性提升不等于产品可发布。
+
 ---
 
 ## 2. 评分
@@ -224,3 +231,105 @@
 **修复后全量回归**：`npm test` **9 文件 / 171 用例全绿 / 0 skipped**；`npm run typecheck` exit 0；`npm run gate` **54/54**（`releaseBlocked=true` 不变）；`npm run build` exit 0（`349.71 kB / gzip 117.62 kB`）；`npm run smoke` **48/48**；`npm run verify:restart` **AC-03 全链路 PASS**；`npm run validate:baseline -- --self-test` **SELF-TEST PASSED**。README 两处测试数量已同步为 171 / 9 文件。
 
 **残余风险（属 B3）**：第 5 节的 29 项 P2、17 项 P3 均未动，包括 robots 3xx 逐跳重判、token `timingSafeEqual`、每域限速状态跨请求丢失、门禁 `autoTransitions` vs `allowedEvents` 的假保证、其余 9 条文档不一致、干净检出清单漏 21 个源码、a11y 基线、9 张未跟踪旧截图。另：`pinnedFetch` 只作用于默认出站实现，注入式 `fetchImpl`（测试用）仍按原契约工作，不参与生产路径。
+
+---
+
+## 13. B3 修复记录（2026-11-11）
+
+基线 `000a8c0`（local / origin/main / GitHub API 三处一致）。B3 分 6 个子批次，按「先修假保证，再修安全与持久化，最后修体验与类型」的顺序推进。
+
+### 13.1 B3-0 · 修掉「门禁很严、实现有洞」的假保证
+
+问题成因很具体：`check-release-gates.mjs` 断言读的是协议里的 `autoTransitions`，而 `importOutcomes()` 实际执行的是 `allowedEvents`。两者不同，把实现改坏后 CI 依然全绿。
+
+| 修复 | 说明 |
+|---|---|
+| 门禁改行为级断言 | 直接 `createBatchPipeline().importOutcomes()` 打真实事件：`drafted` 被拒、`unsubscribed` 未确认被拒、`sent` 放行。断言的是行为，不再抄常量 |
+| 导出链 G2 行为级断言 | 直接调 `exportDrafts()`，黑名单与退订终态都必须被服务端硬拦，绕不过去 |
+| 导出闸门补上下文 | `checkExportGates(items, ctx)` 接收 `blacklist` / `terminalDomains`；`exportDrafts()` 从 store 查终态域名并把黑名单一起传入 |
+| `statusAfterExport` 真实落盘 | 导出成功后客户库状态落为 `drafted`（`exported-not-sent`），不可逆终态不改写，绝不写成 `sent` |
+| 合规尾巴幂等 | `injectComplianceFooter()` 检测到已有 `--` + 退订语句时原样返回，堵住双尾巴 |
+| 两项合规假设核查 | ① 服务端导出链原先不校验黑名单 → 已修；② 前端 `AUTOMATIC_TRANSITIONS` 含 `drafted` 而服务端 `allowedEvents` 不含 → 二者语义不同（前者是「可自动到达的状态」，后者是「外部可回写的 outcome 事件」），已在协议里写清 `$note`，不是缺陷 |
+
+### 13.2 B3-1 · 安全 P2（6 项）
+
+| 修复 | 说明 |
+|---|---|
+| token 恒定时间比较 | 新增 `verifyToken()`：先各自 SHA-256 再 `timingSafeEqual`。直接比裸 Buffer 在长度不等时抛 `RangeError`（401 变 500），摘要后长度恒定、不泄漏前缀；超长 header 直接拒绝，避免 CPU DoS |
+| 限流表有界 | `createRateLimiter()`：过期项优先淘汰，仍超 4096 条按插入顺序淘汰最旧项；淘汰时保护正在计数的来源，避免淘汰把活跃计数清零绕过限流；淘汰次数可被反例断言 |
+| 回环下不再回显 `ACAO:*` | 启动前置校验只拦「非回环 + `*`」；本机无 token 时通配等于任意网页可读本机 API。现在把 `*` 从有效白名单剔除并 `corsWildcardRejected:true` 如实上报，不静默放行 |
+| robots 3xx 不再 fail-open | 3xx 逐跳重判：缺 Location / 目标非法 / 超 `maxRedirects` 一律 fail-closed（`E4013`），仅网络失败与 5xx 放行且标 `unavailable` |
+| 每域限速状态跨请求保留 | 限速状态原先是 `fetchMany()` 内的局部变量，第二次调用即清零。改为 `createFetcher()` 闭包级共享 |
+| `maxUrlsPerRequest` 不再被覆盖 | `batch.mjs` 原先把 `targets.length` 当上限传入，等于把配置项架空；改为按配置取值并在超限时明确报错 |
+
+### 13.3 B3-2 · 持久化与服务端状态机 P2
+
+| 修复 | 说明 |
+|---|---|
+| json / memory 账本事务 | `ledgerTransact()` 从 `fn()` 直通改为「内存快照 → 失败回滚 → 事务末单次落盘」，杜绝「账户已改、流水没写」的半写状态，也避免把半写状态刷盘 |
+| `hydrate()` 幂等 | 恢复日志只对本次真正恢复的任务追加，连续重启不再反复堆积；历史任务不再被算成本次恢复 |
+| `/health.recoveredTasks` 不再虚高 | 暴露本次实际恢复条数（`recoveredIds`），而非历史任务总数 |
+| 状态机单向收敛 | 协议新增 `allowedFrom`：`sent` 只能从 `new`/`drafted`，`bounced` 只能从 `sent`/`drafted`，`replied` 从 `sent`/`drafted`/`delivered`/`opened`，终态 `*` 另走不可逆硬拦。禁止 `replied→sent→bounced` 这类任意回退 |
+
+### 13.4 B3-3 · 工程与供应链 P2
+
+| 修复 | 说明 |
+|---|---|
+| 干净检出全量校验 | 新增 `scripts/check-clean-checkout.mjs`（`npm run check:tracked`），`src` / `server` / `shared` / `scripts` 与 `git ls-files` 全量对账，替代原来手写的 21 条漏项清单。当前 60 个源码/配置全部纳入版本控制 |
+| 启动前置安全自动化反例 | 新增 `server/tests/startup-security.test.mjs`：真实子进程验证「对外监听 + 无令牌」与「对外监听 + CORS 通配」两种配置直接拒绝启动，不再靠手工验证 |
+| CI action 固定 SHA | `actions/checkout` / `actions/setup-node` 从浮动 tag 改为固定 commit SHA，防上游 tag 被移动 |
+| 消除条件跳过 | 默认内存存储环境下的两个 SQLite 用例改为显式断言分支，不再 `it.skipIf` 静默跳过 |
+
+### 13.5 B3-4 · 文档统一与截图重生成
+
+| 修复 | 说明 |
+|---|---|
+| `/health.version` | 从 `package.json` 读，删除硬编码 `'0.9.0'` |
+| 侧栏版本号 | `v0.1.0 · M1/M2 客户端基线` → 读 `package.json`，与 `/health.version` 同源 |
+| smoke 端口 | 文档写 5199、实际 5181，统一为 5181 |
+| 阻断项口径 | 「四条阻断」改为实跑 5 条 `BLOCKED`，与 `PM-REVIEW` / gate 输出一致 |
+| ADR / 构建体积 / 提交链 | 测试数量、`353.78 kB / gzip 119.45 kB`、提交链均按实跑数据重写，不再写死过期数字 |
+| 旧截图清理 | 9 张未被引用、共 4.61 MB 的 `2880×1800` 旧图移入 `.workbuddy/backup/screenshots-legacy-2026-11-11/`（`.workbuddy` 已被 gitignore），仓库只保留 README 引用的 5 张 |
+| 截图重生成 | 5 张全部按当前 UI 重新捕获（1600×1000，DevTools CDP 实际操作导航），并抽检 README 相对链接无失效 |
+
+### 13.6 B3-5 · a11y、UI 文案与 P3 细节
+
+| 修复 | 说明 |
+|---|---|
+| 表单可访问性 | `Field` 生成 `id` 并 `htmlFor` 关联；`Drawer` / `Modal` 补 `role="dialog"` + `aria-modal` + `aria-labelledby`、Esc 关闭、Tab 焦点陷阱（关闭后焦点回原位） |
+| 键盘可达 | 客户列表 `<tr onClick>` 加 `tabIndex` / `role="row"` / Enter 打开，双击与键盘两条路径一致 |
+| 状态播报 | Toast 加 `role="status"` + `aria-live="polite"`，不再只有视觉反馈 |
+| 最小字号 | 全仓 `text-[10px]` → `text-[11px]`（10 个文件），密集小字不再低于可读下限 |
+| DEMO 提示条全覆盖 | `CompanyList` / `CrmView` / `ExecutionView` 补齐 `DemoBanner`，此前只有设置页、任务配置、发信中心 3 个子页有 |
+| 文案不再承诺未实现能力 | 删除/改写「拖拽列」「Gmail 失败自动重试 3 次」「模板库最多 3 步序列」「自动做双语与同义词扩展」；CRM 明确「状态与备注可编辑，下次跟进与归属任务只读」 |
+| CSV 公式注入 | `toCsv` 对以 `= + - @` 开头的单元格加前导 `'`，并保留 UTF-8 BOM 与引号转义 |
+| 下载时机 | `downloadCsv` 改为 DOM 挂载再点击、`setTimeout` 后再 `revokeObjectURL`，避免部分浏览器取消下载 |
+| 禁词匹配 | 子串匹配（`cost` 命中 `cost-effective`）改为词边界匹配，减少误伤 |
+| 发件人身份判定 | `hasSenderIdentity` 补词边界，避免 `Inc.` 命中任意含该串的单词 |
+| **`noUncheckedIndexedAccess` 开启** | 全仓 56 处索引访问隐患逐个显式判空后开启；`contacts[0]` / `tasks[0]` / `followups[0]` 不再被推断为非空。门禁新增静态断言锁死该选项，禁止后续静默关闭 |
+| 无收件人必须硬拦 | `SendGateInput.contact` 改为可选，`checkSendGates()` 在无收件人时走 G1 `E3004` 硬拦（此前调用方用非空断言硬塞，客户没有联系人时读 `undefined.value` 直接抛错）；同时修掉 `@` 黑名单规则在空 domain 下的误命中 |
+| SSE 连接释放 | `close()` 追加 `reader.cancel()` + `releaseLock()`；流结束时补发残留缓冲区里的最后一个事件；主动关闭不再误报「连接中断」 |
+| 持久化不再饿死 | 纯 debounce 在变更间隔 < 400ms 时永不落盘，改为「debounce + 最长等待 1.5s 强制落盘」，并在 `pagehide` / `visibilitychange` 补一次落盘 |
+| HTTP 响应形状校验 | `jsonFetch()` 不再 `res.json() as T` 直接断言：非法 JSON 与 `null` 响应在边界上就抛出明确错误，而不是一路传到渲染层才崩 |
+
+### 13.7 B3 验证（全部实跑）
+
+| 命令 | 结果 |
+|---|---|
+| `npm run typecheck` | exit 0（`strict` + `noUncheckedIndexedAccess`） |
+| `npm test` | **199 / 199 全绿，0 skipped**（10 文件：cloud 126 / fetch 25 / compliance 14 / scoring 10 / llm-judgement 6 / b2-frontend-guard 5 / state-machine 5 / draft-guard 3 / startup-security 2 / routing 3） |
+| `npm run gate` | **60 / 60 自检通过**，`releaseBlocked=true` 不变，5 条 `BLOCKED` |
+| `npm run check:tracked` | 60 个源码/配置全部纳入版本控制，83 个 tracked 文件无缺失 |
+| `npm run build` | exit 0，`353.78 kB / gzip 119.45 kB` |
+| `npm run smoke` | **48 / 48** |
+| `npm run verify:restart` | **AC-03 全链路 PASS** |
+| `npm run validate:baseline -- --self-test` | SELF-TEST PASSED |
+| `npm audit --omit=dev` | **0 vulnerabilities** |
+| `npm audit`（含 dev） | 6 条（3 moderate / 1 high / 2 critical），全部落在 `vitest → tinypool` 开发链；修复需 `vitest@5` 跨大版本，按 ADR-018 不在本轮处理，且不进入生产依赖 |
+
+### 13.8 B3 之后仍存在的已知边界
+
+- **发布状态不变**：`releaseEligible` 恒 `false`、`accuracyClaim` 恒 `false`、0/6 商业数据源。B3 修的是实现正确性与体验，不缩短任何一条外部关键路径。
+- **依赖漏洞**：开发链 6 条需跨 major 升级 Vitest，属独立决策项。
+- **注入式 `fetchImpl`**：仅测试路径，不参与生产出站。
+- **a11y 已修到基线**（表单关联、dialog 语义、键盘可达、状态播报），未做完整 WCAG 2.1 AA 审计与屏幕阅读器实测。

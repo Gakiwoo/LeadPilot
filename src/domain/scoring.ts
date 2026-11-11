@@ -59,7 +59,8 @@ export function computeRuleScores(f: RuleFeatures): Record<DimensionKey, RuleDim
   // ── 6.1 匹配度：关键词 35% / 类目 25% / 语义 20% / 市场 20%
   const hitWeight = f.keywordHits.reduce((s, h) => s + h.count * h.positionWeight, 0)
   const keyword = clamp((hitWeight / 10) * 100)
-  const category = [100, 80, 55, 40][f.categoryDistance]
+  // 类目距离越界（脏数据 / 未来新增层级）时按 0 分兜底，不让 undefined 污染加权求和
+  const category = [100, 80, 55, 40][f.categoryDistance] ?? 0
   const semantic = clamp(f.semanticSimilarity * 100)
   const market = clamp(f.marketMatch * 100)
   const match = round(0.35 * keyword + 0.25 * category + 0.2 * semantic + 0.2 * market)

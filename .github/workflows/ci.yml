@@ -19,9 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      # 供应链：action 固定到不可变 commit SHA，避免浮动 tag 被劫持后静默换实现。
+      # actions/checkout v5.1.0 / actions/setup-node v5.0.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           # 与本地开发、node:sqlite 持久化基线保持一致；显式 22 避免 Node 20 弃用提示
           node-version: '22'
@@ -31,24 +33,9 @@ jobs:
         run: npm ci
 
       # 干净检出保护：.gitignore 曾因 `data/` 误排除 src/data/，本地全绿但 CI 缺模块。
+      # B3-3：不再维护 31 项硬编码清单，改为全量枚举 src/server/shared/scripts 与 git ls-files 对账。
       - name: Tracked sources sanity (clean checkout)
-        run: |
-          for f in \
-            src/data/demo-data.ts src/data/repository.ts \
-            src/domain/scoring.ts src/services/adapters.ts src/services/gateway-client.ts \
-            src/store/useAppStore.ts src/types/index.ts \
-            src/components/developer/ExecutionView.tsx src/components/settings/SettingsView.tsx \
-            src/components/outreach/OutreachView.tsx src/components/outreach/BatchPipelinePanel.tsx \
-            shared/model-protocol.json shared/baseline-contract.json \
-            server/index.mjs server/store.mjs server/t0.mjs server/data-sources.mjs \
-            server/ledger.mjs server/baseline.mjs server/eval.mjs server/protocol.mjs \
-            server/gateway.mjs server/orchestrator.mjs server/batch.mjs server/fetch.mjs \
-            scripts/e2e-smoke.mjs scripts/verify-restart.mjs scripts/verify-restart.sh \
-            scripts/check-release-gates.mjs scripts/validate-baseline.mjs \
-            scripts/fixtures/invalid-baseline-sample.json; do
-            git ls-files --error-unmatch "$f" > /dev/null || { echo "::error::关键源码未被 git 跟踪: $f"; exit 1; }
-          done
-          echo "关键源码均已纳入版本控制"
+        run: npm run check:tracked
 
       - name: Typecheck (TS strict)
         run: npm run typecheck

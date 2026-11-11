@@ -14,6 +14,8 @@ export default function DeveloperView() {
   const activeTaskId = useAppStore((s) => s.activeTaskId)
   const activeTask = tasks.find((t) => t.id === activeTaskId) ?? tasks.find((t) => t.status === 'running' || t.status === 'paused')
   const lastTask = tasks[0]
+  // 显式收窄：`activeTask || lastTask` 的判断无法让 TS 推断 `a ?? b` 非空
+  const shownTask = activeTask ?? lastTask ?? null
 
   useEffect(() => {
     if (activeTask) setTab('execution')
@@ -38,7 +40,7 @@ export default function DeveloperView() {
       </div>
 
       {tab === 'config' && <TaskConfigPanel />}
-      {tab === 'execution' && (activeTask || lastTask ? <ExecutionView task={activeTask ?? lastTask} /> : null)}
+      {tab === 'execution' && (shownTask ? <ExecutionView task={shownTask} /> : null)}
       {tab === 'list' && <CompanyList />}
     </div>
   )

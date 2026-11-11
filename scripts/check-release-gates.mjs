@@ -56,6 +56,17 @@ function walkTs(dir, out = []) {
   return out
 }
 
+// 0. 类型严格性：noUncheckedIndexedAccess 必须保持开启
+//    这条断言存在的原因很具体：`contacts[0]` / `tasks[0]` 这类索引访问在关闭该选项时
+//    会被静默推断为非空，曾经导致「客户没有联系人」时直接读 undefined.value 抛错的隐患。
+{
+  const tsconfig = JSON.parse(readFileSync(join(ROOT, 'tsconfig.json'), 'utf8'))
+  const co = tsconfig.compilerOptions ?? {}
+  check('类型严格性：strict + noUncheckedIndexedAccess 保持开启（索引访问必须显式判空）',
+    co.strict === true && co.noUncheckedIndexedAccess === true,
+    `strict=${co.strict} noUncheckedIndexedAccess=${co.noUncheckedIndexedAccess}`)
+}
+
 // 1. 前端服务层边界：业务代码只能从 adapters.ts 取能力
 {
   const files = [
@@ -520,6 +531,81 @@ function walkTs(dir, out = []) {
     autoList.length === 4 && autoList.every((s) => Object.values(serverMap).includes(s))
     && Object.entries(serverMap).every(([k, v]) => autoEvent[k] === v),
     `front=[${autoList.join(',')}] server=[${Object.values(serverMap).join(',')}]`)
+
+  // B3-0：上面是静态同源检查；服务端真正执行的是 allowedEvents，只读常量会给假保证。
+  // 下面直接调用实现：非法事件被拒、终态未确认被拒、合法事件被接受，改坏实现 CI 必须红。
+  const behaviorStore = createMemoryStore()
+  const behaviorPipeline = createBatchPipeline({ store: behaviorStore, gateway: null })
+  behaviorPipeline.importCompanies({ rows: [{ company_name: 'Gate', domain: 'gate.example' }] })
+  const illegalEvent = behaviorPipeline.importOutcomes({ events: [{ domain: 'gate.example', event: 'drafted' }] })
+  const noConfirm = behaviorPipeline.importOutcomes({ events: [{ domain: 'gate.example', event: 'unsubscribed' }] })
+  const legalEvent = behaviorPipeline.importOutcomes({ events: [{ domain: 'gate.example', event: 'sent' }] })
+  check('服务端 outcomes 按 allowedEvents 真实执行（行为级，不抄常量）',
+    !bp.outcomes.allowedEvents.includes('drafted')
+    && illegalEvent.rejected.length === 1 && /不在白名单/.test(illegalEvent.rejected[0].reasons.join())
+    && noConfirm.rejected.length === 1 && /逐条人工确认/.test(noConfirm.rejected[0].reasons.join())
+    && legalEvent.applied.length === 1 && legalEvent.applied[0].to === 'sent',
+    `illegal=${illegalEvent.rejected.length} noConfirm=${noConfirm.rejected.length} legal=${legalEvent.applied.length}`)
+
+  // B3-0（假设 #4）：G2 黑名单 / 退订必须在服务端导出链也生效，不能只靠前端自觉
+  const g2Store = createMemoryStore()
+  const g2Pipeline = createBatchPipeline({ store: g2Store, gateway: null })
+  g2Pipeline.importCompanies({ rows: [{ company_name: 'G2', domain: 'g2.example' }] })
+  const g2Draft = draft({ domain: 'g2.example', to: 'buyer@g2.example' })
+  const listBlocked = g2Pipeline.exportDrafts({ items: [g2Draft], blacklist: ['buyer@g2.example'] })
+  g2Pipeline.importOutcomes({ events: [{ domain: 'g2.example', event: 'unsubscribed', confirmed: true }] })
+  const terminalBlocked = g2Pipeline.exportDrafts({ items: [g2Draft] })
+  check('导出链 G2：黑名单与退订终态在服务端硬拦，直接调 API 也绕不过去',
+    listBlocked.ok === false && /G2/.test(JSON.stringify(listBlocked.blocked ?? []))
+    && terminalBlocked.ok === false && /G2|终态/.test(JSON.stringify(terminalBlocked.blocked ?? [])),
+    `list=${listBlocked.blocked?.length ?? 0} terminal=${terminalBlocked.blocked?.length ?? 0}`)
+
+  // B3-2（P2）：状态机不能任意回退，约束必须真实执行（不是只读协议常量）
+  const monoStore = createMemoryStore()
+  const mono = createBatchPipeline({ store: monoStore, gateway: null })
+  mono.importCompanies({ rows: [{ company_name: 'Mono', domain: 'mono.example' }] })
+  const earlyBounce = mono.importOutcomes({ events: [{ domain: 'mono.example', event: 'bounced' }] })
+  mono.importOutcomes({ events: [{ domain: 'mono.example', event: 'sent' }] })
+  const monoReplied = mono.importOutcomes({ events: [{ domain: 'mono.example', event: 'replied' }] })
+  const rollback = mono.importOutcomes({ events: [{ domain: 'mono.example', event: 'sent' }] })
+  check('结果回写单向流转（行为级）：new→bounced 与 replied→sent 被拒，合法链可回写',
+    bp.outcomes.allowedEvents.every((e) => Array.isArray(bp.outcomes.allowedFrom?.[e]))
+    && earlyBounce.rejected.length === 1 && /状态不可回退/.test(earlyBounce.rejected[0].reasons.join())
+    && monoReplied.applied.length === 1
+    && rollback.rejected.length === 1 && /状态不可回退/.test(rollback.rejected[0].reasons.join())
+    && monoStore.companyGet('mono.example').status === 'replied',
+    `early=${earlyBounce.rejected.length} replied=${monoReplied.applied.length} rollback=${rollback.rejected.length}`)
+
+  // B3-2（P2）：恢复日志幂等 + recoveredActiveIds 语义（行为级）
+  const restartStore = createMemoryStore()
+  const r1 = createOrchestrator({ store: restartStore, tickMs: 10000 })
+  r1.createTask({ keywords: ['fittings'], markets: ['德国'], depth: 1, targetCount: 10 })
+  r1.dispose()
+  const r2 = createOrchestrator({ store: restartStore, tickMs: 10000 })
+  const log2 = r2.getTask(r2.recoveredIds[0]).progress.log.length
+  r2.dispose()
+  const r3 = createOrchestrator({ store: restartStore, tickMs: 10000 })
+  const log3 = r3.getTask(r3.recoveredIds[0]).progress.log.length
+  r3.dispose()
+  check('重启恢复幂等（行为级）：连续 hydrate 不重复追加日志，只有首次算本次恢复',
+    r2.recoveredActiveIds.length === 1 && r3.recoveredActiveIds.length === 0
+    && r3.recoveredIds.length === 1 && log3 === log2,
+    `active2=${r2.recoveredActiveIds.length} active3=${r3.recoveredActiveIds.length} log=${log2}/${log3}`)
+
+  // B3-2（P2）：memory / json 账本事务失败回滚（行为级）
+  const txStore = createMemoryStore()
+  const txLedger = createLedger({ store: txStore, openingBalance: 200 })
+  txLedger.state()
+  const txBefore = txLedger.peek()
+  const txAppend = txStore.ledgerAppend.bind(txStore)
+  txStore.ledgerAppend = () => { throw new Error('gate 事务故障注入') }
+  let txThrew = false
+  try { txLedger.reserve({ refId: 'gate-tx', amount: 30 }) } catch { txThrew = true }
+  txStore.ledgerAppend = txAppend
+  check('账本事务回滚（行为级）：写入中途失败不留半写状态',
+    txThrew && txLedger.peek().held === txBefore.held
+    && txLedger.entries('gate-tx').length === 0,
+    `threw=${txThrew} held=${txLedger.peek().held}/${txBefore.held}`)
 
   const pm = readFileSync(join(ROOT, 'docs/PM-REVIEW.md'), 'utf8')
   check('v0.8.0 决策固化：标注集与商业数据源不做；OAuth / EV 仍是发布前置',

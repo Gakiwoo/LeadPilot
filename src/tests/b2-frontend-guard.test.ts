@@ -27,12 +27,18 @@ const draftFor = (companyId: string, contactId = ''): Outreach => ({
   demo: true,
 })
 
-const freshCompany = (): Company => ({
-  ...buildDemoCompanies(1)[0],
-  id: 'c_b2',
-  status: 'new',
-  lastContactAt: '2026-11-01T00:00:00.000Z',
-})
+const freshCompany = (): Company => {
+  const seed = buildDemoCompanies(1)[0]
+  if (!seed) throw new Error('演示数据集为空，测试前置条件不成立')
+  return { ...seed, id: 'c_b2', status: 'new', lastContactAt: '2026-11-01T00:00:00.000Z' }
+}
+
+/** 测试里凡取 contacts[0] 都走这里：noUncheckedIndexedAccess 下索引访问是 `T | undefined` */
+const firstContact = (c: Company) => {
+  const contact = c.contacts[0]
+  if (!contact) throw new Error('演示客户必须至少有一个联系人')
+  return contact
+}
 
 const health = (over: Partial<GatewayHealth> = {}): GatewayHealth => ({
   online: true, mode: 'unconfigured-demo', configuredCount: 0, pinnedCount: 0,
@@ -63,16 +69,16 @@ describe('B2 · 前端合规与降级 P1 行为级反例', () => {
 
   it('P1-11 · 黑名单/退订客户的草稿被 G2 硬拦：不入队、不改状态', () => {
     const c = freshCompany()
-    const email = c.contacts[0].value
+    const email = firstContact(c).value
     useAppStore.setState({
       companies: [c],
       settings: { ...baseSettings, blacklist: [email] },
     })
-    const r = useAppStore.getState().addOutreach(draftFor(c.id, c.contacts[0].id))
+    const r = useAppStore.getState().addOutreach(draftFor(c.id, firstContact(c).id))
     expect(r.ok).toBe(false)
     expect(r.message).toContain('G2')
     expect(useAppStore.getState().outreach).toHaveLength(0)
-    expect(useAppStore.getState().companies[0].status).toBe('new')
+    expect(useAppStore.getState().companies[0]?.status).toBe('new')
   })
 
   it('P1-12 · 撤销退订同步回滚黑名单，且 lastContactAt 按快照恢复', () => {
@@ -80,14 +86,16 @@ describe('B2 · 前端合规与降级 P1 行为级反例', () => {
     useAppStore.setState({ companies: [c] })
     const r = useAppStore.getState().setCompanyStatus(c.id, 'unsubscribed', { confirmed: true })
     expect(r.ok).toBe(true)
-    expect(useAppStore.getState().settings.blacklist).toContain(c.contacts[0].value)
+    expect(useAppStore.getState().settings.blacklist).toContain(firstContact(c).value)
 
     useAppStore.getState().undo()
     const after = useAppStore.getState()
-    expect(after.companies[0].status).toBe('new')
-    expect(after.settings.blacklist).not.toContain(c.contacts[0].value)
-    expect(after.companies[0].lastContactAt).toBe(c.lastContactAt)
-    expect(after.companies[0].statusLog).toEqual(c.statusLog)
+    const restored = after.companies[0]
+    expect(restored).toBeDefined()
+    expect(restored?.status).toBe('new')
+    expect(after.settings.blacklist).not.toContain(firstContact(c).value)
+    expect(restored?.lastContactAt).toBe(c.lastContactAt)
+    expect(restored?.statusLog).toEqual(c.statusLog)
   })
 
   it('P1-14 · offline / E6005 / E6008 / ready 四态诊断不混淆', () => {
@@ -99,10 +107,10 @@ describe('B2 · 前端合规与降级 P1 行为级反例', () => {
   })
 
   it('P1-15 · C 级必须按单条 singleConfirmed 放行，总勾选不能代表逐条确认', () => {
-    const c = buildDemoCompanies(8).find((x) => x.contacts[0].grade === 'C')
+    const c = buildDemoCompanies(8).find((x) => x.contacts[0]?.grade === 'C')
     expect(c).toBeTruthy()
     const input = {
-      contact: c!.contacts[0], blacklist: [], sentToday: 0, dailyLimit: 100,
+      contact: c ? firstContact(c) : null, blacklist: [], sentToday: 0, dailyLimit: 100,
       bounceRate: 0, consecutiveHardBounces: 0,
     }
     const unconfirmed = checkSendGates({ ...input, singleConfirmed: false })

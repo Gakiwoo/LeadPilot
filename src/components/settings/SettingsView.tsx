@@ -95,7 +95,7 @@ export default function SettingsView() {
                   {(['T0', 'T1', 'T2'] as const).map((tier) => (
                     <div key={tier} className="rounded-lg border border-line p-3">
                       <div className="flex items-center justify-between"><span className="text-[13px] font-semibold text-ink">{tier}</span><Badge tone={tier === 'T0' ? 'emerald' : tier === 'T1' ? 'blue' : 'violet'}>{{ T0: '~85%', T1: '~13%', T2: '~2%' }[tier]}</Badge></div>
-                      <p className="mt-1 text-[10px] leading-4 text-muted">{{ T0: '抽取 / 分类 / 关键词扩展 · 成本极敏感', T1: '五维判断 / 开发信生成 · 质量优先', T2: '冲突仲裁 / 低置信复议 · 量小质优' }[tier]}</p>
+                      <p className="mt-1 text-[11px] leading-4 text-muted">{{ T0: '抽取 / 分类 / 关键词扩展 · 成本极敏感', T1: '五维判断 / 开发信生成 · 质量优先', T2: '冲突仲裁 / 低置信复议 · 量小质优' }[tier]}</p>
                       <select className="lp-input mt-2 h-8 text-[11px]" value={settings.llm[tier.toLowerCase() as 't0' | 't1' | 't2']} onChange={(e) => setLlm({ [tier.toLowerCase()]: e.target.value } as Partial<Settings['llm']>)}>
                         {PROVIDERS.filter((p) => p.tier === tier).map((p) => <option key={p.key} value={p.name}>{p.name}</option>)}
                       </select>
@@ -146,7 +146,7 @@ export default function SettingsView() {
                     { label: '熔断中', value: diag ? `${diag.circuit.length} 家` : '—' },
                   ].map((x) => (
                     <div key={x.label} className="rounded-lg border border-line bg-canvas p-3">
-                      <p className="text-[10px] text-muted">{x.label}</p>
+                      <p className="text-[11px] text-muted">{x.label}</p>
                       <p className="mt-1 text-[14px] font-semibold tabular-nums text-ink">{x.value}</p>
                     </div>
                   ))}
@@ -173,7 +173,7 @@ export default function SettingsView() {
                   </p>
                 )}
                 {gateway?.security && (
-                  <p className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2 text-[10px] text-muted">
+                  <p className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2 text-[11px] text-muted">
                     <ShieldCheck size={12} className="text-emerald-600" />
                     网关安全：
                     <Badge tone={gateway.security.mode === 'token' ? 'emerald' : 'slate'}>{gateway.security.mode === 'token' ? 'Bearer 令牌鉴权' : '仅本机免鉴权'}</Badge>
@@ -182,7 +182,7 @@ export default function SettingsView() {
                   </p>
                 )}
                 {gateway?.online && (
-                  <p className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2 text-[10px] text-muted">
+                  <p className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line pt-2 text-[11px] text-muted">
                     <Database size={12} className="text-slate-500" />
                     采集数据源：
                     <Badge tone={gateway.dataSources?.readyCount ? 'emerald' : 'slate'}>
@@ -212,12 +212,12 @@ export default function SettingsView() {
                     { label: '标注契约（legacy）', value: gateway?.baseline ? `${gateway.baseline.contractStatus ?? 'legacy'} · 不做 385` : '—' },
                   ].map((x) => (
                     <div key={x.label} className="rounded-lg border border-line bg-canvas p-3">
-                      <p className="text-[10px] text-muted">{x.label}</p>
+                      <p className="text-[11px] text-muted">{x.label}</p>
                       <p className="mt-1 text-[13px] font-semibold tabular-nums text-ink">{x.value}</p>
                     </div>
                   ))}
                 </div>
-                <div className="mt-3 space-y-1.5 text-[10px] leading-5 text-muted">
+                <div className="mt-3 space-y-1.5 text-[11px] leading-5 text-muted">
                   <p className="flex flex-wrap items-center gap-1.5">
                     <Coins size={12} className="text-amber-600" />
                     账本范围：
@@ -264,7 +264,7 @@ export default function SettingsView() {
                       <Badge tone={p.tier === 'T0' ? 'emerald' : p.tier === 'T1' ? 'blue' : 'violet'}>{p.tier}</Badge>
                       <span className="font-medium text-ink">{p.name}</span>
                       <span className="text-muted">{p.region === 'domestic' ? '境内组' : '境外组'}</span>
-                      {p.modelVersion && <code className="max-w-[180px] truncate text-[10px] text-slate-500" title={p.modelVersion}>{p.modelVersion}</code>}
+                      {p.modelVersion && <code className="max-w-[180px] truncate text-[11px] text-slate-500" title={p.modelVersion}>{p.modelVersion}</code>}
                       <span className="ml-auto flex items-center gap-1.5">
                         {p.configured && !p.pinned && <Badge tone="amber">快照未锁定</Badge>}
                         {p.pinned && <Badge tone="violet">快照已锁</Badge>}
@@ -280,7 +280,7 @@ export default function SettingsView() {
                 <SectionTitle title="调用审计" desc="只记录元数据（provider / 模型 / token / 点数 / 延迟 / 是否降级），绝不记录 prompt、官网原文或客户邮箱（11.4.4）" />
                 <div className="max-h-[220px] space-y-1 overflow-y-auto">
                   {(diag?.entries ?? []).slice(-14).reverse().map((e, i) => (
-                    <div key={`${e.at}-${i}`} className="flex flex-wrap items-center gap-2 rounded-lg bg-canvas px-2.5 py-1.5 font-mono text-[10px]">
+                    <div key={`${e.at}-${i}`} className="flex flex-wrap items-center gap-2 rounded-lg bg-canvas px-2.5 py-1.5 font-mono text-[11px]">
                       <span className="text-slate-400">{new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false })}</span>
                       <span className="text-ink">{e.taskType ?? 'unknown'}</span>
                       <span className="text-slate-500">{e.tier ?? '—'}</span>
@@ -390,7 +390,7 @@ export default function SettingsView() {
             <Card className="p-5">
               <SectionTitle title="M0 结束前必须拍板的 11 项" desc="PM 建议已给出，红色为会阻塞研发的关键路径" />
               <div className="space-y-1.5 text-[11px]">
-                {[
+                {([
                   ['Q1', '海关数据源预算', '建议 A：先采购美/印/越 3 国，用真实使用数据验证付费意愿后再扩'],
                   ['Q2', 'Google 验证路径', '建议 A：MVP 只做 sensitive（草稿），M0 同步启动 restricted 申请'],
                   ['Q3', '定价模型', '建议 B：订阅 + 点数，基础点数给足'],
@@ -402,7 +402,7 @@ export default function SettingsView() {
                   ['Q9', 'BYOK 定位', '建议 B：高级选项、成本兜底，不做主推模式'],
                   ['Q10', '数据出境默认策略', '建议 A + C：默认境内，企业版强制境内/本地'],
                   ['Q11', '按新成本重算定价', 'L4 单独设更高点数系数，¥199 含 7.5 个 L2 任务毛利 63% 可接受'],
-                ].map(([id, title, advice]) => (
+                ] as const).map(([id, title, advice]) => (
                   <div key={id} className="flex items-start gap-2 rounded-lg border border-line px-3 py-2">
                     <Badge tone={['Q1', 'Q2', 'Q8', 'Q10'].includes(id) ? 'rose' : 'slate'}>{id}</Badge>
                     <span className="w-28 shrink-0 font-medium text-ink">{title}</span>

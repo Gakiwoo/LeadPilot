@@ -2,7 +2,7 @@ import { AlertTriangle, CheckCircle2, CircleDashed, Clock, CloudCog, HardDrive, 
 import type { DevTask } from '@/types'
 import { TASK_STAGES } from '@/domain/constants'
 import { useAppStore } from '@/store/useAppStore'
-import { Button, Card, ProgressLine, SectionTitle, Badge } from '@/components/ui'
+import { Button, Card, DemoBanner, ProgressLine, SectionTitle, Badge } from '@/components/ui'
 
 export default function ExecutionView({ task }: { task: DevTask }) {
   const pauseTask = useAppStore((s) => s.pauseTask)
@@ -15,6 +15,7 @@ export default function ExecutionView({ task }: { task: DevTask }) {
 
   return (
     <div className="space-y-4">
+      <DemoBanner text="执行进度与阶段日志由本地模拟 runner 推进；云端模式会真实创建任务并走 SSE 推送，但采集数据源仍为演示适配器。" />
       <Card className="p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -49,7 +50,7 @@ export default function ExecutionView({ task }: { task: DevTask }) {
             return (
               <div key={s} className="flex flex-1 items-center gap-1">
                 <div className="flex-1">
-                  <div className={`flex items-center gap-1 text-[10px] ${state === 'active' ? 'font-medium text-brand-600' : state === 'done' ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  <div className={`flex items-center gap-1 text-[11px] ${state === 'active' ? 'font-medium text-brand-600' : state === 'done' ? 'text-emerald-600' : 'text-slate-400'}`}>
                     {state === 'done' ? <CheckCircle2 size={11} /> : state === 'active' ? <CircleDashed size={11} className="animate-spin" /> : <CircleDashed size={11} />}
                     <span className="truncate">{s}</span>
                   </div>
@@ -68,9 +69,9 @@ export default function ExecutionView({ task }: { task: DevTask }) {
             { label: '预计剩余', value: `${p.etaRange[0]}–${p.etaRange[1]} 分钟`, sub: '区间估算，不显示精确到秒的假数' },
           ].map((s) => (
             <div key={s.label} className="rounded-lg border border-line bg-canvas px-3 py-2.5">
-              <p className="text-[10px] text-muted">{s.label}</p>
+              <p className="text-[11px] text-muted">{s.label}</p>
               <p className="mt-1 text-[19px] font-semibold tabular-nums leading-6 text-ink">{s.value}</p>
-              <p className="mt-0.5 truncate text-[10px] text-slate-400">{s.sub}</p>
+              <p className="mt-0.5 truncate text-[11px] text-slate-400">{s.sub}</p>
             </div>
           ))}
         </div>
@@ -112,22 +113,22 @@ export default function ExecutionView({ task }: { task: DevTask }) {
               <div key={s.key ?? s.name} className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] ${s.status === 'warn' ? 'border-amber-200 bg-amber-50' : 'border-line'}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${s.status === 'warn' ? 'bg-amber-500' : s.status === 'fail' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
                 <span className="font-medium text-ink">{s.name}</span>
-                {s.mode === 'unconfigured' && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">未接入</span>}
-                {s.mode === 'not_implemented' && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">接口未实现</span>}
-                {s.mode === 'ready' && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">已就绪</span>}
+                {s.mode === 'unconfigured' && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">未接入</span>}
+                {s.mode === 'not_implemented' && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-500">接口未实现</span>}
+                {s.mode === 'ready' && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] text-emerald-700">已就绪</span>}
                 <span className="ml-auto tabular-nums text-muted">命中 {s.hits}</span>
                 {s.failures > 0 && <span className="tabular-nums text-amber-700">失败 {s.failures}</span>}
               </div>
             ))}
           </div>
-          <p className="mt-2 text-[10px] leading-4 text-amber-700">
+          <p className="mt-2 text-[11px] leading-4 text-amber-700">
             {p.sources.find((s) => s.status === 'warn')?.reason ?? '某数据源不可用时会在此标注原因，并给出完整性百分比'}
           </p>
         </Card>
 
         <Card className="p-4">
           <SectionTitle title="执行日志" desc={task.mode === 'cloud' ? '事件来自云端 SSE 单向推送，游标由编排器持久化，控制指令走独立 POST' : '断点续跑游标与阶段状态持久化在客户端（演示用 localStorage）'} extra={<span className="lp-chip"><Clock size={11} /> 最近 {p.log.length} 条</span>} />
-          <div className="h-[186px] space-y-1 overflow-y-auto rounded-lg bg-slate-900 p-2.5 font-mono text-[10px] leading-4">
+          <div className="h-[186px] space-y-1 overflow-y-auto rounded-lg bg-slate-900 p-2.5 font-mono text-[11px] leading-4">
             {[...p.log].reverse().map((l, i) => (
               <div key={i} className={l.level === 'warn' ? 'text-amber-300' : l.level === 'error' ? 'text-rose-300' : 'text-slate-300'}>
                 <span className="mr-2 text-slate-500">{l.at}</span>{l.text}

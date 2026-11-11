@@ -1,12 +1,12 @@
 import { useMemo, useState } from 'react'
-import { ArrowDownUp, Ban, ChevronDown, Download, FileText, Mail, ShieldAlert, SlidersHorizontal } from 'lucide-react'
+import { ArrowDownUp, Ban, Download, FileText, Mail, ShieldAlert, SlidersHorizontal } from 'lucide-react'
 import type { Company, CompanyStatus } from '@/types'
 import { CUSTOMER_TYPES, STATUS_DEFS } from '@/domain/constants'
 import { QUICK_FILTERS, filterAndSort } from '@/domain/filters'
 import { toCsv, downloadCsv } from '@/domain/compliance'
 import { generateEmails } from '@/services/adapters'
 import { useAppStore } from '@/store/useAppStore'
-import { Badge, Button, Card, EmptyState, GradeBadge, ScoreBar, SectionTitle } from '@/components/ui'
+import { Badge, Button, Card, DemoBanner, EmptyState, GradeBadge, ScoreBar, SectionTitle } from '@/components/ui'
 
 export default function CompanyList() {
   const companies = useAppStore((s) => s.companies)
@@ -50,6 +50,8 @@ export default function CompanyList() {
     let blocked = 0
     for (const c of targets) {
       const mail = generateEmails(c, settings.profile, { purpose: 'intro', tone: 'concise', length: 'short' })[0]
+      // 生成器理论上必返至少一封；取不到就跳过这家，绝不对 undefined 取属性
+      if (!mail) { blocked += 1; continue }
       const r = addOutreach({
         id: `out_${Date.now()}_${c.id}`, companyId: c.id, contactId: c.contacts[0]?.id ?? '',
         subject: mail.subject, bodyText: mail.body, bodyHtml: `<pre>${mail.body}</pre>`,
@@ -68,6 +70,7 @@ export default function CompanyList() {
 
   return (
     <div className="space-y-3">
+      <DemoBanner text="48 家公司为本地预置演示数据（demo: true），不是真实采集结果；评分卡为规则估算、未经模型校验（E6005 降级口径）。" />
       <Card className="p-3">
         <div className="flex flex-wrap items-center gap-1.5">
           {QUICK_FILTERS.map((q) => (
@@ -112,7 +115,7 @@ export default function CompanyList() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1080px] border-collapse text-[12px]">
-              <thead className="bg-canvas text-[10px] uppercase tracking-wide text-muted">
+              <thead className="bg-canvas text-[11px] uppercase tracking-wide text-muted">
                 <tr>
                   <th className="w-10 px-3 py-2"><input type="checkbox" checked={allSelected} onChange={() => allSelected ? clearSelection() : selectAll(visibleIds)} className="accent-brand-500" /></th>
                   <th className="px-2 py-2 text-left font-medium">公司名</th>
@@ -130,17 +133,24 @@ export default function CompanyList() {
                 {rows.map((c: Company) => (
                   <tr
                     key={c.id}
-                    className="group cursor-pointer border-t border-line hover:bg-brand-50/40"
+                    tabIndex={0}
+                    aria-label={`${c.name}·空格选中，Enter 打开详情`}
+                    className="group cursor-pointer border-t border-line hover:bg-brand-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300"
                     style={{ contentVisibility: 'auto', containIntrinsicSize: '48px' }}
                     onClick={(e) => { toggleSelect(c.id, e.shiftKey) }}
                     onDoubleClick={() => openCompany(c.id)}
+                    onKeyDown={(e) => {
+                      // B3-5 · 整行点击原本键盘不可达；空格选中、Enter 打开详情
+                      if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); toggleSelect(c.id, e.shiftKey) }
+                      else if (e.key === 'Enter') { e.preventDefault(); openCompany(c.id) }
+                    }}
                   >
                     <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                       <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleSelect(c.id)} className="accent-brand-500" />
                     </td>
                     <td className="px-2 py-2">
                       <button onClick={(e) => { e.stopPropagation(); openCompany(c.id) }} className="block max-w-[250px] truncate text-left font-medium text-ink hover:text-brand-600">{c.name}</button>
-                      <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted"><span>{c.flag} {c.country}</span><span className="text-slate-300">·</span><span className="truncate">{c.domain}</span></div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted"><span>{c.flag} {c.country}</span><span className="text-slate-300">·</span><span className="truncate">{c.domain}</span></div>
                     </td>
                     <td className="px-2 py-2">
                       <div className="flex items-center gap-1.5">
@@ -154,13 +164,13 @@ export default function CompanyList() {
                     <td className="px-2 py-2"><Badge tone="slate">{c.scoreCard.dimensions.size.displayValue}</Badge></td>
                     <td className="px-2 py-2">
                       <span className="tabular-nums">{c.scoreCard.dimensions.import.displayValue}</span>
-                      <span className="ml-1 text-[10px] text-muted">{c.features.customsRecords !== null ? '已证实' : '推断'}</span>
+                      <span className="ml-1 text-[11px] text-muted">{c.features.customsRecords !== null ? '已证实' : '推断'}</span>
                     </td>
                     <td className="px-2 py-2" onClick={(e) => e.stopPropagation()}><GradeBadge grade={c.contacts[0]?.grade ?? 'D'} /></td>
                     <td className="px-2 py-2">
                       <div className="flex flex-wrap gap-1">
                         {c.customerTypes.slice(0, 2).map((t) => <Badge key={t} tone="brand">{CUSTOMER_TYPES.find((x) => x.key === t)?.zh}</Badge>)}
-                        {c.customerTypes.length > 2 && <span className="text-[10px] text-muted">+{c.customerTypes.length - 2}</span>}
+                        {c.customerTypes.length > 2 && <span className="text-[11px] text-muted">+{c.customerTypes.length - 2}</span>}
                       </div>
                     </td>
                     <td className="px-2 py-2" onClick={(e) => e.stopPropagation()}>
@@ -211,9 +221,9 @@ export default function CompanyList() {
         </div>
       )}
 
-      <p className="flex items-center gap-1.5 px-1 text-[10px] text-muted">
+      <p className="flex items-center gap-1.5 px-1 text-[11px] text-muted">
         <ShieldAlert size={12} className="text-rose-500" />
-        产品不提供「批量直接发送」（PRD F3-3 唯一被禁止的批量操作）；可按 <ChevronDown size={10} /> 展开筛选、拖拽列、行内改状态，列配置在桌面版持久化。
+        产品不提供「批量直接发送」（PRD F3-3 唯一被禁止的批量操作）；当前可展开筛选、勾选后批量改状态；拖拽列、行内改状态与列配置持久化尚未实现。
       </p>
     </div>
   )

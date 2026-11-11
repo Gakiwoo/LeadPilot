@@ -44,17 +44,43 @@ const clone = (v) => (v === undefined || v === null ? v : structuredClone(v))
  */
 function makeLedgerTables(state, onWrite) {
   const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+  let inTransaction = false
+  const LEDGER_KEYS = ['ledgerAccounts', 'ledgerEntries', 'ledgerIdem']
+  // 只快照账本三张表：事务期间不碰 tasks/cache/audit，避免误回滚其它写入
+  const snapshot = () => Object.fromEntries(LEDGER_KEYS.map((key) => [key, clone(state[key])]))
+  const restore = (snap) => { for (const key of LEDGER_KEYS) state[key] = snap[key] }
+  const flush = () => { if (!inTransaction) onWrite() }
   return {
-    ledgerTransact(fn) { return fn() }, // 单进程同步执行，无并发写；SQLite 实现用 BEGIN IMMEDIATE
+    /**
+     * P2 · memory / json 也提供真正的事务边界：SQLite 用 BEGIN IMMEDIATE，
+     * 这里用「内存快照 + 失败回滚 + 事务末单次落盘」，保证 reserve/settle 这类
+     * 多步写不会留下「账户已改、流水没写」的半写状态，也不会把半写状态刷到磁盘。
+     */
+    ledgerTransact(fn) {
+      if (inTransaction) return fn() // 嵌套调用不重复快照
+      const snap = snapshot()
+      inTransaction = true
+      try {
+        const result = fn()
+        inTransaction = false
+        onWrite()
+        return result
+      } catch (err) {
+        inTransaction = false
+        restore(snap)
+        try { onWrite() } catch { /* 回滚落盘失败不改变原始错误 */ }
+        throw err
+      }
+    },
     ledgerAccount(account) { return clone(state.ledgerAccounts[account] ?? null) },
-    ledgerAccountPut(account, rec) { state.ledgerAccounts[account] = clone(rec); onWrite() },
+    ledgerAccountPut(account, rec) { state.ledgerAccounts[account] = clone(rec); flush() },
     ledgerEntryByIdem(key) { return clone(state.ledgerIdem[key] ?? null) },
     ledgerAppend(entry) {
       if (hasOwn(state.ledgerIdem, entry.idem_key)) return false
       const full = clone(entry)
       state.ledgerEntries.push(full)
       state.ledgerIdem[full.idem_key] = full
-      onWrite()
+      flush()
       return true
     },
     ledgerEntries(refId, limit = 200) {

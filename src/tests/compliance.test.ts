@@ -22,6 +22,34 @@ const gateBase = {
   blacklist: [], sentToday: 10, dailyLimit: 100, bounceRate: 0.01, consecutiveHardBounces: 0,
 }
 
+describe('B3-0 · 假设核查与红线加固', () => {
+  it('合规尾巴幂等：已含尾巴的正文不会被重复注入（防双尾巴）', () => {
+    const once = injectComplianceFooter('Saw that you distribute Parker fittings. Can I send a quote sheet?', profile)
+    const twice = injectComplianceFooter(once, profile)
+    expect(twice).toBe(once)
+    expect((twice.match(/Reply STOP/gi) ?? []).length).toBe(1)
+    expect(validateEmail(twice, { maxWords: 230 }).passed).toBe(true)
+  })
+
+  // P3：contacts[0] 在 noUncheckedIndexedAccess 下是 `Contact | undefined`。
+  // 过去调用方用非空断言硬塞，客户没有联系人时会拿 undefined 去读 .value 直接抛错；
+  // 现在必须走 G1 硬拦，而不是放行或崩溃。
+  it('没有可用收件人时 G1 硬拦，绝不因 contact 缺失而放行或抛错', () => {
+    const noContact = checkSendGates({ ...gateBase, contact: null, singleConfirmed: true })
+    expect(noContact.allowed).toBe(false)
+    expect(noContact.failed.some((f) => f.gate === 'G1' && f.code === 'E3004')).toBe(true)
+
+    const missing = checkSendGates({ ...gateBase, singleConfirmed: true })
+    expect(missing.allowed).toBe(false)
+    expect(missing.failed.some((f) => f.gate === 'G1')).toBe(true)
+  })
+
+  it('黑名单为 @domain 时，空收件人不会被误判命中（domain 空串不吃 @ 规则）', () => {
+    const r = checkSendGates({ ...gateBase, contact: null, blacklist: ['@'], singleConfirmed: true })
+    expect(r.failed.some((f) => f.gate === 'G2')).toBe(false)
+  })
+})
+
 describe('PRD 11.2 / F6-2 / F7-2 · 产品级红线', () => {
   it('合规尾巴由代码注入，含真实身份与退订说明', () => {
     const body = injectComplianceFooter('Saw that you distribute Parker fittings. Can I send a quote sheet?', profile)
@@ -80,5 +108,29 @@ describe('PRD 11.2 / F6-2 / F7-2 · 产品级红线', () => {
     expect(csv.charCodeAt(0)).toBe(0xfeff)
     expect(csv).toContain('德国液压')
     expect(csv).toContain('"含,逗号与""引号"""')
+  })
+})
+
+describe('B3-5 · 校验细节与 CSV 安全', () => {
+  it('禁词按整词匹配：freedom / carefree 不再被 free 误伤，独立 free 仍拦截', () => {
+    const benign = validateEmail('Our freedom to choose suppliers and a carefree sourcing process. Reply STOP.', { maxWords: 230 })
+    expect(benign.bannedHits).not.toContain('free')
+    expect(validateEmail('Get free samples here. Reply STOP.', { maxWords: 230 }).bannedHits).toContain('free')
+  })
+
+  it('发件人身份按整词匹配：Include / Cooperation 不再冒充 Inc / Co', () => {
+    expect(validateEmail('This will include cooperation details. Reply STOP.', { maxWords: 230 }).hasSenderIdentity).toBe(false)
+    expect(validateEmail(injectComplianceFooter('Saw that you distribute Parker fittings.', profile), { maxWords: 230 }).hasSenderIdentity).toBe(true)
+  })
+
+  it('CSV 公式注入：= + - @ 开头的用户文本强制按文本导出', () => {
+    const csv = toCsv(['备注'], [
+      ['=HYPERLINK("http://evil.example")'], ['+SUM(1,1)'], ['-2+3'], ['@import'], ['普通备注'],
+    ])
+    expect(csv).toContain('"\'=HYPERLINK(""http://evil.example"")"')
+    expect(csv).toContain("'+SUM(1,1)")
+    expect(csv).toContain("'-2+3")
+    expect(csv).toContain("'@import")
+    expect(csv).toContain('普通备注')
   })
 })

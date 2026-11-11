@@ -89,7 +89,11 @@ export function validateJudgementSchema(raw: unknown): SchemaCheck {
   if (typeof im.value !== 'string' || !IMPORT_VALUES.has(im.value)) errors.push('import_signal.value 越界')
   if (typeof sz.tier !== 'string' || !SIZE_VALUES.has(sz.tier)) errors.push('size_estimate.tier 越界')
 
-  const evs: Record<string, Evidence[]> = {}
+  // 用固定键对象而非 Record<string, …>：后者在 noUncheckedIndexedAccess 下读出来是
+  // `Evidence[] | undefined`，会让「证据必填」的类型约束形同虚设。
+  const evs: { customer_type: Evidence[]; import_signal: Evidence[]; size_estimate: Evidence[] } = {
+    customer_type: [], import_signal: [], size_estimate: [],
+  }
   for (const [name, holder] of [['customer_type', ct], ['import_signal', im], ['size_estimate', sz]] as const) {
     const c = holder.confidence
     if (typeof c !== 'number' || c < 0 || c > 1) errors.push(`${name}.confidence 越界（应为 0–1）`)

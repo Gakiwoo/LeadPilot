@@ -303,6 +303,8 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 **决策**：`actions/checkout@v4 → v5`、`actions/setup-node@v4 → v5`，消除 Node 20 弃用提示；`node-version: '22'` 保持不变，与 `node:sqlite` 持久化基线一致。干净检出清单补入此前漏列的 `server/gateway.mjs` / `server/orchestrator.mjs` / `src/store/useAppStore.ts` / `src/types/index.ts` 与两个关键视图组件——v0.3.0 的 `data/` 教训说明「本地全绿」不等于「仓库可构建」，清单必须覆盖所有会被 import 的关键源码。
 
+**B3-3 修订（取代上面的「清单补全」做法）**：硬编码清单永远追不上新增文件，故改为 `npm run check:tracked`（`scripts/check-clean-checkout.mjs`）全量枚举 `src / server / shared / scripts` 下 60 个源码/配置，与 `git ls-files` 逐项对账；CI 的 `Tracked sources sanity` 直接调用该脚本。同时把 `actions/checkout` / `actions/setup-node` 从浮动 major tag 固定到不可变 commit SHA（`v5.1.0` → `fbc6f399…`，`v5.0.0` → `a0853c24…`）；启动前置安全校验补了真实子进程反例 `server/tests/startup-security.test.mjs`，`it.skipIf` 条件跳过全部消除。
+
 **边界**：`ubuntu-latest` 的镜像迁移属于 GitHub 平台侧，不锁定镜像版本；依赖漏洞分级维持 ADR-018 结论，不在本轮跨 major 升级 Vite / Vitest。
 
 ## ADR-027 · 定位锁定「自动获客」，批量导入是投喂通道而非形态降级
@@ -378,7 +380,7 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 | 指标 | PRD 目标 | 基线状态 |
 |---|---|---|
-| 首屏可交互 | ≤ 3 s | ✅ 本地构建 300 KB JS / gzip 100 KB，冷启动远低于 3 s |
+| 首屏可交互 | ≤ 3 s | ✅ 本地构建 353.78 kB JS / gzip 119.45 kB（B3 定稿实跑 `npm run build`），冷启动远低于 3 s |
 | 列表筛选响应 | ≤ 150 ms | ✅ 内存过滤 + 排序，48–168 行实测无感 |
 | 详情抽屉打开 | ≤ 300 ms | ✅ 本地数据直读，不含网络 |
 | 1,000 行渲染 ≤ 200 ms | 目标 | ⚠️ 未压测（演示数据上限 168 家），需 TanStack Virtual 后复测 |

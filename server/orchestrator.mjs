@@ -86,14 +86,28 @@ export function createOrchestrator(opts = {}) {
 
   /** 进程重启后：活跃任务一律降为 paused 并保留游标，由用户显式点击「继续」恢复 */
   function hydrate() {
-    if (!store) return []
-    const ids = []
+    if (!store) return { restored: [], recoveredActive: [] }
+    const restored = []
+    const recoveredActive = []
     for (const raw of store.taskList()) {
       if (!raw?.id || !raw.progress || !raw.cursor) continue
       // 重启后序号从历史最大值继续，新任务永远排在旧任务之后
       seq = Math.max(seq, Number(raw.seq ?? 0))
       const wasActive = raw.status === 'running' || raw.status === 'queued'
       const wasQueued = raw.status === 'queued'
+      const log = Array.isArray(raw.progress.log) ? [...raw.progress.log] : []
+      // P2 · 恢复日志幂等：连续重启且任务从未续跑时，末尾已是一条「进程重启」日志，
+      // 不再追加；非活跃的历史任务也不再写「任务状态已从持久化存储恢复」这类噪音。
+      const alreadyLogged = wasActive && String(log.at(-1)?.text ?? '').startsWith('进程重启：')
+      if (wasActive && !alreadyLogged) {
+        log.push({
+          at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }),
+          level: 'warn',
+          text: wasQueued
+            ? '进程重启：原排队任务已恢复为「已暂停」，不会自动启动；点击继续后按 FIFO 重新参与并发调度，额度不重复扣减（AC-03）'
+            : '进程重启：已从持久化游标恢复为「已暂停」，点击继续即断点续跑，额度不重复扣减（AC-03）',
+        })
+      }
       const task = {
         ...raw,
         status: wasActive ? 'paused' : raw.status,
@@ -106,26 +120,22 @@ export function createOrchestrator(opts = {}) {
         // 旧版本任务没有账本预扣记录：绝不补扣，按只读方式记录历史消耗
         ledger: raw.ledger ?? null,
         ledgerSettled: Boolean(raw.ledgerSettled),
-        progress: {
-          ...raw.progress,
-          log: [...(raw.progress.log ?? []), {
-            at: new Date(now()).toLocaleTimeString('zh-CN', { hour12: false }),
-            level: 'warn',
-            text: wasQueued
-              ? '进程重启：原排队任务已恢复为「已暂停」，不会自动启动；点击继续后按 FIFO 重新参与并发调度，额度不重复扣减（AC-03）'
-              : wasActive
-                ? '进程重启：已从持久化游标恢复为「已暂停」，点击继续即断点续跑，额度不重复扣减（AC-03）'
-                : '任务状态已从持久化存储恢复',
-          }].slice(-80),
-        },
+        progress: { ...raw.progress, log: log.slice(-80) },
       }
       tasks.set(task.id, task)
-      ids.push(task.id)
-      persist(task)
+      restored.push(task.id)
+      if (wasActive) {
+        recoveredActive.push(task.id)
+        persist(task) // 只有状态真的发生了降级才需要写回
+      }
     }
-    return ids
+    return { restored, recoveredActive }
   }
-  const recoveredIds = hydrate()
+  const recovery = hydrate()
+  // recoveredIds：从存储载入的全部历史任务（兼容既有调用方）
+  // recoveredActiveIds：本次启动真正从 running/queued 降级为 paused 的任务，用于 /health 如实上报
+  const recoveredIds = recovery.restored
+  const recoveredActiveIds = recovery.recoveredActive
 
   function emit(taskId, type, data) {
     const payload = { type, taskId, at: new Date(now()).toISOString(), demo: true, ...data }
@@ -506,5 +516,6 @@ export function createOrchestrator(opts = {}) {
     maxConcurrent,
     dataSources,
     recoveredIds,
+    recoveredActiveIds,
   }
 }

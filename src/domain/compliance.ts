@@ -20,12 +20,16 @@ export function assertNoBatchSend(count: number): { allowed: false; message: str
 
 /** 合规尾巴由代码注入，不经过模型（PRD F6-5）——防止模型「贴心」地删掉 */
 export function injectComplianceFooter(body: string, profile: CompanyProfile): string {
+  const clean = String(body ?? '').trim()
+  // B3-0（假设 #3 核查）：服务端 writeEmail 目前不注入尾巴，但上游一旦变更或调用方重复调用，
+  // 无条件拼接会产生双尾巴并被 F6-2 判为不合规。这里做成幂等，已含合规尾巴就原样返回。
+  if (/\n--\n[\s\S]*(unsubscribe|reply\s+stop|退订)/i.test(clean)) return clean
   const identity = [
     profile.senderName, profile.senderTitle, profile.companyNameEn,
     profile.phone, profile.website, profile.address,
   ].filter(Boolean).join(' · ')
   return [
-    body.trim(),
+    clean,
     '',
     '--',
     identity || '[填入发件人真实身份与公司地址]',
@@ -47,13 +51,27 @@ export interface ValidateOptions {
   anchor?: string
 }
 
+/** B3-5：禁词按「词」匹配，不再用 includes 子串，避免 free 误伤 freedom / carefree */
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function bannedPattern(word: string): RegExp {
+  const w = String(word)
+  // 仅当禁词以字母/数字开头或结尾时才加边界；"!!" / "100%" 这类符号型禁词保持原义
+  const left = /^[A-Za-z0-9]/.test(w) ? '(?<![A-Za-z0-9])' : ''
+  const right = /[A-Za-z0-9]$/.test(w) ? '(?![A-Za-z0-9])' : ''
+  return new RegExp(left + escapeRe(w) + right, 'i')
+}
+
+/** B3-5：公司后缀必须整词命中，Include / Cooperation 不再被当成 Inc / Co 身份 */
+const COMPANY_SUFFIX = /\b(?:GmbH|Ltd|Inc|Co)\b\.?/i
+
 export function validateEmail(body: string, opts: ValidateOptions): EmailValidation {
   const issues: string[] = []
   const wordCount = countWords(body)
   const lower = body.toLowerCase()
-  const bannedHits = BANNED_WORDS.filter((w) => lower.includes(w.toLowerCase()))
+  const bannedHits = BANNED_WORDS.filter((w) => bannedPattern(w).test(body))
   const hasUnsubscribe = /reply\s+stop|unsubscribe|退订/i.test(body)
-  const hasSenderIdentity = /--[\s\S]{0,400}(@|www\.|http|地址|address|co\.,?\s|ltd|gmbh|inc\.?)/i.test(body) || /(GmbH|Ltd\.?|Inc\.?|Co\.,?)/.test(body)
+  const hasSenderIdentity = /--[\s\S]{0,400}(@|www\.|https?:\/\/|地址|\baddress\b|\b(?:ltd|gmbh|inc|co)\b\.?)/i.test(body)
+    || COMPANY_SUFFIX.test(body)
   const hasPlaceholder = /\[[^\]]{1,40}\]/.test(body)
   const anchor = opts.anchor?.trim() ?? ''
   const hasPersonalization = !opts.requirePersonalization || (anchor.length > 0 && lower.includes(anchor.toLowerCase()))
@@ -72,7 +90,8 @@ export function validateEmail(body: string, opts: ValidateOptions): EmailValidat
 }
 
 export interface SendGateInput {
-  contact: Contact
+  // P3：没有可用收件人时不能靠 `contacts[0]` 硬取，必须显式允许 null 并让 G1 硬拦
+  contact?: Contact | null
   blacklist: string[]
   sentToday: number
   dailyLimit: number
@@ -90,17 +109,21 @@ export interface SendGateResult {
 /** PRD F7-2 四道闸门 + 11.2 红线 */
 export function checkSendGates(input: SendGateInput): SendGateResult {
   const failed: SendGateResult['failed'] = []
-  const email = input.contact.value.toLowerCase()
+  const contact = input.contact ?? null
+  const email = String(contact?.value ?? '').toLowerCase()
   const domain = email.split('@')[1] ?? ''
-  const blocked = (v: string) => input.blacklist.some((b) => {
+  const blocked = (v: string) => v.length > 0 && input.blacklist.some((b) => {
     const x = b.toLowerCase().trim()
+    if (!x) return false
     return x.startsWith('@') ? domain === x.slice(1) : v === x
   })
 
-  // G1 联系方式等级
-  if (input.contact.grade === 'D' || input.contact.isBlacklisted) {
+  // G1 联系方式等级（无收件人属最严格的 G1 拦截，不降级为 G3 排队）
+  if (!contact) {
+    failed.push({ gate: 'G1', code: 'E3004', message: '该客户没有可用收件人，禁止进入发送队列' })
+  } else if (contact.grade === 'D' || contact.isBlacklisted) {
     failed.push({ gate: 'G1', code: 'E3004', message: 'D 级邮箱或已标记不可发，禁止进入发送队列' })
-  } else if (input.contact.grade === 'C' && !input.singleConfirmed) {
+  } else if (contact.grade === 'C' && !input.singleConfirmed) {
     failed.push({ gate: 'G1', code: 'E3004', message: 'C 级邮箱需单条人工确认后才能发出' })
   }
 
@@ -155,8 +178,12 @@ export function minimizeForModel(features: RuleFeatures, profile: CompanyProfile
 /** PRD F9-2：CSV 使用 UTF-8 BOM，保证 Excel 打开中文不乱码 */
 export function toCsv(headers: string[], rows: (string | number | null | undefined)[][]): string {
   const esc = (v: string | number | null | undefined) => {
-    const s = v === null || v === undefined ? '' : String(v)
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    let s = v === null || v === undefined ? '' : String(v)
+    // B3-5 · CSV 公式注入防护：Excel / Sheets 会把 = + - @ / Tab / CR 开头的单元格当公式执行。
+    // 用户可控的「备注 / 公司名」若写成 =HYPERLINK(...) 会在打开表格时触发外部请求。
+    // 前缀单引号强制按文本处理；BOM、引号转义与 CRLF 行分隔保持不变。
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
   return '\uFEFF' + [headers, ...rows].map((r) => r.map(esc).join(',')).join('\r\n')
 }
@@ -168,6 +195,9 @@ export function downloadCsv(filename: string, csv: string): void {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  // B3-5：立即 revoke 会让部分浏览器来不及读取 blob，导出偶发空文件；延迟释放 URL
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

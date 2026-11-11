@@ -84,14 +84,14 @@ export default function TaskConfigPanel() {
             className={`rounded-lg border px-3 py-2.5 text-left transition ${runnerMode === 'local' ? 'border-brand-500 bg-brand-50/50' : 'border-line bg-white hover:border-slate-300'}`}
           >
             <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink"><HardDrive size={13} /> 本地演示运行器</div>
-            <p className="mt-1 text-[10px] leading-4 text-muted">流式写入演示客户，可完整体验评分 / 筛选 / 建草稿链路。零真实请求。</p>
+            <p className="mt-1 text-[11px] leading-4 text-muted">流式写入演示客户，可完整体验评分 / 筛选 / 建草稿链路。零真实请求。</p>
           </button>
           <button
             onClick={() => setRunnerMode('cloud')}
             className={`rounded-lg border px-3 py-2.5 text-left transition ${runnerMode === 'cloud' ? 'border-brand-500 bg-brand-50/50' : 'border-line bg-white hover:border-slate-300'}`}
           >
             <div className="flex items-center gap-1.5 text-[12px] font-medium text-ink"><CloudCog size={13} /> 云端编排器（SSE）</div>
-            <p className="mt-1 text-[10px] leading-4 text-muted">真实任务状态机与流式事件、暂停/续跑/中止、单源降级告警。数据源未接入，不写入客户库。</p>
+            <p className="mt-1 text-[11px] leading-4 text-muted">真实任务状态机与流式事件、暂停/续跑/中止、单源降级告警。数据源未接入，不写入客户库。</p>
           </button>
         </div>
         {runnerMode === 'cloud' && !gateway?.online && (
@@ -121,7 +121,7 @@ export default function TaskConfigPanel() {
         <SectionTitle title="创建开发任务" desc="五参数表达清楚「我要找什么样的客户」· 60 秒内可完成" extra={<span className="lp-chip">F1 · P0 · MVP</span>} />
         <div className="grid grid-cols-2 gap-5">
           <div className="space-y-4">
-            <Field label="产品关键词" required hint="中英混输，回车成词；支持逗号 / 换行批量粘贴。系统后续会自动做双语与同义词扩展。">
+            <Field label="产品关键词" required hint="中英混输，回车成词；支持逗号 / 换行批量粘贴。双语与同义词扩展尚未实现，关键词按你输入的原文使用。">
               <div className="flex min-h-[38px] flex-wrap items-center gap-1.5 rounded-lg border border-line bg-white px-2 py-1.5 focus-within:border-brand-500 focus-within:ring-2 focus-within:ring-brand-50">
                 {config.keywords.map((k) => (
                   <span key={k} className="inline-flex items-center gap-1 rounded-md bg-brand-50 px-2 py-0.5 text-[11px] font-medium text-brand-700">
@@ -137,7 +137,7 @@ export default function TaskConfigPanel() {
                   className="min-w-[120px] flex-1 border-0 text-[12px] outline-none placeholder:text-slate-400"
                 />
               </div>
-              <div className="mt-1 flex items-center justify-between text-[10px] text-muted"><span>{config.keywords.length}/10 个关键词</span><span>排除词可在高级选项中设置</span></div>
+              <div className="mt-1 flex items-center justify-between text-[11px] text-muted"><span>{config.keywords.length}/10 个关键词</span><span>排除词可在高级选项中设置</span></div>
             </Field>
 
             <Field label="目标市场" required hint="默认不选任何市场，强制表达明确意图">
@@ -191,12 +191,12 @@ export default function TaskConfigPanel() {
                         <span className={`text-[12px] font-medium ${on ? 'text-brand-700' : 'text-ink'}`}>{info.label}</span>
                         {d === 2 && <span className="rounded bg-slate-100 px-1 text-[9px] text-slate-500">默认</span>}
                       </div>
-                      <div className="mt-1 text-[10px] text-muted">{info.duration} · {info.sources} 源 · {info.pointsPerCompany} 点/客户</div>
+                      <div className="mt-1 text-[11px] text-muted">{info.duration} · {info.sources} 源 · {info.pointsPerCompany} 点/客户</div>
                     </button>
                   )
                 })}
               </div>
-              <p className="mt-1.5 text-[10px] leading-4 text-muted">{DEPTH_CONFIG[config.depth].desc}</p>
+              <p className="mt-1.5 text-[11px] leading-4 text-muted">{DEPTH_CONFIG[config.depth].desc}</p>
             </Field>
 
             <Field label="客户数量" hint="档位 20 / 50 / 100 / 200 / 500 / 1000，单任务最大 1000">
@@ -244,7 +244,7 @@ export default function TaskConfigPanel() {
             <Play size={14} /> {running ? '有任务运行中' : runnerMode === 'cloud' ? '提交云端任务' : '开始采集'}
           </Button>
         </div>
-        <p className="mt-1.5 text-right text-[10px] text-muted">额度在任务开始后不可退，提交前明示（PRD F1-4：不做事后惊讶）</p>
+        <p className="mt-1.5 text-right text-[11px] text-muted">额度在任务开始后不可退，提交前明示（PRD F1-4：不做事后惊讶）</p>
       </Card>
 
       <Card className="p-4">

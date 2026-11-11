@@ -70,7 +70,9 @@ describe('PRD 第 6 章 · 五维评分引擎', () => {
     const f = makeFeatures({ customsRecords: null, customsDataAvailable: false, importWording: 'inferred', distributedBrands: 3, tradeTermHits: 4 })
     const rule = computeRuleScores(f).import
     expect(rule.score).toBeGreaterThan(50)
-    expect(rule.meta[0].value).toContain('权重转移')
+    const meta = rule.meta[0]
+    expect(meta).toBeDefined()
+    expect(meta?.value).toContain('权重转移')
     expect(rule.conclusion).toContain('不公开')
   })
 

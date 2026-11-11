@@ -40,7 +40,7 @@ export default function OutreachView() {
         <StatTile label="今日已发 / 额度" value={`${settings.gmail.sentToday} / ${settings.gmail.dailyLimit}`} sub="个人 Gmail 上限 500，产品默认 100 留安全余量" />
         <StatTile label="硬退信率" value={`${(bounceRate * 100).toFixed(1)}%`} sub={bounceRate > 0.03 ? '超过 3%：发送熔断' : '阈值 ≤ 2%，3% 触发熔断'} tone={bounceRate > 0.03 ? 'rose' : 'emerald'} />
         <StatTile label="回复率" value={`${(replyRate * 100).toFixed(1)}%`} sub="唯一可靠强信号，不以打开率为核心指标" tone="emerald" />
-        <StatTile label="草稿队列" value={outreach.length} sub="Gmail API 失败时自动重试 3 次并保留" />
+        <StatTile label="草稿队列" value={outreach.length} sub="Gmail 未接入：草稿仅存本地队列，无自动重试与真实发送" />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -53,7 +53,7 @@ export default function OutreachView() {
           <div className="mt-3 flex items-center gap-1.5">
             <Button size="sm" onClick={() => showToast('内测期请用上方「批量 SDR 管道」导出 mbox 草稿；OAuth PKCE / CASA Tier 2 仍是正式发布门禁，未接入', 'warn')}>内测导出通道说明</Button>
             <Button size="sm" variant="soft" onClick={() => openComposer(companies[0]?.id ?? null)}>先看草稿，暂不授权</Button>
-            <span className="ml-auto text-[10px] text-muted">F5 · P0</span>
+            <span className="ml-auto text-[11px] text-muted">F5 · P0</span>
           </div>
         </Card>
 
@@ -80,7 +80,7 @@ export default function OutreachView() {
                   </div>
                 )
               })}
-              <p className="pt-1 text-[10px] text-muted">{gateResult.queueInstead ? '超额部分进入明日队列，不丢弃。' : ''}</p>
+              <p className="pt-1 text-[11px] text-muted">{gateResult.queueInstead ? '超额部分进入明日队列，不丢弃。' : ''}</p>
             </div>
           )}
         </Card>
@@ -95,7 +95,7 @@ export default function OutreachView() {
           <div className="p-5"><EmptyState title="草稿队列为空" desc="在客户详情中生成开发信，或在客户名单中批量建草稿。生成时会自动做字数、禁词、退订尾巴与占位符校验。" action={<Button size="sm" variant="soft" onClick={() => openComposer(companies.find((c) => c.scoreCard.canSend)?.id ?? null)}>写第一封开发信</Button>} /></div>
         ) : (
           <table className="w-full text-[11px]">
-            <thead className="bg-canvas text-[10px] text-muted"><tr>{['公司', '收件人', '主题', '个性化依据', '校验', '创建时间', '状态'].map((h) => <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>)}</tr></thead>
+            <thead className="bg-canvas text-[11px] text-muted"><tr>{['公司', '收件人', '主题', '个性化依据', '校验', '创建时间', '状态'].map((h) => <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>)}</tr></thead>
             <tbody>{outreach.slice(0, 20).map((o) => {
               const c = companies.find((x) => x.id === o.companyId)
               return (
@@ -128,14 +128,14 @@ export default function OutreachView() {
           </div>
         </Card>
         <Card className="p-4">
-          <SectionTitle title="模板库与红线" desc="模板库 V1 提供最多 3 步序列；以下是产品级硬约束" />
+          <SectionTitle title="发信红线" desc="模板库与多步序列尚未实现；以下是当前已由代码强制的产品级硬约束" />
           <div className="space-y-1.5">
             {[
-              { icon: FileText, text: '系统模板：首次建立联系（短） / 报价跟进 / 二次触达', tone: 'brand' },
+              { icon: FileText, text: '本地规则模板按目的生成草稿；模板库与自动多步序列尚未实现', tone: 'brand' },
               { icon: AlertTriangle, text: assertNoBatchSend(2).allowed ? '' : '不提供「批量直接发送」：批量与真发之间必须保留人的一次确认', tone: 'rose' },
               { icon: ShieldCheck, text: '每封信必须带真实身份与退订说明，由系统注入且不可删除', tone: 'emerald' },
               { icon: ShieldCheck, text: '退订即刻生效且不可绕过，全局黑名单不提供忽略开关', tone: 'emerald' },
-              { icon: Gauge, text: '产品层硬编码节流：个人 100 封/日、20 封/小时、间隔随机 45–120 秒', tone: 'slate' },
+              { icon: Gauge, text: '发送闸门：每日上限、C 级逐条确认、退信率熔断由代码强制；小时级节流与随机间隔尚未实现', tone: 'slate' },
             ].filter((x) => x.text).map((x, i) => (
               <div key={i} className={`flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[11px] leading-4 ${x.tone === 'rose' ? 'border-rose-200 bg-rose-50 text-rose-700' : x.tone === 'emerald' ? 'border-emerald-100 bg-emerald-50/50 text-emerald-800' : 'border-line text-slate-700'}`}>
                 <x.icon size={12} className="mt-0.5 shrink-0" />{x.text}

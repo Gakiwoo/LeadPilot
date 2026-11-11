@@ -190,9 +190,21 @@ async function jsonFetch<T>(path: string, init?: RequestInit, timeoutMs = 4000):
       signal: controller.signal,
       headers: { 'content-type': 'application/json', ...authHeaders(), ...(init?.headers ?? {}) },
     })
-    const body = await res.json() as T & { ok?: boolean }
+    // P3：`res.json() as T` 是纯编译期断言，服务端返回 HTML 错误页或 null 时会一路
+    // 传到渲染层才炸。这里在边界上做最小运行时形状校验，坏响应立刻变成明确异常。
+    const text = await res.text()
+    let parsed: unknown
+    try {
+      parsed = text ? JSON.parse(text) : {}
+    } catch {
+      throw new Error(`云端响应不是合法 JSON（HTTP ${res.status}）：${path}`)
+    }
+    if (parsed === null || typeof parsed !== 'object') {
+      throw new Error(`云端响应结构非法（HTTP ${res.status}，期望 JSON 对象，实际 ${parsed === null ? 'null' : typeof parsed}）：${path}`)
+    }
+    const body = parsed as T & { ok?: boolean }
     if (!res.ok) return { ...body, ok: false } as T
-    return body
+    return body as T
   } finally {
     clearTimeout(timer)
   }
@@ -354,7 +366,19 @@ export function startCloudTask(
   onEvent: (event: { type: string; [k: string]: unknown }) => void,
 ): Promise<{ ok: boolean; taskId?: string; reason?: string; close(): void }> {
   let controller: AbortController | null = null
-  const close = () => { controller?.abort(); controller = null }
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  // P3：仅 abort 不 cancel reader 时，Chromium 会继续持有流锁与解码缓冲直到 GC；
+  // 这里显式 cancel + releaseLock，保证关闭弹窗/切换任务后连接与内存真正释放。
+  const close = () => {
+    controller?.abort()
+    controller = null
+    if (activeReader) {
+      const r = activeReader
+      activeReader = null
+      void r.cancel().catch(() => { /* 已结束的流 cancel 会抛，忽略 */ })
+      try { r.releaseLock() } catch { /* 未持锁时 releaseLock 会抛，忽略 */ }
+    }
+  }
   return jsonFetch<{ ok: boolean; task: { id: string } }>('/v1/tasks', {
     method: 'POST', body: JSON.stringify(config),
   }, 6000).then(async (res) => {
@@ -374,6 +398,7 @@ export function startCloudTask(
       return { ok: false, reason: `SSE 订阅被拒绝（HTTP ${response.status}）`, close }
     }
     const reader = response.body.getReader()
+    activeReader = reader
     const decoder = new TextDecoder()
     let buffer = ''
     void (async () => {
@@ -392,8 +417,21 @@ export function startCloudTask(
             try { onEvent({ type, ...JSON.parse(data.slice(6)) }) } catch { /* 忽略非法事件 */ }
           }
         }
+        // 流结束时缓冲区可能残留最后一个未以空行收尾的事件，不能丢
+        buffer += decoder.decode()
+        const tailLines = buffer.split('\n')
+        const tailData = tailLines.find((l) => l.startsWith('data: '))
+        if (tailData) {
+          const tailType = tailLines.find((l) => l.startsWith('event: '))?.slice(7).trim() ?? 'message'
+          try { onEvent({ type: tailType, ...JSON.parse(tailData.slice(6)) }) } catch { /* 忽略非法事件 */ }
+        }
       } catch {
+        // 主动 close() 触发的 abort 不是异常，不该向上报「连接中断」
+        if (controller === null) return
         onEvent({ type: 'error', reason: 'SSE 连接中断' })
+      } finally {
+        if (activeReader === reader) activeReader = null
+        try { reader.releaseLock() } catch { /* 忽略 */ }
       }
     })()
     return { ok: true, taskId: res.task.id, close }
@@ -584,7 +622,7 @@ export async function runJudgeBatch(payload: { batchSize?: number; domains?: str
   } catch { return offlineBatch<BatchJudgeResult>() }
 }
 
-export async function exportDrafts(payload: { items: ExportDraftItem[] }): Promise<ExportDraftsResult> {
+export async function exportDrafts(payload: { items: ExportDraftItem[]; blacklist?: string[] }): Promise<ExportDraftsResult> {
   try {
     return await jsonFetch<ExportDraftsResult>('/v1/export/eml', { method: 'POST', body: JSON.stringify(payload) }, 15000)
   } catch { return offlineBatch<ExportDraftsResult>() }
