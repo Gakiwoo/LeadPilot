@@ -72,15 +72,18 @@ export default function App() {
           {activeView === 'settings' && <SettingsView />}
           <div className="mt-6 border-t border-line pt-3 text-center text-[10px] leading-4 text-slate-400">
             LeadPilot 猎客 · PRD v1.1 · 评分引擎 / 状态机 / 合规校验 / 云端网关与任务编排为真实实现
-            {gateway?.mode === 'configured'
-              ? ' · 模型网关已配 Key，可发起真实判断；采集数据源与 Gmail 仍为演示适配器'
-              : ' · 未配置任何 API Key：模型判断明确返回 E6005 降级，不伪造结果'}
+            {gateway == null || gateway.mode === 'offline'
+              ? ' · 云端服务不可达（offline）：请启动 npm run cloud，这不是 E6005 未配 Key'
+              : gateway.mode === 'configured'
+                ? ' · 模型网关已配 Key，可发起真实判断；采集数据源与 Gmail 仍为演示适配器'
+                : ' · 未配置任何 API Key：模型判断明确返回 E6005 降级，不伪造结果'}
             <br />客户记录始终为演示数据；本界面不构成法律意见，正式上线前需就 PIPL 与 GDPR 取得执业律师专项意见。
           </div>
         </main>
       </div>
       <CompanyDetail company={companies.find((c) => c.id === drawerCompanyId) ?? null} onClose={() => openCompany(null)} />
-      <EmailComposer company={companies.find((c) => c.id === composerCompanyId) ?? null} onClose={() => openComposer(null)} />
+      {/* P1-16：key 随开关变化强制重挂载，关闭再打开同一家公司也不会残留正文 / 标注 / 生成结果 */}
+      <EmailComposer key={composerCompanyId ?? 'composer-closed'} company={companies.find((c) => c.id === composerCompanyId) ?? null} onClose={() => openComposer(null)} />
       <Toast />
     </div>
   )

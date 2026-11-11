@@ -15,6 +15,31 @@ import { createDataSourceRegistry } from './data-sources.mjs'
 import { protocol } from './protocol.mjs'
 
 export const STAGES = ['检索候选', '规范化', '去重', '抓取详情', '验证邮箱', '模型判断与评分']
+
+/**
+ * P1-02：HTTP /v1/tasks/:id/resume 的 body.cursor 是外部输入，必须按白名单收敛。
+ * 此前 `{...t.cursor, ...cursor}` 允许注入 processedDomains:null / offset:-1 / 任意类型，
+ * 会让定时器回调里的 .slice() 抛错并终结整个进程（远程 DoS）。
+ */
+function sanitizeCursor(cursor, current) {
+  const base = current ?? { stageIndex: 0, offset: 0, processedDomains: [] }
+  if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) return { ...base }
+  const next = { ...base }
+  if (typeof cursor.offset === 'number' && Number.isFinite(cursor.offset)
+    && cursor.offset >= 0 && cursor.offset <= 1_000_000) {
+    next.offset = Math.trunc(cursor.offset)
+  }
+  if (Number.isInteger(cursor.stageIndex) && cursor.stageIndex >= 0 && cursor.stageIndex < STAGES.length) {
+    next.stageIndex = cursor.stageIndex
+  }
+  if (Array.isArray(cursor.processedDomains)) {
+    next.processedDomains = cursor.processedDomains
+      .filter((x) => typeof x === 'string' && x.length <= 300)
+      .slice(-200)
+  }
+  return next
+}
+
 const HARD_TIMEOUT_MIN = { 1: 10, 2: 25, 3: 50, 4: 90 }
 const SOURCES_BY_DEPTH = { 1: 3, 2: 5, 3: 6, 4: 6 }
 export const MAX_CONCURRENT = 3
@@ -339,7 +364,25 @@ export function createOrchestrator(opts = {}) {
       task.progress.log = task.progress.log.slice(-80)
     }
     persist(task)
-    timers.set(task.id, setInterval(() => tick(task), tickMs))
+    // P1-02：定时器回调里的异常一旦逃逸会直接终结进程。安全暂停 + 保留游标 + 如实发事件。
+    timers.set(task.id, setInterval(() => {
+      try { tick(task) } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[LeadPilot] 任务编排 tick 异常，已安全暂停：', err)
+        clearInterval(timers.get(task.id))
+        timers.delete(task.id)
+        task.status = 'paused'
+        task.startedMs = null
+        try {
+          persist(task)
+          emit(task.id, 'task_error', {
+            note: '编排 tick 发生异常，任务已安全暂停，游标已保留；内部错误只记服务端日志',
+            cursor: task.cursor,
+          })
+          pumpQueue()
+        } catch { /* 兜底路径本身绝不再抛 */ }
+      }
+    }, tickMs))
     emit(task.id, 'started', {
       config: task.config,
       hardTimeoutMin: HARD_TIMEOUT_MIN[task.config.depth] ?? 25,
@@ -430,7 +473,7 @@ export function createOrchestrator(opts = {}) {
 
   function resume(id, cursor) {
     const t = tasks.get(id); if (!t || !['paused', 'queued'].includes(t.status)) return null
-    if (cursor) t.cursor = { ...t.cursor, ...cursor }
+    if (cursor) t.cursor = sanitizeCursor(cursor, t.cursor)
     if (t.status === 'queued') {
       // 「继续」不能插队：保持 FIFO，只尝试把当前空槽分配给队首
       persist(t)

@@ -15,7 +15,6 @@ import type {
   LlmJudgement, RuleFeatures, SizeTier, TradeRecord,
 } from '@/types'
 import { buildScoreCard } from '@/domain/scoring'
-import { acceptModelJudgement } from '@/domain/llm-judgement'
 
 const FETCHED = '2026-11-06'
 const E = (quote: string, path: string, label?: string): Evidence => ({
@@ -328,12 +327,13 @@ export function buildDemoCompanies(count = 48): Company[] {
     const s: Seed = { ...base, name, domain, variantLabel: suffix }
     const features = featuresFor(s, variant)
     const raw = judgementFor(s, id)
-    const accepted = acceptModelJudgement(raw, features.sourceTexts)
-    const scoreCard = buildScoreCard(features, accepted.judgement, {
-      modelAvailable: !s.fakeCitation,
-    })
+    // P1-10：演示数据是本地合成的规则事实，不是模型判断。评分卡一律按 E6005 降级口径：
+    // 不把合成 judgement 喂给 buildScoreCard（α 归零）、分数显示区间、置信度标低、明确标注 DEMO。
+    // raw 仅作为「本地演示证据链」保留在 company.judgement，不参与打分，也不声称来自模型。
+    const scoreCard = buildScoreCard(features, null, { modelAvailable: false })
+    scoreCard.warnings.push('DEMO · 评分卡为本地规则估算，未经模型校验（E6005 降级口径），不显示模型判断')
     if (s.fakeCitation) {
-      scoreCard.warnings.push('E6004 模型引用无法在原文核验，相关判断已整条丢弃并回退规则分')
+      scoreCard.warnings.push('E6004 演示引用无法在原文核验，相关判断已整条丢弃并回退规则分')
     }
     const status = (['new', 'new', 'drafted', 'sent', 'replied', 'interested', 'quoted', 'won', 'bounced', 'unsubscribed'] as const)[i % 10]
     const firstSeen = new Date(Date.UTC(2026, 10, 6 - (i % 6), 8 + (i % 8), 12)).toISOString()

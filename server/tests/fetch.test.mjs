@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   createFetcher, parseTargetUrl, parseRobots, robotsAllows, htmlToText,
-  isPrivateAddress, assertPublicHost, FETCH_VERSION, FETCH_ORIGIN,
+  isPrivateAddress, assertPublicHost, pinnedFetch, FETCH_VERSION, FETCH_ORIGIN,
 } from '../fetch.mjs'
+import { createServer as createHttpServer } from 'node:http'
 import { protocol } from '../protocol.mjs'
 import { createBatchPipeline } from '../batch.mjs'
 import { createMemoryStore } from '../store.mjs'
@@ -313,5 +314,52 @@ describe('P0-2 · SSRF 绕过回归（IPv4-mapped IPv6 / DNS 重绑定 / robots 
     expect(r.code).toBe('E4011')
     expect(calls.some((u) => u.includes('/about'))).toBe(false)
     expect(calls.every((u) => u.includes('/robots.txt'))).toBe(true)
+  })
+})
+
+describe('P1-01 · 连接 pin 到已验证 IP（DNS 重绑定彻底消除）', () => {
+  it('每次出站都携带 SSRF 校验阶段已验证的公网地址，绝不含私网地址', async () => {
+    const pins = []
+    const fetchImpl = async (url, _init, addresses) => {
+      pins.push({ url: String(url), addresses })
+      return String(url).includes('robots.txt')
+        ? notFound()
+        : page('<html><body>pinned page</body></html>')
+    }
+    const fetcher = createFetcher({
+      fetchImpl, resolveHost, now: () => 1_000_000, sleep: async () => {},
+    })
+    const r = await fetcher.fetchOne('https://pin.example/about')
+    expect(r.ok).toBe(true)
+    expect(pins.length).toBeGreaterThanOrEqual(2)
+    for (const p of pins) {
+      const list = p.addresses.map((a) => a.address)
+      expect(list).toContain('93.184.216.34')
+      expect(list).not.toContain('10.0.0.8')
+      expect(list).not.toContain('127.0.0.1')
+    }
+  })
+
+  it('pinnedFetch 固定 lookup：域名不可解析也能连到已验证 IP，连接阶段不再解析 DNS', async () => {
+    const server = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end('<html><body>pinned</body></html>')
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = server.address().port
+      // 仅验证「连接不再解析 DNS」这一行为：pin 到本机回环，
+      // SSRF 判定由 assertPublicHost 独立完成，此处不是抓取私网目标。
+      const res = await pinnedFetch(
+        `http://never-resolves.invalid:${port}/about`,
+        { method: 'GET' },
+        [{ address: '127.0.0.1', family: 4 }],
+        3000,
+      )
+      expect(res.status).toBe(200)
+      expect(await res.text()).toContain('pinned')
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
   })
 })

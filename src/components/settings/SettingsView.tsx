@@ -72,10 +72,13 @@ export default function SettingsView() {
                 <Field label="主营产品" hint="用于开发信中的产品词与匹配锚点"><input className="lp-input" value={settings.profile.mainProducts} onChange={(e) => setProfile({ mainProducts: e.target.value })} /></Field>
                 <Field label="官网"><input className="lp-input" value={settings.profile.website} onChange={(e) => setProfile({ website: e.target.value })} /></Field>
                 <Field label="物理地址" hint="CAN-SPAM 要求每封信带真实物理地址"><input className="lp-input" value={settings.profile.address} onChange={(e) => setProfile({ address: e.target.value })} /></Field>
-                <Field label="认证 / MOQ / 交期"><input className="lp-input" value={`${settings.profile.certifications} · MOQ ${settings.profile.moq} · ${settings.profile.leadTime}`} onChange={(e) => setProfile({ certifications: e.target.value })} /></Field>
+                <Field label="认证"><input className="lp-input" value={settings.profile.certifications} onChange={(e) => setProfile({ certifications: e.target.value })} /></Field>
+                <Field label="MOQ"><input className="lp-input" value={settings.profile.moq} onChange={(e) => setProfile({ moq: e.target.value })} /></Field>
+                <Field label="交期"><input className="lp-input" value={settings.profile.leadTime} onChange={(e) => setProfile({ leadTime: e.target.value })} /></Field>
                 <Field label="核心优势（每行一条，最多 2 条进信）"><textarea className="lp-input h-20 resize-none" value={settings.profile.advantages.join('\n')} onChange={(e) => setProfile({ advantages: e.target.value.split('\n').filter(Boolean) })} /></Field>
                 <Field label="成功案例"><textarea className="lp-input h-20 resize-none" value={settings.profile.caseStudies} onChange={(e) => setProfile({ caseStudies: e.target.value })} /></Field>
-                <Field label="发件人 / 职位"><input className="lp-input" value={`${settings.profile.senderName} · ${settings.profile.senderTitle}`} onChange={(e) => setProfile({ senderName: e.target.value })} /></Field>
+                <Field label="发件人"><input className="lp-input" value={settings.profile.senderName} onChange={(e) => setProfile({ senderName: e.target.value })} /></Field>
+                <Field label="职位"><input className="lp-input" value={settings.profile.senderTitle} onChange={(e) => setProfile({ senderTitle: e.target.value })} /></Field>
                 <Field label="电话"><input className="lp-input" value={settings.profile.phone} onChange={(e) => setProfile({ phone: e.target.value })} /></Field>
               </div>
               <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-[11px] text-emerald-800">
@@ -153,7 +156,14 @@ export default function SettingsView() {
                   <Button size="sm" disabled={diagLoading} onClick={() => void loadDiagnostics()}><Activity size={12} /> 刷新审计</Button>
                   <span className="text-[11px] text-muted">{gateway?.reason ?? '探测失败时界面明确显示离线，不会伪造在线状态。'}</span>
                 </div>
-                {gateway?.mode !== 'configured' && (
+                {gateway?.mode === 'offline' && (
+                  <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] leading-5 text-rose-800">
+                    <strong>云端服务不可达（offline）</strong>：这既不是 E6005「未配 Key」，也不是 E6008「快照未锁定」。
+                    请先启动 <code>npm run cloud</code> 并确认 {gatewayBaseUrl} 可访问；在此之前界面只显示本地规则估算，未经模型校验，也不会引导你去配 Key。
+                    {gateway.reason && <span className="mt-1 block opacity-80">{gateway.reason}</span>}
+                  </p>
+                )}
+                {gateway && gateway.mode !== 'configured' && gateway.mode !== 'offline' && (
                   <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
                     <strong>{(gateway?.configuredCount ?? 0) > 0 && gateway?.pinnedCount === 0 ? '当前为 E6008 降级模式（快照未锁定）' : '当前为 E6005 降级模式'}</strong>：判断与写信请求不会转发给任何 provider，界面把分数改为区间显示并标注「未经模型校验」。
                     {(gateway?.configuredCount ?? 0) > 0 && gateway?.pinnedCount === 0

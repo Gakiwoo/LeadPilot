@@ -58,7 +58,7 @@
 | 线索来源 | 用户投喂（CSV / JSON）+ 用户指定 URL 抓取，**`origin=user_imported`** |
 | 当前阶段 | `internal_preview`（内测预览） |
 | 评测口径 | `integrity + outcome`（零人工标注）；`accuracyClaim` 恒 `false` |
-| 正式发布 | `releaseEligible` 恒 `false`，Go / No-Go 判据一条未撤 |
+| 正式发布 | `releaseEligible` 恒 `false`；Go / No-Go 第 1 条（数据源合同）与第 3 条（385 标注启动）已由 v0.8.0 决策取消，第 2 / 4 / 5 条继续有效；`npm run gate` 实跑 5 条 `BLOCKED` |
 
 三次用户拍板，均写进代码与门禁：
 
@@ -86,7 +86,7 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict（noUnusedLocals / noUnusedParameters）
-npm test                # 153 个用例 / 8 文件 / 0 skipped（前端 35 + 服务端 118）
+npm test                # 171 个用例 / 9 文件 / 0 skipped（前端 40 + 服务端 131）
 npm run gate            # 发布门禁 54 项自检，输出 releaseBlocked=true
 npm run build           # 类型检查 + 生产构建
 npm run smoke           # 48 项云端端到端冒烟（需先启动 npm run cloud）
@@ -294,7 +294,7 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | 检查 | 结果（v0.9.0） |
 |---|---|
 | `npm run typecheck` / `npm run build` | 通过；版本号从 `package.json` 读取，不再硬编码 |
-| `npm test` | **153 / 153 全绿，0 skipped**（8 文件） |
+| `npm test` | **171 / 171 全绿，0 skipped**（9 文件） |
 | `npm run gate` | **54 / 54 自检通过**，输出 `releaseBlocked=true` |
 | `npm run smoke` | **48 / 48 通过**（隔离端口 5199） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |

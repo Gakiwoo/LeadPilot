@@ -173,6 +173,27 @@ export function assertNoPii(payload) {
   return { ok: violations.length === 0, violations: [...new Set(violations)] }
 }
 
+/**
+ * P1-07：出站前对最终 prompt 全文做一次 PII 终检。
+ * assertNoPii 只查结构化请求体（facts / profile），companyId 之类的字段会原样进 prompt；
+ * 这里是「真正要发给 provider 的文本」的最后一道闸，命中即拒绝出站。
+ */
+export function assertNoPiiInMessages(messages) {
+  const patterns = [
+    /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/,
+    /\+?\d[\d\s().-]{7,}\d/,
+    /\b(?:sk-|Bearer\s+)[A-Za-z0-9_-]{8,}/,
+  ]
+  const hits = []
+  for (const [index, m] of (Array.isArray(messages) ? messages : []).entries()) {
+    const text = String(m?.content ?? '')
+    for (const [pattern, re] of patterns.entries()) {
+      if (re.test(text)) hits.push({ index, role: String(m?.role ?? ''), pattern })
+    }
+  }
+  return { ok: hits.length === 0, hits }
+}
+
 /** PRD F0-6 点数折算；折算率外置在协议文件，模型涨价不用改代码 */
 export function pointCost(usage, tier, searchCalls = 0, provider = null) {
   const rate = provider ?? { inUsdPerM: 0.3, outUsdPerM: 1.2 }
@@ -193,10 +214,24 @@ export function billingPoints(usage, tier, searchCalls = 0, provider = null) {
   return Math.ceil(pointCost(usage, tier, searchCalls, provider))
 }
 
-/** 结果缓存键：同域名 + 同 prompt 版本 + 同一份原文（30 天 TTL 由网关控制） */
-export function cacheKey(domain, sourceTexts) {
+/** 稳定序列化：对象键排序后再散列，避免同一组事实仅因书写顺序不同就生成不同缓存键 */
+function stableStringify(value) {
+  if (value === null || value === undefined || typeof value !== 'object') return JSON.stringify(value ?? null)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`
+}
+
+/**
+ * 结果缓存键：同域名 + 同 prompt/schema 版本 + 同一份原文 + 同一组判断上下文。
+ * P1-03：context 必须包含 facts / keywords / markets / tier 等会改变结论的字段，
+ * 否则同一客户换个事实或路由层级就会命中旧判断（缓存串读）。
+ */
+export function cacheKey(domain, sourceTexts, context = null) {
   const hash = createHash('sha256').update(sourceTexts.join('\n')).digest('hex').slice(0, 16)
-  return `${domain}:${protocol.promptVersion}:${protocol.schemaVersion}:${hash}`
+  const ctx = context == null
+    ? ''
+    : `:ctx:${createHash('sha256').update(stableStringify(context)).digest('hex').slice(0, 16)}`
+  return `${domain}:${protocol.promptVersion}:${protocol.schemaVersion}:${hash}${ctx}`
 }
 
 /**

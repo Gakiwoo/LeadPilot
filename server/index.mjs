@@ -46,6 +46,9 @@ const DEFAULT_SECURITY = {
 export function createApp(opts = {}) {
   const store = opts.store ?? createStore()
   const ledger = opts.ledger ?? createLedger({ store })
+  // P1-06：系统默认账户只在启动时初始化一次（固定账户、幂等），
+  // 之后所有 GET /v1/points 一律纯读，任意 account 查询参数都不会开户写流水。
+  ledger.state()
   // v0.6.0：把同一个账本实例注入网关，judge / write_email 才产生真实预扣/结算；
   // 独立创建的网关（部分单测）没有 ledger，仍只产出审计估值并在响应里如实标注。
   const gateway = opts.gateway ?? createGateway({ store, ledger })
@@ -124,17 +127,28 @@ export function createApp(opts = {}) {
     return new Promise((resolve, reject) => {
       let size = 0
       const chunks = []
+      let tooLarge = false
       req.on('data', (c) => {
+        if (tooLarge) return
         size += c.length
-        if (size > MAX_BODY) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return }
+        if (size > MAX_BODY) {
+          // P1-09：不能用 req.destroy()，否则连接被重置，413 的结构化响应根本发不出去。
+          // 丢弃已收数据、排空剩余流，让外层 catch 正常返回 413 E5002。
+          tooLarge = true
+          chunks.length = 0
+          reject(new Error('BODY_TOO_LARGE'))
+          req.resume()
+          return
+        }
         chunks.push(c)
       })
       req.on('end', () => {
+        if (tooLarge) return
         if (!chunks.length) return resolve({})
         try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) }
         catch { reject(new Error('INVALID_JSON')) }
       })
-      req.on('error', reject)
+      req.on('error', (err) => { if (!tooLarge) reject(err) })
     })
   }
 
@@ -325,14 +339,16 @@ export function createApp(opts = {}) {
       if (method === 'GET' && path === '/v1/points') {
         const account = url.searchParams.get('account') ?? undefined
         const refId = url.searchParams.get('refId') ?? undefined
-        const state = ledger.state(account)
+        // P1-06：纯读。此前 ledger.state() 内部 ensureAccount 会为任意 account 参数开户
+        // 并写入 2000 点流水，一个 GET 就能无限膨胀存储；改用 peek 后不存在即返回 exists:false。
+        const state = ledger.peek(account)
         const entries = refId ? ledger.entries(refId, 50) : ledger.allEntries(50)
         return json(res, 200, {
           ...state,
           entries,
           scope: protocol.billing.ledger.scope,
           ledgerConsumers: protocol.billing.ledger.ledgerConsumers,
-          note: '只读接口。账本覆盖云端任务与网关真实调用的预扣/结算/释放；未注入账本的独立网关才只产出审计估值。',
+          note: '纯读接口：不为不存在的账户开户、不写任何流水（exists:false 即零值快照）。账本覆盖云端任务与网关真实调用的预扣/结算/释放；未注入账本的独立网关才只产出审计估值。',
         })
       }
       // ---- v0.7.0 批量 SDR 管道 ------------------------------------------------
@@ -495,7 +511,10 @@ export function createApp(opts = {}) {
       const msg = String(err?.message ?? err)
       if (msg === 'INVALID_JSON') return fail(res, 400, 'E5002', '请求体不是合法 JSON', '序列化失败或内容被截断', '检查请求体格式')
       if (msg === 'BODY_TOO_LARGE') return fail(res, 413, 'E5002', '请求体过大', '超过 256 KB 限制', '压缩或分批提交')
-      return fail(res, 500, 'E5002', '服务内部错误', msg, '查看服务端日志并重试')
+      // P1-08：未预期异常只进服务端日志，绝不把堆栈 / 文件路径 / SQLite 状态回显给调用方
+      // eslint-disable-next-line no-console
+      console.error('[LeadPilot] 未处理的服务端异常：', err)
+      return fail(res, 500, 'E5002', '服务内部错误', '内部错误已记录，不回显堆栈、路径与存储状态', '查看服务端日志并重试')
     }
   })
 

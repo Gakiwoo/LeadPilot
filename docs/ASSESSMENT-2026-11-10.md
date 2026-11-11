@@ -192,3 +192,35 @@
 **修复后全量回归**：`npm test` 8 文件 / **153 用例全绿 / 0 skipped**；`npm run typecheck` exit 0；`npm run gate` **54/54**（`releaseBlocked=true` 不变）；`npm run build` exit 0；`npm run smoke` **48/48**；`npm run verify:restart` **AC-03 全链路 PASS**；P0-1 / P0-2 活体转负例通过。README 两处测试数量已同步为 153，避免制造新的文档不一致。
 
 **残余风险（属 B2）**：DNS 重绑定目前靠「连接前二次解析」缓解，彻底消除需把连接 pin 到已验证 IP（自定义 dispatcher / lookup），并补 robots 3xx 逐跳重判。P1 其余各项、29 项 P2、17 项 P3 均未动，按第 8 节 B2/B3 推进。
+
+---
+
+## 12. B2 修复记录（2026-11-11）
+
+**通道修复**：B1 提交 `4bccea9` 的 HTTPS push 被代理污染（`info/refs` 返回 `OK\r\n`，git 报 `not valid`）。改用已验证可用的 SSH over 443 推送成功，并把 `origin` 切到 `ssh://git@ssh.github.com:443/Gakiwoo/LeadPilot.git`；复核 local / origin / GitHub API 三处 HEAD 一致后才开始 B2。
+
+| 批次 | ID | 修复 |
+|---|---|---|
+| B2-1 计费/缓存 | P1-03 | `cacheKey()` 第三参数纳入 `facts / keywords / markets / tier / country / regionPolicy / t0 版本`（稳定序列化后散列）；旧格式缓存无 `passesGate` 一律失效；命中分支回传 `passesGate / errorCodes / evidenceFields` |
+| | P1-04 | 证据门禁未通过按 `chargeOn = schema_and_content_validation_passed` 走 `releaseBilling`，不 `settle`、不写缓存、不计 provider 成功，如实标 `E6004` 与未扣点 |
+| | P1-05 | `cache.set` 单独 try/catch，落盘失败不再把已结算调用打成异常；`settled` 跟踪异常前是否已结算；所有「已全额释放」文案由 `releaseNote()` 按账本真实状态生成 |
+| | P1-06 | 新增 `ledger.peek()` 纯读（`exists:false` 零值快照），默认账户只在 `createApp` 启动时初始化一次；`GET /v1/points?account=任意值` 不再开户写 2000 点流水 |
+| B2-2 安全 | P1-01 | 新增 `pinnedFetch()`：Node 原生 http/https + 固定 `lookup`，连接 pin 到 SSRF 校验阶段已验证的 IP（Host / TLS SNI 仍用原域名）；B1 的「连接前二次校验」保留作纵深防御 |
+| | P1-02 | `sanitizeCursor()` 白名单收敛 `offset / stageIndex / processedDomains`；`setInterval` 回调包 try/catch，异常只安全暂停任务并发 `task_error`，不再终结进程 |
+| | P1-07 | 新增 `assertNoPiiInMessages()`，对最终 prompt 全文做 PII 终检并前移到 `reserveBilling` 之前，堵住 `companyId` / 未清洗锚点直达 provider 且不留冻结点数 |
+| | P1-08 | 统一 500 模板不再回显 `String(err.message)`，只记服务端日志；网关 judge / write_email 异常文案同样脱敏 |
+| | P1-09 | `readBody` 超限改 `req.resume()` 排空而非 `req.destroy()`，413 `E5002` 结构化响应可达 |
+| B2-3 前端合规与降级 | P1-10 | 演示评分卡不再把合成 `judgement` 喂给 `buildScoreCard`：α 归零、区间显示、置信度低、明确 `DEMO + E6005 降级` 标注；合成判断只作为本地演示证据链保留 |
+| | P1-11 | G2 黑名单/退订接入 `addOutreach` 硬拦；四道闸门接入 `BatchPipelinePanel.doExport` 逐封裁决（G3 入队不拦，服务端 `checkExportGates` 仍是最终闸门） |
+| | P1-12 | `undoStack` 快照 `prevBlacklist / prevLastContactAt`，撤销状态变更时同步回滚副作用 |
+| | P1-13 | 设置页「认证 / MOQ / 交期」「发件人 / 职位」两个复合输入框拆成 5 个独立字段，杜绝拼接值单字段回写污染合规尾巴 |
+| | P1-14 | 新增 `gatewayDiagnosis()` 四态诊断（offline / E6005 / E6008 / ready）；页脚、设置页、`judgeCompany` / `generateEmailWithGateway` 的不可达分支不再误标 E6005 或引导配 Key |
+| | P1-15 | 批次总勾选 `confirmC` 改为 `confirmedC: Record<string, boolean>`，C 级草稿逐条 checkbox，导出按单条 `singleConfirmed` 判定 |
+| | P1-16 | `EmailComposer` 增加 `key={composerCompanyId ?? 'composer-closed'}` 强制重挂载，effect 无条件重置，关闭再打开同一家公司不残留正文/标注 |
+| | P1-17 | README「Go / No-Go 判据一条未撤」改为与 `PM-REVIEW` / gate 一致：第 1/3 条已取消、第 2/4/5 条继续有效、实跑 5 条 `BLOCKED` |
+
+**行为级反例**：共新增 **18 个**（`server/tests/cloud.test.mjs` 11 个、`server/tests/fetch.test.mjs` 2 个、`src/tests/b2-frontend-guard.test.ts` 5 个），覆盖缓存串读、证据失败实扣、释放失败谎报、任意 account 开户、pin 到已验证 IP（本地 server 验证不可解析域名仍连到 pin 地址）、非法 cursor、PII 终检、413、演示评分卡、撤销副作用回滚与 C 级逐条确认语义。
+
+**修复后全量回归**：`npm test` **9 文件 / 171 用例全绿 / 0 skipped**；`npm run typecheck` exit 0；`npm run gate` **54/54**（`releaseBlocked=true` 不变）；`npm run build` exit 0（`349.71 kB / gzip 117.62 kB`）；`npm run smoke` **48/48**；`npm run verify:restart` **AC-03 全链路 PASS**；`npm run validate:baseline -- --self-test` **SELF-TEST PASSED**。README 两处测试数量已同步为 171 / 9 文件。
+
+**残余风险（属 B3）**：第 5 节的 29 项 P2、17 项 P3 均未动，包括 robots 3xx 逐跳重判、token `timingSafeEqual`、每域限速状态跨请求丢失、门禁 `autoTransitions` vs `allowedEvents` 的假保证、其余 9 条文档不一致、干净检出清单漏 21 个源码、a11y 基线、9 张未跟踪旧截图。另：`pinnedFetch` 只作用于默认出站实现，注入式 `fetchImpl`（测试用）仍按原契约工作，不参与生产路径。

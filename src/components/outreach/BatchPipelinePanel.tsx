@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react'
 import { Database, Download, ShieldAlert, Sparkles, Upload } from 'lucide-react'
 import { Badge, Button, Card, SectionTitle } from '@/components/ui'
 import { useAppStore } from '@/store/useAppStore'
+import { checkSendGates } from '@/domain/compliance'
 import {
   importCompanies, runJudgeBatch, exportDrafts, getBatchHealth,
   fetchCompanySources, buildComplianceFooter, downloadMbox,
@@ -34,13 +35,18 @@ export default function BatchPipelinePanel() {
     postalAddress: profile.address ?? '',
     unsubscribe: "Reply STOP and I won't contact you again (unsubscribe / 退订)",
   })
-  const [confirmC, setConfirmC] = useState(false)
+  // P1-15：C 级必须逐条人工确认，一个总复选框不能代表「singleConfirmed」
+  const [confirmedC, setConfirmedC] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [imported, setImported] = useState<BatchImportResult | null>(null)
   const [fetched, setFetched] = useState<BatchFetchSourcesResult | null>(null)
   const [judged, setJudged] = useState<BatchJudgeResult | null>(null)
   const [exported, setExported] = useState<ExportDraftsResult | null>(null)
   const [health, setHealth] = useState<BatchState | null>(null)
+
+  const drafts = outreach.filter((o) => o.status === 'draft' || o.status === 'queued')
+  const cDrafts = drafts.filter((o) =>
+    (companies.find((x) => x.id === o.companyId)?.contacts[0]?.grade ?? 'D') === 'C')
 
   const refresh = () => { void getBatchHealth().then(setHealth) }
   useEffect(refresh, [])
@@ -79,21 +85,37 @@ export default function BatchPipelinePanel() {
 
   async function doExport() {
     if (!identityReady) { showToast('请先补全发件人身份（姓名 / 邮箱 / 公司 / 物理地址），合规尾巴不能为空', 'warn'); return }
-    const drafts = outreach.filter((o) => o.status === 'draft' || o.status === 'queued')
     if (!drafts.length) { showToast('草稿队列为空，先在客户详情生成开发信', 'warn'); return }
-    const items: ExportDraftItem[] = drafts.map((o) => {
+    // P1-11：四道闸门接进导出动作链，不只做展示。G3 是「入队而非丢弃」，不拦导出；
+    // G1/G2/G4 与 C 级逐条确认在此逐封裁决，服务端 checkExportGates 仍是最终闸门。
+    const items: ExportDraftItem[] = []
+    const rejected: string[] = []
+    for (const o of drafts) {
       const c = companies.find((x) => x.id === o.companyId)
       const contact = c?.contacts[0]
       const grade = (contact?.grade ?? 'D') as ExportDraftItem['grade']
+      const gates = contact ? checkSendGates({
+        contact, blacklist: settings.blacklist,
+        sentToday: settings.gmail.sentToday, dailyLimit: settings.gmail.dailyLimit,
+        bounceRate: 0, consecutiveHardBounces: 0,
+        singleConfirmed: grade === 'C' ? Boolean(confirmedC[o.id]) : true,
+      }) : null
+      const hard = gates?.failed.filter((f) => f.gate !== 'G3') ?? []
+      if (!contact || hard.length) {
+        rejected.push(`${c?.domain ?? o.companyId}：${contact ? hard.map((f) => `${f.gate} ${f.message}`).join('；') : '没有可用联系人'}`)
+        continue
+      }
       // 客户端已注入过合规尾巴，这里拆开后用本面板的显式身份重新拼装，避免重复尾巴
       const body = (o.bodyText.split('\n--\n')[0] ?? o.bodyText).trim()
-      return {
-        domain: c?.domain ?? '', to: contact?.value ?? '',
+      items.push({
+        domain: c?.domain ?? '', to: contact.value,
         subject: o.subject, body, grade,
-        confirmed: grade === 'C' ? confirmC : true,
+        confirmed: grade === 'C' ? Boolean(confirmedC[o.id]) : true,
         sender, footer,
-      }
-    })
+      })
+    }
+    if (rejected.length) showToast(`${rejected.length} 封被四道闸门拦下：${rejected[0]}`, 'warn')
+    if (!items.length) { showToast('没有可导出的草稿：全部被四道闸门拦截', 'warn'); return }
     setBusy('export')
     const r = await exportDrafts({ items })
     setExported(r); setBusy(null); refresh()
@@ -189,10 +211,22 @@ export default function BatchPipelinePanel() {
                 placeholder={label} className="lp-input h-7 text-[10px]" />
             ))}
           </div>
-          <label className="flex items-center gap-1.5 text-[10px] text-slate-700">
-            <input type="checkbox" checked={confirmC} onChange={(e) => setConfirmC(e.target.checked)} />
-            C 级联系人已逐条人工确认（D 级一律禁发）
-          </label>
+          {cDrafts.length > 0 ? (
+            <div className="space-y-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1.5">
+              <p className="text-[10px] font-medium text-amber-800">
+                C 级联系人须逐条人工确认（{cDrafts.filter((o) => confirmedC[o.id]).length}/{cDrafts.length} 已确认；D 级一律禁发）
+              </p>
+              {cDrafts.map((o) => (
+                <label key={o.id} className="flex items-center gap-1.5 text-[10px] text-slate-700">
+                  <input type="checkbox" checked={Boolean(confirmedC[o.id])}
+                    onChange={(e) => setConfirmedC((m) => ({ ...m, [o.id]: e.target.checked }))} />
+                  <span className="truncate">{o.companyId} · {o.subject}</span>
+                </label>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[10px] text-muted">当前草稿队列没有 C 级联系人；D 级一律禁发。</p>
+          )}
           <Button size="sm" variant="primary" disabled={busy === 'export'} onClick={doExport}>
             {busy === 'export' ? '导出中…' : '导出 mbox 草稿'}
           </Button>

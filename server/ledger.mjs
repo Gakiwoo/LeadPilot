@@ -83,9 +83,25 @@ export function createLedger(opts = {}) {
     ledgerConsumers: CFG.ledgerConsumers,
     auditOnlyConsumers: CFG.auditOnlyConsumers,
 
-    /** 只读查询也确保账户已初始化，返回的结构即 /v1/points 的响应体 */
+    /** 内部 / 写路径使用：确保账户已初始化（会开户并写初始额度流水） */
     state(account = DEFAULT_ACCOUNT) {
       return store.ledgerTransact(() => stateOf(ensureAccount(String(account))))
+    },
+
+    /**
+     * P1-06：对外只读查询。绝不调用 ensureAccount 开户、绝不写 grant 流水，
+     * 账户不存在时返回 exists:false 的零值快照，避免 GET /v1/points?account=任意值 无限膨胀存储。
+     */
+    peek(account = DEFAULT_ACCOUNT) {
+      const name = String(account)
+      const rec = readAccount(name)
+      if (!rec) {
+        return {
+          account: name, granted: 0, held: 0, spent: 0, available: 0,
+          ledgerVersion: LEDGER_VERSION, persistence: store.mode, exists: false,
+        }
+      }
+      return { ...stateOf(rec), exists: true }
     },
 
     /**

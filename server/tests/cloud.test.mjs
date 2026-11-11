@@ -1820,3 +1820,239 @@ describe('P0-1 · 畸形请求不得终结服务进程', () => {
     }
   })
 })
+
+describe('B2 · 计费与缓存 P1 行为级反例', () => {
+  const fakeEvidence = { quote: 'QUOTE-NOT-IN-ANY-SOURCE-TEXT', source_url: 'https://x.example/about', fetched_at: '2026-11-06' }
+  const forgedWire = () => wire({
+    customer_type: { ...wire().customer_type, evidence: [fakeEvidence] },
+    import_signal: { ...wire().import_signal, evidence: [fakeEvidence] },
+    size_estimate: { ...wire().size_estimate, evidence: [fakeEvidence] },
+  })
+  const makeGateway = (extra = {}) => createGateway({
+    env: testEnv({ DEEPSEEK_API_KEY: 'k' }),
+    fetchImpl: extra.fetchImpl ?? okFetch(wire()),
+    sleep: async () => {},
+    now: () => 1_700_000_000_000,
+    ...extra,
+  })
+
+  it('P1-03 · 同域名同原文但 facts / keywords / markets / tier 变化不得命中旧判断', async () => {
+    let calls = 0
+    const g = makeGateway({ fetchImpl: async () => { calls++; return okFetch(wire())() } })
+    const first = await g.judge(judgeInput())
+    expect(first.ok).toBe(true)
+    const same = await g.judge(judgeInput())
+    expect(same.cached).toBe(true)
+    expect(calls).toBe(1)
+
+    const changedFacts = await g.judge(judgeInput({ facts: { keywordHits: [{ term: 'brass adapters', count: 3 }] } }))
+    const changedKeywords = await g.judge(judgeInput({ keywords: ['brass adapters'] }))
+    const changedMarkets = await g.judge(judgeInput({ markets: ['法国'] }))
+    const changedTier = await g.judge(judgeInput({ confidence: 0.2 }))
+    expect(changedFacts.cached).not.toBe(true)
+    expect(changedKeywords.cached).not.toBe(true)
+    expect(changedMarkets.cached).not.toBe(true)
+    expect(changedTier.tier).toBe('T2')
+    expect(changedTier.cached).not.toBe(true)
+    expect(g.getCacheStats().entries).toBeGreaterThanOrEqual(4)
+  })
+
+  it('P1-03 · 命中缓存仍回传门禁状态；未过门禁的判断绝不进缓存', async () => {
+    const good = makeGateway()
+    await good.judge(judgeInput())
+    const hit = await good.judge(judgeInput())
+    expect(hit.cached).toBe(true)
+    expect(hit.passesGate).toBe(true)
+    expect(hit.errorCodes).toEqual([])
+    expect(hit.evidenceFields).not.toBeNull()
+    expect(hit.billing).toMatchObject({ charged: false, reason: 'cache_hit' })
+
+    let forgedCalls = 0
+    const bad = makeGateway({ fetchImpl: async () => { forgedCalls++; return okFetch(forgedWire())() } })
+    const r1 = await bad.judge(judgeInput())
+    const r2 = await bad.judge(judgeInput())
+    expect(r1.passesGate).toBe(false)
+    expect(r1.errorCodes).toContain('E6004')
+    expect(r1.cached).toBe(false)
+    expect(r2.cached).not.toBe(true)
+    expect(forgedCalls).toBe(2)
+    expect(bad.getCacheStats().entries).toBe(0)
+  })
+
+  it('P1-04 · 证据门禁失败全额释放预扣：零实扣、流水无 settle、余额回到起点', async () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    const g = makeGateway({ store, ledger, fetchImpl: okFetch(forgedWire()) })
+    const before = ledger.state().available
+    const r = await g.judge(judgeInput({ requestId: 'p104-evidence' }))
+    expect(r.passesGate).toBe(false)
+    expect(r.errorCodes).toContain('E6004')
+    expect(r.billing.charged).toBe(false)
+    expect(r.billing.released).toBe(true)
+    expect(ledger.state()).toMatchObject({ spent: 0, held: 0, available: before })
+    const kinds = ledger.entries('gw:judge:p104-evidence').map((e) => e.kind)
+    expect(kinds).toContain('reserve')
+    expect(kinds).toContain('release')
+    expect(kinds).not.toContain('settle')
+  })
+
+  it('P1-05 · 缓存落盘失败不得把已结算调用打成异常或谎报释放', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const store = createMemoryStore()
+      store.cacheSet = () => { throw new Error('EACCES /data/leadpilot-cache.db SQLITE_CANTOPEN') }
+      const ledger = createLedger({ store, openingBalance: 200 })
+      const g = makeGateway({ store, ledger })
+      const r = await g.judge(judgeInput({ requestId: 'p105-cache-fail' }))
+      expect(r.ok).toBe(true)
+      expect(r.billing.charged).toBe(true)
+      expect(JSON.stringify(r)).not.toContain('已全额释放')
+      expect(g.getAudit().some((a) => a.cacheWriteFailed === true)).toBe(true)
+      const kinds = ledger.entries('gw:judge:p105-cache-fail').map((e) => e.kind)
+      expect(kinds).toEqual(['reserve', 'settle'])
+    } finally { warn.mockRestore() }
+  })
+
+  it('P1-05 / P1-08 · 异常且释放失败时如实说失败，不谎报全额释放、不回显内部路径', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const ledger = {
+        entries: () => [], state: () => ({ available: 200 }),
+        reserve: () => ({ ok: true, held: 10, available: 190 }),
+        settle: () => { throw new Error('SQLITE_BUSY /data/ledger.db line 42') },
+        release: () => ({ ok: false, code: 'E4003', reason: '账本已结算，不允许释放' }),
+      }
+      const g = makeGateway({ ledger })
+      const r = await g.judge(judgeInput({ requestId: 'p105-exception' }))
+      expect(r.ok).toBe(false)
+      expect(r.billing.released).toBe(false)
+      expect(r.reason).toContain('释放失败')
+      expect(r.reason).not.toContain('已全额释放')
+      expect(r.reason).not.toContain('/data/ledger.db')
+      expect(r.reason).not.toContain('SQLITE_BUSY')
+    } finally { warn.mockRestore() }
+  })
+
+  it('P1-06 · GET /v1/points?account=任意值 纯读，不开户不写流水', async () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    const app = createApp({ store, ledger, security: { loopback: true } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    try {
+      const before = ledger.allEntries(500).length
+      const names = ['attacker-1', 'attacker-2', '../../etc/passwd']
+      for (const name of names) {
+        const res = await fetch(`${base}/v1/points?account=${encodeURIComponent(name)}`)
+        const body = await res.json()
+        expect(res.status).toBe(200)
+        expect(body.exists).toBe(false)
+        expect(body.available).toBe(0)
+      }
+      const after = ledger.allEntries(500)
+      expect(after).toHaveLength(before)
+      expect(after.filter((e) => names.includes(e.account))).toHaveLength(0)
+      const dflt = await (await fetch(`${base}/v1/points`)).json()
+      expect(dflt.exists).toBe(true)
+      expect(dflt.available).toBe(200)
+    } finally {
+      await new Promise((resolve) => app.server.close(resolve))
+      app.store.close?.()
+    }
+  })
+})
+
+describe('B2 · 安全 P1 行为级反例', () => {
+  it('P1-02 · resume 注入非法 cursor 被白名单收敛，后续 tick 不崩进程', async () => {
+    const o = createOrchestrator({ store: createMemoryStore(), tickMs: 5 })
+    const t = o.createTask({ keywords: ['fittings'], markets: ['德国'], depth: 1, targetCount: 10 })
+    o.pause(t.id)
+    const resumed = o.resume(t.id, { processedDomains: null, offset: -999, stageIndex: 'evil', evil: 1 })
+    expect(resumed).not.toBeNull()
+    expect(Array.isArray(resumed.cursor.processedDomains)).toBe(true)
+    expect(resumed.cursor.offset).toBeGreaterThanOrEqual(0)
+    expect(resumed.cursor.stageIndex).toBeLessThan(6)
+    expect(resumed.cursor.evil).toBeUndefined()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(o.getTask(t.id)).not.toBeNull()
+    o.dispose()
+  })
+
+  it('P1-02 · tick 回调抛错只安全暂停任务并留痕，不终结进程', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const badSources = {
+        health: () => ({ mode: 'demo', readyCount: 0, total: 6, note: 'test', sources: [] }),
+        planBatch: () => { throw new Error('boom /data/orchestrator.db') },
+      }
+      const o = createOrchestrator({ store: createMemoryStore(), dataSources: badSources, tickMs: 5 })
+      const t = o.createTask({ keywords: ['x'], markets: ['德国'], depth: 1, targetCount: 10 })
+      const events = []
+      o.subscribe(t.id, (e) => events.push(e))
+      await new Promise((r) => setTimeout(r, 40))
+      expect(o.getTask(t.id).status).toBe('paused')
+      expect(JSON.stringify(events)).toContain('task_error')
+      expect(o.getTask(t.id).cursor).toBeTruthy()
+      o.dispose()
+    } finally { logged.mockRestore() }
+  })
+
+  it('P1-07 · companyId 里的邮箱直达 prompt 时被终检拦截：零出站、零预扣', async () => {
+    const store = createMemoryStore()
+    const ledger = createLedger({ store, openingBalance: 200 })
+    let calls = 0
+    const g = createGateway({
+      store, ledger, env: testEnv({ DEEPSEEK_API_KEY: 'k' }),
+      fetchImpl: async () => { calls++; return okFetch(wire())() },
+      sleep: async () => {}, now: () => 1_700_000_000_000,
+    })
+    const r = await g.judge(judgeInput({ companyId: 'purchasing@x.example', requestId: 'p107-pii' }))
+    expect(r.ok).toBe(false)
+    expect(r.errorCodes).toContain('E6004')
+    expect(calls).toBe(0)
+    expect(ledger.state()).toMatchObject({ held: 0, spent: 0 })
+    expect(g.getAudit().some((a) => a.piiBlockedAtPrompt === true)).toBe(true)
+  })
+
+  it('P1-08 · 未预期内部异常只给固定文案，不回显路径 / SQLite 状态', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const real = createGateway({ env: {} })
+    const throwing = { ...real, judge: async () => { throw new Error('SQLITE_CANTOPEN /data/secret.db line 42') } }
+    const app = createApp({ store: createMemoryStore(), gateway: throwing, security: { loopback: true } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    try {
+      const res = await fetch(`http://127.0.0.1:${app.server.address().port}/v1/judge`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ companyId: 'c_1', sourceTexts: ['x'] }),
+      })
+      expect(res.status).toBe(500)
+      const body = await res.json()
+      expect(body.code).toBe('E5002')
+      expect(JSON.stringify(body)).not.toContain('/data/secret.db')
+      expect(JSON.stringify(body)).not.toContain('SQLITE_CANTOPEN')
+      expect(body.why).toContain('不回显')
+    } finally {
+      await new Promise((resolve) => app.server.close(resolve))
+      app.store.close?.()
+      logged.mockRestore()
+    }
+  })
+
+  it('P1-09 · 超过 256 KB 返回结构化 413 E5002，而不是连接重置', async () => {
+    const app = createApp({ store: createMemoryStore(), security: { loopback: true } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    try {
+      const big = JSON.stringify({ blob: 'x'.repeat(300 * 1024) })
+      const res = await fetch(`http://127.0.0.1:${app.server.address().port}/v1/judge`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: big,
+      })
+      expect(res.status).toBe(413)
+      const body = await res.json()
+      expect(body.code).toBe('E5002')
+      expect(body.what).toContain('请求体过大')
+    } finally {
+      await new Promise((resolve) => app.server.close(resolve))
+      app.store.close?.()
+    }
+  })
+})

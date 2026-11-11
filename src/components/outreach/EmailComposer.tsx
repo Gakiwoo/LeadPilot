@@ -27,7 +27,7 @@ export default function EmailComposer({ company, onClose }: { company: Company |
   const [gatewayNote, setGatewayNote] = useState('')
 
   useEffect(() => {
-    if (!company) return
+    // P1-16：company 被关闭（null）时也必须清空，否则同公司重开会残留上一轮正文与标注
     setMails([]); setEdited(''); setRegens(0); setActive(0)
     setGenerating(false); setSource('local'); setGatewayNote('')
   }, [company?.id]) // eslint-disable-line react-hooks/exhaustive-deps

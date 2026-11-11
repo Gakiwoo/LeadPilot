@@ -236,13 +236,25 @@ export async function probeGateway(): Promise<GatewayHealth> {
   }
 }
 
+/**
+ * P1-14 · 三元诊断：offline（服务不可达）/ E6005（未配 provider）/ E6008（已配 Key 但未锁快照）/ ready。
+ * 三者根因与处置动作完全不同，绝不能把「服务没启动」误标成「没配 Key」去引导用户配 Key。
+ */
+export type GatewayDiagnosis = 'offline' | 'no_provider' | 'snapshot_unlocked' | 'ready'
+export function gatewayDiagnosis(health: GatewayHealth | null): GatewayDiagnosis {
+  if (!health || !health.online || health.mode === 'offline') return 'offline'
+  if (health.configuredCount > 0 && health.pinnedCount === 0) return 'snapshot_unlocked'
+  if (health.readyCount === 0) return 'no_provider'
+  return 'ready'
+}
+
 export async function judgeCompany(input: JudgeInput): Promise<JudgeResponse> {
   try {
     return await jsonFetch<JudgeResponse>('/v1/judge', { method: 'POST', body: JSON.stringify(input) }, 35000)
   } catch {
     return {
-      ok: false, degraded: true, errorCodes: ['E6005'],
-      reason: '云端网关不可达：本次为规则估算，未经模型校验。请确认服务已启动。',
+      ok: false, degraded: true, errorCodes: [],
+      reason: '云端服务未启动或不可达（offline）：本次为规则估算，未经模型校验。这不属于 E6005 未配 Key，也不属于 E6008 未锁快照；请先启动 npm run cloud。',
     }
   }
 }
@@ -297,8 +309,8 @@ export async function generateEmailWithGateway(input: EmailGenerateInput): Promi
     }, 35000)
   } catch {
     return {
-      ok: false, degraded: true, errorCodes: ['E6005'],
-      reason: '云端网关不可达：本次不生成模型正文，已回退本地确定性模板。',
+      ok: false, degraded: true, errorCodes: [],
+      reason: '云端服务未启动或不可达（offline，不是 E6005/E6008）：本次不生成模型正文，已回退本地确定性模板。请先启动 npm run cloud。',
     }
   }
 }

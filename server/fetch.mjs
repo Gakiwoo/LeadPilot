@@ -17,6 +17,8 @@
  */
 import { lookup } from 'node:dns/promises'
 import { createHash } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { protocol, sanitizeContext } from './protocol.mjs'
 
 const P = protocol.fetchPolicy
@@ -304,6 +306,60 @@ function contentTypeBase(headers) {
   return String(raw).split(';')[0].trim().toLowerCase()
 }
 
+/* ------------------------- P1-01 · 连接 pin 到已验证 IP（彻底消除 DNS 重绑定） ------------------------- */
+
+/** lookup 只返回 SSRF 校验阶段已验证过的公网地址，连接阶段不再做第二次 DNS 解析 */
+function pinnedLookup(addresses) {
+  const list = addresses.map((a) => ({ address: String(a.address), family: Number(a.family) === 6 ? 6 : 4 }))
+  return (_hostname, options, cb) => {
+    if (!list.length) return cb(new Error('SSRF pin 缺失：没有已验证的公网地址'))
+    if (options?.all) return cb(null, list)
+    const family = Number(options?.family ?? 0)
+    const pick = list.find((a) => !family || a.family === family) ?? list[0]
+    return cb(null, pick.address, pick.family)
+  }
+}
+
+/**
+ * 默认出站实现：Node 原生 http/https + 固定 lookup，返回标准 Response。
+ * hostname 仍是原域名（Host 头与 TLS SNI 不变、证书校验正常），只有解析结果被锁死；
+ * B1 的「连接前二次校验」保留作纵深防御，但连接本身已不再受 DNS 重绑定影响。
+ */
+export function pinnedFetch(url, init = {}, addresses = [], timeoutMs = 10000) {
+  if (!addresses.length) return globalThis.fetch(url, init)
+  const u = new URL(url)
+  const request = u.protocol === 'https:' ? httpsRequest : httpRequest
+  return new Promise((resolve, reject) => {
+    const req = request({
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: `${u.pathname}${u.search}`,
+      method: init?.method ?? 'GET',
+      headers: { ...(init?.headers ?? {}), host: u.host },
+      servername: u.protocol === 'https:' ? u.hostname : undefined,
+      lookup: pinnedLookup(addresses),
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        const headers = new Headers()
+        for (const [k, v] of Object.entries(res.headers ?? {})) {
+          if (v === undefined) continue
+          try { headers.set(k, Array.isArray(v) ? v.join(', ') : String(v)) } catch { /* 忽略非法响应头 */ }
+        }
+        const status = Number(res.statusCode ?? 502)
+        const hasBody = ![204, 205, 304].includes(status)
+        resolve(new Response(hasBody ? Buffer.concat(chunks) : null, { status, headers }))
+      })
+      res.on('error', reject)
+    })
+    req.on('timeout', () => req.destroy(new Error(`抓取超时（${timeoutMs}ms）`)))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
 /**
  * 创建抓取器。所有外部依赖可注入，测试无需联网：
  *  - fetchImpl(url, init) -> Response（默认 globalThis.fetch）
@@ -311,7 +367,12 @@ function contentTypeBase(headers) {
  *  - now() / sleep(ms) 用于限速与 robots 缓存
  */
 export function createFetcher(opts = {}) {
-  const fetchImpl = opts.fetchImpl ?? ((...args) => globalThis.fetch(...args))
+  const injectedFetch = opts.fetchImpl ?? null
+  // 默认走固定 lookup 的 pinnedFetch；测试注入的 fetchImpl 仍按 (url, init) 工作，
+  // 第三个参数多传的「已验证地址列表」不影响既有断言，但可被新的行为级反例捕获。
+  const doFetch = (url, init, addresses, timeoutMs) => injectedFetch
+    ? injectedFetch(url, init, addresses)
+    : pinnedFetch(url, init, addresses, timeoutMs)
   const resolveHost = opts.resolveHost
   const now = opts.now ?? (() => Date.now())
   const sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
@@ -345,12 +406,12 @@ export function createFetcher(opts = {}) {
       return { status: 'ssrf-blocked', groups: [], allowAll: false, note: `robots.txt 主机校验未通过：${hostCheck.reason}` }
     }
     try {
-      const res = await fetchImpl(robotsUrl.href, {
+      const res = await doFetch(robotsUrl.href, {
         method: 'GET',
         redirect: 'manual',
         signal: AbortSignal.timeout(Math.min(L.timeoutMs, 5000)),
         headers: { 'user-agent': P.robots.userAgent, accept: 'text/plain' },
-      })
+      }, hostCheck.addresses, Math.min(L.timeoutMs, 5000))
       if (res.status === 404 || res.status === 410) return { status: 'missing', groups: [], allowAll: true }
       if (res.status === 401 || res.status === 403) return { status: 'forbidden', groups: [], allowAll: false, note: `robots.txt HTTP ${res.status}，视为禁止` }
       if (!res.ok) return { status: 'unavailable', groups: [], allowAll: true, note: `robots.txt HTTP ${res.status}，无法判定，按放行处理并标注` }
@@ -382,7 +443,7 @@ export function createFetcher(opts = {}) {
       }
       let res
       try {
-        res = await fetchImpl(current.href, {
+        res = await doFetch(current.href, {
           method: 'GET',
           redirect: 'manual',
           signal: AbortSignal.timeout(L.timeoutMs),
@@ -391,7 +452,7 @@ export function createFetcher(opts = {}) {
             accept: P.allowedContentTypes.join(', '),
             'accept-language': 'en,zh-CN;q=0.8',
           },
-        })
+        }, recheck.addresses, L.timeoutMs)
       } catch (err) {
         return fail('E4012', `抓取失败：${String(err?.message ?? err)}`, { redirects: chain })
       }
