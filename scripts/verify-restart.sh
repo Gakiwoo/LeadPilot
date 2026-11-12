@@ -32,12 +32,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 干净检出终验（2026-11-12）发现：开发机若设置了 http_proxy / HTTP_PROXY，curl 会把
+# 127.0.0.1 的探活也转发给代理，代理回 502，脚本误判「服务启动失败」——CI 无代理所以一直绿。
+# 这里显式绕过代理：探活目标永远是本机回环，没有任何理由走代理。
 start_server() {
   LEADPILOT_PORT="${PORT}" LEADPILOT_DB_PATH="${DB}" node "${ROOT}/server/index.mjs" > "${LOG}" 2>&1 &
   PID=$!
   local i
   for i in $(seq 1 30); do
-    if curl -fsS -m 1 "${BASE}/health" > /dev/null 2>&1; then
+    if curl --noproxy '*' -fsS -m 1 "${BASE}/health" > /dev/null 2>&1; then
       echo "[restart-verify] 服务就绪（${i}s）"
       return 0
     fi
