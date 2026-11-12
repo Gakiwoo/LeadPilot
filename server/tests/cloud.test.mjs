@@ -583,6 +583,80 @@ describe('HTTP 安全边界 · 鉴权 / CORS / 限流', () => {
     } finally { await s.close() }
   })
 
+  // 待验证假设 #2（评估报告第 9 节）：旧实现 `if (!sec.token) return sec.loopback`，
+  // 只看静态监听地址。Nginx proxy_pass 到 127.0.0.1:5181 时 socket / 监听都还是回环，
+  // 于是公网流量对全部 /v1/* 免鉴权。下面用真实 HTTP 请求把这个拓扑复现成负例。
+  it('待验证假设 #2 · 带代理标记的请求不再享受本机免鉴权（fail-closed）', async () => {
+    const s = await start({
+      gateway: bareGateway(),
+      security: { token: '', loopback: true, cors: ['http://127.0.0.1:5180'], rateLimit: 100 },
+    })
+    try {
+      const direct = await fetch(`${s.base}/v1/gateway/health`)
+      expect(direct.status).toBe(200) // 本机直连仍免鉴权，不能误伤开发体验
+
+      for (const header of [
+        { 'x-forwarded-for': '203.0.113.9' },
+        { 'x-real-ip': '203.0.113.9' },
+        { forwarded: 'for=203.0.113.9' },
+        { via: '1.1 nginx' },
+        { 'x-forwarded-proto': 'https' },
+      ]) {
+        const proxied = await fetch(`${s.base}/v1/gateway/health`, { headers: header })
+        expect(proxied.status, JSON.stringify(header)).toBe(401)
+        const body = await proxied.json()
+        expect(body.code).toBe('E6009')
+        expect(JSON.stringify(body)).toContain('代理')
+      }
+
+      // 伪造代理头 + 乱填凭据都不会绕过；无 token 时唯一正解是配置 token
+      const forged = await fetch(`${s.base}/v1/gateway/health`, {
+        headers: { 'x-forwarded-for': '127.0.0.1', authorization: 'Bearer anything' },
+      })
+      expect(forged.status).toBe(401)
+
+      const h = await (await fetch(`${s.base}/health`)).json()
+      expect(h.security.proxyAware).toBe(true)
+      expect(h.security.note).toContain('反向代理')
+    } finally { await s.close() }
+  })
+
+  it('代理只改 Host、不加 X-* 头时，仍识别为对外暴露', async () => {
+    const s = await start({
+      gateway: bareGateway(),
+      security: { token: '', loopback: true, cors: ['http://127.0.0.1:5180'], rateLimit: 100 },
+    })
+    try {
+      const port = Number(new URL(s.base).port)
+      const raw = await new Promise((resolve, reject) => {
+        const socket = connect(port, '127.0.0.1', () => {
+          socket.write('GET /v1/gateway/health HTTP/1.1\r\nHost: leadpilot.example.com\r\nConnection: close\r\n\r\n')
+        })
+        let buf = ''
+        socket.on('data', (c) => { buf += c.toString() })
+        socket.on('end', () => resolve(buf))
+        socket.on('error', reject)
+      })
+      expect(raw).toMatch(/^HTTP\/1\.1 401/)
+      expect(raw).toContain('E6009')
+    } finally { await s.close() }
+  })
+
+  it('反向代理拓扑下配好 token 即正常工作：Bearer + 代理标记可共存', async () => {
+    const s = await start({
+      gateway: bareGateway(),
+      security: { token: 'proxy-token', loopback: true, cors: ['http://127.0.0.1:5180'], rateLimit: 100 },
+    })
+    try {
+      const denied = await fetch(`${s.base}/v1/gateway/health`, { headers: { 'x-forwarded-for': '203.0.113.9' } })
+      expect(denied.status).toBe(401)
+      const ok = await fetch(`${s.base}/v1/gateway/health`, {
+        headers: { 'x-forwarded-for': '203.0.113.9', authorization: 'Bearer proxy-token' },
+      })
+      expect(ok.status).toBe(200)
+    } finally { await s.close() }
+  })
+
   it('超过限流阈值返回 429 + E6010，并带 Retry-After', async () => {
     const s = await start({
       gateway: bareGateway(),

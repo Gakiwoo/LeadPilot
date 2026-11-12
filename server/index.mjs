@@ -50,6 +50,37 @@ const DEFAULT_SECURITY = {
 const RATE_TABLE_MAX = 4096
 
 /**
+ * 待验证假设 #2（本次核查确认为真缺口）：
+ * 旧实现在无 token 时直接 `return sec.loopback`，只看「监听地址」这个静态事实。
+ * 反向代理把公网流量 proxy_pass 到 127.0.0.1:5181 时，socket 仍是回环、监听仍是回环，
+ * 于是全部 /v1/* 对外免鉴权——「本机」这个概念被代理拓扑放大了。
+ *
+ * 修正：免鉴权必须同时满足「回环监听 + 回环对端 + 没有任何代理标记」。
+ * 这里只判断标记头是否**存在**，绝不信任头里的 IP 值：伪造这些头只会让自己被要求
+ * token（fail-closed），不可能用来绕过鉴权。
+ */
+const PROXY_MARKER_HEADERS = [
+  'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port',
+  'x-real-ip', 'forwarded', 'via',
+]
+
+function loopbackPeer(req) {
+  const addr = String(req.socket?.remoteAddress ?? '').toLowerCase()
+  return LOOPBACK_HOSTS.has(addr)
+    || addr === '::ffff:127.0.0.1'
+    || addr.startsWith('::ffff:127.')
+    || addr.startsWith('127.')
+}
+
+function looksProxied(req) {
+  const headers = req.headers ?? {}
+  if (PROXY_MARKER_HEADERS.some((k) => String(headers[k] ?? '').trim().length > 0)) return true
+  // Host 指向非本机名字，说明请求是经域名 / 反代暴露进来的
+  const host = String(headers.host ?? '').split(':')[0].toLowerCase().replace(/^\[|\]$/g, '')
+  return host.length > 0 && !LOOPBACK_HOSTS.has(host) && host !== '::1'
+}
+
+/**
  * P2 · 令牌恒定时间比较：先做等长 SHA-256 摘要再比较。
  * 直接 timingSafeEqual(Buffer.from(a), Buffer.from(b)) 在长度不等时会抛 RangeError
  * （把 401 变成 500），且逐字符比较会泄漏前缀；摘要后两者都消失。
@@ -146,9 +177,10 @@ export function createApp(opts = {}) {
       loopback: sec.loopback,
       cors: sec.cors,
       corsWildcardRejected,
+      proxyAware: true,
       rateLimitPerMinute: sec.rateLimit,
       rateTable: rateLimiter.stats(),
-      note: '仅本机回环且未设置令牌时免鉴权；对外监听必须配置 LEADPILOT_API_TOKEN；CORS 通配 * 在任何模式下都不回显，会被剔除为显式白名单。',
+      note: '无令牌时仅「本机直连」免鉴权：需回环监听 + 回环对端 + 无代理标记头；经反向代理 / Nginx 暴露必须设置 LEADPILOT_API_TOKEN，CORS 通配 * 在任何模式下都会被剔除。',
     }
   }
 
@@ -165,9 +197,12 @@ export function createApp(opts = {}) {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   }
 
-  /** 本地回环默认免鉴权；一旦设置 token 或非本机部署，必须携带有效令牌 */
+  /**
+   * 本地回环默认免鉴权，但只限「浏览器直连本机」：
+   * 设了 token 一律校验；未设 token 而请求带代理标记 / 非回环对端，一律要求 token。
+   */
   function authOk(req) {
-    if (!sec.token) return sec.loopback
+    if (!sec.token) return sec.loopback && loopbackPeer(req) && !looksProxied(req)
     const bearer = String(req.headers?.authorization ?? '')
     const supplied = bearer.startsWith('Bearer ') ? bearer.slice(7) : String(req.headers?.['x-leadpilot-token'] ?? '')
     // P2 · 恒定时间比较（等长摘要），不按字符短路、不泄漏令牌长度差异
@@ -262,7 +297,14 @@ export function createApp(opts = {}) {
       }
       // /health 供探活与前端启动探测，其余 /v1/* 全部要求鉴权（配置了 token 或对外监听时）
       if (!(method === 'GET' && path === '/health') && !authOk(req)) {
-        return fail(res, 401, 'E6009', '访问令牌缺失或无效', '服务端要求携带有效令牌', '在请求头加 Authorization: Bearer <LEADPILOT_API_TOKEN>')
+        const proxied = !sec.token && looksProxied(req)
+        return fail(res, 401, 'E6009', '访问令牌缺失或无效',
+          proxied
+            ? '请求带有反向代理标记，本机免鉴权不适用于经代理暴露的流量'
+            : '服务端要求携带有效令牌',
+          proxied
+            ? '经反向代理 / Nginx 暴露时，必须设置 LEADPILOT_API_TOKEN 并由客户端携带该令牌'
+            : '在请求头加 Authorization: Bearer <LEADPILOT_API_TOKEN>')
       }
 
       if (method === 'GET' && path === '/health') {
@@ -622,6 +664,10 @@ if (isDirectRun) {
     const p = ledger.health()
     // eslint-disable-next-line no-console
     console.log(`[LeadPilot] cloud API http://${HOST}:${PORT} · providers ${h.readyCount}/${h.totalProviders} ready (${h.configuredCount} keys / ${h.pinnedCount} pinned) · mode=${h.mode} · security=${API_TOKEN ? 'token' : 'local-open'} · persistence=${store.mode} · ledger=${p.available}/${p.granted} available (${p.held} held / ${p.spent} spent)`)
+    if (IS_LOOPBACK && !API_TOKEN) {
+      // eslint-disable-next-line no-console
+      console.warn('[LeadPilot] SECURITY_NOTICE: 免鉴权仅对「浏览器直连本机」生效；若经反向代理 / Nginx 对外暴露，必须设置 LEADPILOT_API_TOKEN，否则代理流量会被 401 E6009 拒绝。')
+    }
   })
   const shutdown = () => server.close(() => { store.close(); process.exit(0) })
   process.on('SIGINT', shutdown)

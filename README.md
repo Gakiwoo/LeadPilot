@@ -18,6 +18,7 @@
 ## 界面预览
 
 > 以下 5 张全部是本机 **v0.9.0 + B3 定稿代码实际运行渲染**（Chrome headless / CDP，1600×1000 @1x），不是设计稿、不是合成图；UI 文案或可访问性改动后会重新捕获。
+> 可复现：启动 `npm run dev` 后执行 `npm run capture:screenshots`（脚本 [`scripts/capture-screenshots.mjs`](scripts/capture-screenshots.mjs) 已入仓库，用 Node 22 原生 WebSocket 直连 CDP 实际操作导航，不依赖 Puppeteer / Playwright）；Chrome 路径可用 `LEADPILOT_CHROME` 指定。
 > 列表里的 48 家公司是演示数据（`demo: true`），页面常驻 DEMO 提示条（全站常驻 + 页内专项）；截图时网关未配 API Key，
 > 处于 `E6005` 显式降级态 —— 这是如实状态，不是坏图。原始文件见 [`docs/screenshots/`](docs/screenshots/)。
 
@@ -86,7 +87,7 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict + noUncheckedIndexedAccess（索引访问必须显式判空）
-npm test                # 199 个用例 / 10 文件 / 0 skipped（前端 46 + 服务端 153）
+npm test                # 202 个用例 / 10 文件 / 0 skipped（前端 46 + 服务端 156）
 npm run gate            # 发布门禁 60 项自检，输出 releaseBlocked=true
 npm run check:tracked   # 干净检出全量校验：src/server/shared/scripts 与 git ls-files 对账
 npm run build           # 类型检查 + 生产构建
@@ -177,6 +178,7 @@ flowchart LR
 ## 云端 API
 
 `/health` 为探活保留无鉴权；其余 `/v1/*` 在启用 token 或对外监听时一律要求 `Authorization: Bearer <token>`。
+**反向代理部署必须配 token**：无 token 时免鉴权只认「浏览器直连本机」——回环监听 + 回环对端 + 无任何代理标记头（`X-Forwarded-*` / `X-Real-IP` / `Forwarded` / `Via`）且 Host 为 localhost/127.0.0.1。经 Nginx `proxy_pass` 暴露的流量会被 401 `E6009` 明确拒绝，不会因「socket 看起来是回环」而放行（见评估报告假设 #2）。
 因为 `EventSource` 不能带 Authorization，前端改用 `fetch` 流式读取 SSE 帧，**绝不把 token 拼进 query**。
 
 核心端点：
@@ -295,9 +297,10 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | 检查 | 结果（v0.9.0） |
 |---|---|
 | `npm run typecheck` / `npm run build` | 通过；`strict` + `noUncheckedIndexedAccess` 双开，门禁静态锁死；`/health.version` 与侧栏版本号均从 `package.json` 读取，不再硬编码；生产构建 353.78 kB / gzip 119.45 kB |
-| `npm test` | **199 / 199 全绿，0 skipped**（10 文件；前端 46 + 服务端 153） |
+| `npm test` | **202 / 202 全绿，0 skipped**（10 文件；前端 46 + 服务端 156） |
 | `npm run gate` | **60 / 60 自检通过**，输出 `releaseBlocked=true` 与 5 条 `BLOCKED` |
-| `npm run check:tracked` | **60 个源码/配置全部纳入版本控制**，83 个 tracked 文件无缺失 |
+| `npm run check:tracked` | **61 个源码/配置全部纳入版本控制**，84 个 tracked 文件无缺失 |
+| `npm run capture:screenshots` | 5 张 README 截图可由仓库内脚本重生成（Chrome headless / CDP，1600×1000） |
 | `npm run smoke` | **48 / 48 通过**（默认端口 5181，需先启动 `npm run cloud`） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
@@ -306,6 +309,7 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。
 历史专项（v0.6.0–v0.8.0，仍全绿）：网关计费 9 个单测、评测 diff 8 个单测、并发队列 FIFO 与硬超时、批量管道 8 个单测、integrity / outcome 6 个单测。
 启动前置安全（已自动化，不再是一次性人工验证）：`server/tests/startup-security.test.mjs` 用真实子进程断言 `HOST=0.0.0.0` 无 token / `CORS=*` 必须 `exit(1)`；`server/tests/cloud.test.mjs` 断言启用 token 后 401 `E6009` / Bearer 200 / 非白名单 Origin 不回显 / 回环下 `CORS=*` 不回显通配。
+反向代理鉴权（评估报告假设 #2，曾是真缺口）：`server/tests/cloud.test.mjs` 3 个行为级反例覆盖 5 种代理标记头、伪造头 + 乱填凭据、只改 Host、以及「配好 token 后代理流量正常工作」；活体复现：直连 200、`X-Forwarded-For` 401 `E6009`、非本机 Host 401。
 
 <details>
 <summary>已踩过的坑（改代码前建议看一眼）</summary>

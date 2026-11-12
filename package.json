@@ -12,6 +12,7 @@
     "validate:baseline": "node scripts/validate-baseline.mjs",
     "gate": "node scripts/check-release-gates.mjs",
     "check:tracked": "node scripts/check-clean-checkout.mjs",
+    "capture:screenshots": "node scripts/capture-screenshots.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
