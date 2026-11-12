@@ -22,3 +22,7 @@ src-tauri/target
 
 # WorkBuddy 会话工作区数据（含个人记忆，绝不进公开仓库）
 .workbuddy/
+
+# 发布证据目录：真实原文 / 真实发送结果可能含个人信息，绝不入库。
+# 默认 <repo>/.evidence，可用 LEADPILOT_EVIDENCE_DIR 指到仓库外。
+/.evidence/

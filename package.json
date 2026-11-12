@@ -11,6 +11,7 @@
     "verify:restart": "bash scripts/verify-restart.sh",
     "validate:baseline": "node scripts/validate-baseline.mjs",
     "gate": "node scripts/check-release-gates.mjs",
+    "evidence:check": "node scripts/check-release-evidence.mjs",
     "check:tracked": "node scripts/check-clean-checkout.mjs",
     "capture:screenshots": "node scripts/capture-screenshots.mjs",
     "build": "tsc -b && vite build",

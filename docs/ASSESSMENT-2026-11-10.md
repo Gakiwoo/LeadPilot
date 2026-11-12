@@ -419,3 +419,77 @@
 2. **`/tmp` 下后台进程被会话沙箱终止（环境限制，非代码缺陷）**：把 archive 解到 `/tmp` 时，`verify-restart.sh` 派生的后台 node 被杀（日志只有 SQLite ExperimentalWarning、无错误、进程 dead），AC-03 无法完成；移到工作区内 `.workbuddy/clean-checkout/`（已被 gitignore）后全链路 PASS。如实记录，不把环境限制算成代码问题，也不拿 CI 的绿去掩盖本地这次失败。
 
 这条终验本身也再次印证第 6 节的判断：**验证脚本对被验证环境之外的假设（代理、沙箱、临时目录）同样会给出假保证**，和 B3-0 修掉的「门禁假保证」是同一类问题。
+
+---
+
+## 15. B4 补遗 · 发布门禁「红得假」与外部合规清单（2026-11-12）
+
+### 15.1 触发与发现
+
+「动手吧」之后先复核发布门禁，发现它和 B3-0 修掉的「静态常量代替真实执行」是同一类问题的镜像，只是方向相反：
+
+| 表象 | 实际 |
+|---|---|
+| `npm run gate` 打印 5 条 `BLOCKED` | 末尾写死 `evaluateIntegrity([])` / `evaluateOutcome([])`，无论服务端 `/v1/eval/*` 收到多少真实样本，判定永远是 `NO_DATA` |
+| 5 条阻断文案 | 全是硬编码字符串；即使快照全部锁定、OAuth / EV / 法务全部办妥，文案也不会变 |
+| `LEADPILOT_REQUIRE_BASELINE=1` | 无条件 `exit 1`，不读取任何证据 |
+| `POST /v1/eval/integrity` | `body.minSamples` 可任意下调 → 1 条样本可判 `PASSED` |
+| `POST /v1/eval/outcome` | `body.windowSize` 可任意放大 → 把历史 `sent` 拉进窗口稀释退信率 |
+| `/health.evalGates` | 调用无参 `releaseStatus()`，永远返回 `false/false`，与真实证据无关 |
+
+**结论：这个门禁「红得假」。** 它拦得住，但拦的理由不是真检查结果；反过来，真实条件达标它也不会放行。这与「门禁很严、实现有洞」的倒挂是同一种失真的另一面。
+
+### 15.2 先划边界（不能做什么）
+
+| 项 | 判定 |
+|---|---|
+| Google OAuth / CASA Tier 2 / EV 代码签名 / PIPL·GDPR 法律意见 | 真实世界流程：代码不能代做，更不能伪造「已完成」 |
+| 100 条真实原文样本 / 30 条真实发送结果 / 两次真实运行一致性 | 真实样本不可合成；合成样本不得被采信为发布证据 |
+| **本批能做的** | 打通「真实样本 → 门禁」的可执行通道、做实配置入口、落盘合规清单，并如实保持所有 `BLOCKED` |
+
+### 15.3 修复清单
+
+| 文件 | 改动 |
+|---|---|
+| `server/release-evidence.mjs`（新增） | 证据目录 → 校验 → `eval.mjs` 真实计算 → 快照/合规真实检查 → `releaseStatus()` → blockers 由结果生成。强制 `attestation` 人工签署、来源声明、quote 逐字自洽、SHA-256 去重、事件 `refId` 唯一、两次运行等长；非法文件**整份不采信**，绝不让坏样本污染判定 |
+| `scripts/check-release-evidence.mjs`（新增） | `npm run evidence:check`：`--self-test` / `--dir` / `--strict` / 默认查看；13 项反例，不生成任何样本文件 |
+| `shared/release-compliance.json`（新增） | 4 项外部合规机器可读清单；`status=completed` 且 `evidence` / `verifiedBy` / `verifiedAt` 齐备才算完成，只改状态不算 |
+| `docs/RELEASE-CHECKLIST.md`（新增） | 证据文件格式、签署责任、外部项所需证据、三分离判据与纪律 |
+| `scripts/check-release-gates.mjs` | 删除末尾硬编码 `[]` 调用与 5 条常量，改调 `evaluateReleaseEvidence()`；新增 6 条行为级门禁断言；`REQUIRE_BASELINE=1` 改为验证内测证据达标，不再无条件 exit 1 |
+| `server/index.mjs` | `minSamples` 只能抬高、`windowSize` 只能缩小；新增 `GET /v1/release/status` 只读摘要（不回传证据原文）；`/health.evalGates.evidence` 改读真实证据 |
+| `.gitignore` / `.env.example` / `package.json` | `/.evidence/` 排除、证据目录与 REQUIRE_BASELINE 配置入口、`evidence:check` 脚本 |
+| `README.md` | 新增证据通道说明、端点、验证命令与诚实边界补充 |
+
+**真实性边界如实写明**：代码只能验证格式 / 逐字自洽 / 去重 / 来源声明 / 签署齐备，**不能证明证据真实性**；`attestation` 是签署人的责任声明，发布前必须独立审计。`releaseEligible` 仍由 `releaseStatus()` 锁定为 `false`，是当前阶段的产品决策。
+
+### 15.4 行为级反例（改坏实现必须红）
+
+- 合成标记 / 缺 `attestation` / `quote` 不在 `sourceText` / 复制同一条凑 `minSamples` / 空数组 → 整份拒绝，判定仍 `NO_DATA`；
+- 达标证据（100 条 + 41 事件 + 两次一致运行）→ `integrity/outcome/consistency` 真的变 `PASSED`、`evidenceReady=true`，**但** `releaseEligible` 仍 `false`、外部合规阻断项仍在；
+- `minSamples:1` + 单条全绿证据 → 被契约下限挡为 `BLOCKED`；
+- `windowSize:1000` + 900 条历史 sent + 最近 100 条里 4 条退信 → 仍按 100 条窗口判 4% 退信 `BLOCKED`（旧实现可被稀释成 0.4% 假通过）；
+- 快照 `-latest` 不锁定、合规清单只改 `status` 不填证据仍不算完成；
+- `GET /v1/release/status` 只回摘要，响应不含 `sourceText` / `quote` / `records` / `events` 字段；
+- `LEADPILOT_REQUIRE_BASELINE=1` 实测：空证据目录 `exit=1`，达标证据目录 `exit=0`，且放行时仍打印 `releaseEligible=false`。
+
+链路上用于证明「绿也能真」的样本全部写在 `.tmp/` 临时目录、用完即删，绝不入库、绝不进入生产读取的 `.evidence/`；生产证据目录本批结束时仍为空。
+
+### 15.5 验证结果
+
+| 检查 | 结果 |
+|---|---|
+| `npm run typecheck` / `npm run build` | 通过 / `353.78 kB · gzip 119.45 kB` |
+| `npm test` | **211 / 211**（10 文件，前端 46 + 服务端 165，0 skipped；新增 9 个 B4 反例） |
+| `npm run gate` | **66 / 66**（新增 6 条 B4 行为级断言）；5 条 `BLOCKED` 保持，但由真实判定生成 |
+| `npm run evidence:check -- --self-test` | **13 / 13** |
+| `npm run check:tracked` | **64 个源码/配置全部纳入版本控制**，88 tracked 文件无缺失 |
+| `npm run smoke` | **51 / 51**（新增 3 项：minSamples 下限、windowSize 上限、release/status 摘要） |
+| `npm run verify:restart` | **AC-03 PASS** |
+| `npm run validate:baseline -- --self-test` | SELF-TEST PASSED |
+| `REQUIRE_BASELINE` 退出码闭环 | **EXIT-CHECK PASSED**（空目录 1 / 达标目录 0） |
+
+### 15.6 结论与评分
+
+**维持 4.0 / 5.0，不因一次补遗再次抬分。** 本批改的是「验证链路的诚实性」，与第 14 节已提升的维度（代码正确性 / 测试与验证）同向但幅度不足以改分；设计侧没有改动。第 14.3 节的判断继续有效：**分数不是发布判据**，`releaseEligible=false` / `accuracyClaim=false` / 0/6 商业源 / 5 条 `BLOCKED` 一条未撤。
+
+现在这 5 条 `BLOCKED` 的含义变了：以前是「文档说没达标」，现在是「代码读了证据目录、环境变量和合规清单后判定没达标」。要让它们消失，需要的是真实样本、真实快照与真实外部流程，不是再改一次脚本。

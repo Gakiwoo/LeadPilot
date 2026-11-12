@@ -9,12 +9,18 @@
  *  - 评测口径改为 integrity + outcome（零人工），accuracyClaim 恒 false；
  *  - 门禁会静态扫描产品文案，禁止无标注却宣称准确率。
  *
+ * B4 修正：末尾的 5 条 BLOCKED 曾经是硬编码字符串，evaluateIntegrity([]) /
+ * evaluateOutcome([]) 永远传空数组 —— 真实样本进不了门禁，属于「红得假」。
+ * 现在判定走 server/release-evidence.mjs：证据目录 → 校验 → eval.mjs 真实计算 →
+ * 快照/合规真实检查 → blockers 由结果生成。REQUIRE_BASELINE 也随之改为验证内测证据。
+ *
  * 退出码：
  *  - 任何自检断言失败 → 1（CI 必须红）
- *  - 断言全绿但外部验证条件未满足 → 0，并明确打印 releaseBlocked=true 与阻断项
- *  - LEADPILOT_REQUIRE_BASELINE=1 时，外部验证条件未满足也 → 1（用于真正卡发布）
+ *  - 断言全绿但外部验证条件未满足 → 0，并明确打印 releaseBlocked=true 与真实阻断项
+ *  - LEADPILOT_REQUIRE_BASELINE=1 且内测资格证据未达标 → 1；证据达标则放行
+ *    （放行只代表「可内测」，releaseEligible 仍恒 false，发布另由外部合规项卡住）
  */
-import { readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { protocol } from '../server/protocol.mjs'
@@ -36,6 +42,10 @@ import {
 import {
   createFetcher, FETCH_VERSION as FETCH_GATE_VERSION, FETCH_ORIGIN as FETCH_GATE_ORIGIN,
 } from '../server/fetch.mjs'
+import {
+  evaluateReleaseEvidence, snapshotStatus, complianceStatus, readCompliance,
+  EVIDENCE_FILES, EVIDENCE_CONTRACT_VERSION,
+} from '../server/release-evidence.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const results = []
@@ -617,35 +627,129 @@ function walkTs(dir, out = []) {
     && bp.export.forbidDirectSend === true)
 }
 
+// 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦
+//    旧实现末尾写死 evaluateIntegrity([]) / evaluateOutcome([]) + 5 条硬编码 BLOCKED，
+//    即使真实样本存在也永远 NO_DATA。下面用行为级断言证明判定随输入真实变化。
+//    注意：此处样本只是链路自检夹具，写在 .tmp/ 临时目录、用完即删，绝不入库，
+//    也绝不进入生产门禁默认读取的 .evidence/ 目录。
+{
+  const tmpRoot = join(ROOT, '.tmp')
+  mkdirSync(tmpRoot, { recursive: true })
+  const evidenceDir = mkdtempSync(join(tmpRoot, 'gate-evidence-'))
+  const attestation = {
+    attestedReal: true, signedBy: '门禁链路自检夹具', signedAt: '2026-11-12T00:00:00.000Z',
+    statement: '仅用于证明判定链路会随输入变化，非真实证据，不用于任何发布判定。',
+  }
+  const rec = (i) => ({
+    sourceUrl: `https://gate-evidence.example.com/about/${i}`,
+    capturedAt: '2026-11-12', sourceOrigin: 'user_directed_fetch',
+    quote: `we import fittings ${i}`,
+    sourceText: `about: we import fittings ${i} from asia`,
+    provenance: { matched: 1, total: 1 }, rules: { passed: 2, total: 2 },
+    schemaPass: true, refused: false,
+  })
+  const write = (name, data) => writeFileSync(join(evidenceDir, name), JSON.stringify(data))
+  const clean = () => { for (const f of Object.values(EVIDENCE_FILES)) rmSync(join(evidenceDir, f), { force: true }) }
+  const pinnedEnv = Object.fromEntries(protocol.providers.flatMap((p) => [
+    [p.envKey, 'gate-selfcheck-key'],
+    [`LEADPILOT_MODEL_VERSION_${p.key.toUpperCase().replace(/-/g, '_')}`, `${p.model}-2026-10-15`],
+  ]))
+  try {
+    const empty = evaluateReleaseEvidence({ dir: evidenceDir, env: {} })
+    check('B4 空证据目录：NO_DATA / 阻断项由真实判定生成，releaseEligible 恒 false',
+      empty.integrity.status === 'NO_DATA' && empty.outcome.status === 'NO_DATA'
+      && empty.blockers.length >= 5 && empty.release.releaseEligible === false
+      && empty.release.accuracyClaim === false && empty.evidenceReady === false,
+      `blockers=${empty.blockers.length} contract=${empty.contractVersion}`)
+
+    write(EVIDENCE_FILES.integrity, { attestation, synthetic: true, records: [rec(0)] })
+    const synthetic = evaluateReleaseEvidence({ dir: evidenceDir, env: {} })
+    write(EVIDENCE_FILES.integrity, { records: [rec(0)] })
+    const unsigned = evaluateReleaseEvidence({ dir: evidenceDir, env: {} })
+    write(EVIDENCE_FILES.integrity, { attestation, records: [rec(0), rec(0)] })
+    const duplicated = evaluateReleaseEvidence({ dir: evidenceDir, env: {} })
+    check('B4 伪造证据（合成标记 / 缺签署 / 复制凑数）整份不采信，判定仍 NO_DATA',
+      [synthetic, unsigned, duplicated].every((r) => r.validation.ok === false
+        && r.integrity.status === 'NO_DATA' && r.evidenceReady === false),
+      `errors=${synthetic.validation.errors.length}/${unsigned.validation.errors.length}/${duplicated.validation.errors.length}`)
+
+    clean()
+    const ig = integrityManifest()
+    const records = Array.from({ length: ig.minSamples }, (_, i) => rec(i))
+    const runs = records.map((r) => ({ quote: r.quote }))
+    write(EVIDENCE_FILES.integrity, { attestation, records })
+    write(EVIDENCE_FILES.consistency, { attestation, prevRun: runs, currentRun: runs.map((r) => ({ ...r })) })
+    write(EVIDENCE_FILES.outcome, {
+      attestation,
+      events: [
+        ...Array.from({ length: 40 }, (_, i) => ({ event: 'sent', refId: `sent-${i}`, occurredAt: '2026-11-12', source: 'smtp-log' })),
+        { event: 'replied', refId: 'reply-0', occurredAt: '2026-11-12', source: 'mailbox' },
+      ],
+    })
+    const ready = evaluateReleaseEvidence({ dir: evidenceDir, env: pinnedEnv })
+    check('B4 达标证据真的能改变判定（行为级）：integrity/outcome/一致性 PASSED 且 evidenceReady=true',
+      ready.validation.ok === true && ready.integrity.status === 'PASSED'
+      && ready.outcome.status === 'PASSED' && ready.consistency?.status === 'PASSED'
+      && ready.evidenceReady === true && ready.release.internalPreviewReady === true
+      && ready.release.externalValidated === true,
+      `integrity=${ready.integrity.status} outcome=${ready.outcome.status} consistency=${ready.consistency?.status}`)
+    check('B4 证据达标也不等于可发布：releaseEligible 恒 false，外部合规阻断项仍在',
+      ready.release.releaseEligible === false && ready.accuracyClaim === false
+      && ready.blockers.some((b) => b.includes('外部合规'))
+      && ready.compliance.ok === false,
+      `blockers=${ready.blockers.length} compliance=${ready.compliance.completed}/${ready.compliance.total}`)
+  } finally {
+    rmSync(evidenceDir, { recursive: true, force: true })
+  }
+
+  const latestEnv = Object.fromEntries(protocol.providers.map((p) => [
+    `LEADPILOT_MODEL_VERSION_${p.key.toUpperCase().replace(/-/g, '_')}`, `${p.model}-latest`,
+  ]))
+  check('B4 快照锁定读真实环境变量：-latest 不锁定，具体版本才锁定',
+    EVIDENCE_CONTRACT_VERSION === 'release-evidence-v1'
+    && snapshotStatus({}).ok === false
+    && snapshotStatus(latestEnv).ok === false
+    && snapshotStatus(pinnedEnv).lockedCount > 0)
+  const forgedCompliance = {
+    ...readCompliance(),
+    items: readCompliance().items.map((i) => ({ ...i, status: 'completed' })),
+  }
+  check('B4 合规清单：只改 status 不填证据/签署人/日期仍不算完成',
+    complianceStatus(readCompliance()).ok === false
+    && complianceStatus(forgedCompliance).ok === false)
+}
+
 const width = Math.max(...results.map((r) => r.name.length))
 for (const r of results) console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)
 console.log(`\n${results.length - failed}/${results.length} gate self-checks passed`)
 
+// B4：这里不再写死 evaluateIntegrity([]) / evaluateOutcome([]) 与 5 条硬编码 BLOCKED。
+// 判定来自真实证据目录 + 真实环境变量 + 真实合规清单，阻断项由结果生成。
 const ds = createDataSourceRegistry().health()
-const emptyIntegrity = evaluateIntegrity([])
-const emptyOutcome = evaluateOutcome([])
-const release = releaseStatus({ integrity: emptyIntegrity, outcome: emptyOutcome })
-const blockers = [
-  `integrity 门禁：${emptyIntegrity.status}（暂无真实原文样本，内部预览资格未验证）`,
-  `业务结果门禁：${emptyOutcome.status}（无真实发送样本，不得宣称准确率 / 回复率）`,
-  '用户指定抓取器已就绪（robots / 限速 / SSRF），但尚无真实站点抓取样本进入 integrity',
-  'provider 模型快照需运行时注入 LEADPILOT_MODEL_VERSION_*（未锁即 E6008）',
-  'Google OAuth / CASA Tier 2 / EV 代码签名 / PIPL·GDPR 法律意见：未开始',
-]
-console.log('\n发布门禁状态：releaseBlocked = true · releaseEligible = false · accuracyClaim = false')
-for (const b of blockers) console.log(`  BLOCKED  ${b}`)
+const evidence = evaluateReleaseEvidence()
+const release = evidence.release
+console.log(`\n发布门禁状态：releaseBlocked = ${evidence.releaseBlocked} · releaseEligible = ${release.releaseEligible} · accuracyClaim = ${release.accuracyClaim}`)
+console.log(`证据通道：${evidence.contractVersion} · ${evidence.evidenceDir}`)
+console.log(`  已提供 ${evidence.filesPresent.length ? evidence.filesPresent.join(', ') : '（无）'}；校验 ${evidence.validation.ok ? 'PASS' : `FAIL（${evidence.validation.errors.length} 条）`}；样本 integrity=${evidence.sampleCounts.integrityRecords} / outcome=${evidence.sampleCounts.outcomeEvents} / 抓取来源=${evidence.sampleCounts.fetchedRecords}`)
+console.log(`  provider 快照 已配置 ${evidence.snapshot.configuredCount} 家 Key / 锁定 ${evidence.snapshot.lockedCount} 家；外部合规 ${evidence.compliance.completed}/${evidence.compliance.total} 完成`)
+for (const b of evidence.blockers) console.log(`  BLOCKED  ${b}`)
+if (evidence.blockers.length === 0) console.log('  （无 BLOCKED 条目；releaseEligible 仍由发布策略锁定为 false）')
 console.log('说明：以上为「尚未达标」，不是失败。自检全绿只证明边界没被伪造，不证明产品可发布。')
 console.log('v0.9.0 抓取：只抓用户显式指定的 URL（robots 遵从 / 每域限速 / 拒绝私网），原文标 user_directed_fetch；抓取 ≠ 采集，商业源仍 0/6。')
 console.log('v0.8.0 决策：不做 385 家人工标注基准集、不做商业数据源采购；两项已从阻断项移除（legacy 契约保留、不参与判定）。')
 console.log(`  数据源仍如实报 ${ds.readyCount}/${ds.total}（用户投喂 + 用户指定抓取是唯一来源）；评测改看 integrity + outcome，accuracyClaim 恒 false。`)
-console.log(`  internalPreviewReady=${release.internalPreviewReady} · externalValidated=${release.externalValidated}`)
+console.log(`  internalPreviewReady=${release.internalPreviewReady} · externalValidated=${release.externalValidated} · evidenceReady=${evidence.evidenceReady}`)
+console.log(`  ${evidence.note}`)
 
 if (failed) {
   console.error(`\nGATE FAILED：${failed} 项自检断言失败，CI 必须红。`)
   process.exit(1)
 }
-if (process.env.LEADPILOT_REQUIRE_BASELINE === '1') {
-  console.error('\nGATE FAILED：LEADPILOT_REQUIRE_BASELINE=1 但外部验证条件未解除（integrity / outcome / provider 快照 / OAuth / EV）。')
+// B4：REQUIRE_BASELINE 现在验证「内测资格证据是否达标」，不再无条件 exit 1。
+// 证据真的达标时这个开关会放行，但 releaseEligible 仍恒 false（发布由外部合规项与产品决策卡住）。
+if (process.env.LEADPILOT_REQUIRE_BASELINE === '1' && !evidence.evidenceReady) {
+  console.error('\nGATE FAILED：LEADPILOT_REQUIRE_BASELINE=1 要求内测资格证据达标，当前未达标。真实阻断项：')
+  for (const b of evidence.blockers) console.error(`  BLOCKED  ${b}`)
   process.exit(1)
 }
-console.log('\nGATE OK：自检断言全绿；发布仍被上述阻断项明确卡住（符合预期）。')
+console.log('\nGATE OK：自检断言全绿；发布仍由 releaseEligible=false 与外部合规项明确卡住（符合预期）。')

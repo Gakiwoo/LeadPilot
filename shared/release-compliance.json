@@ -1,0 +1,48 @@
+{
+  "contractVersion": "release-compliance-v1",
+  "$note": "外部合规清单（机器可读）。这四项是真实世界流程，代码无法代替完成、也无法自动核验。只有 status=completed 且 evidence/verifiedBy/verifiedAt 三项齐备才算完成；缺任一项仍按未完成计入发布阻断项。严禁由脚本自动把 status 改成 completed。",
+  "statusValues": ["not_started", "in_progress", "completed"],
+  "completionRule": "status === 'completed' && evidence 长度 ≥ 8 && verifiedBy 长度 ≥ 2 && verifiedAt 为合法日期；代码只检查字段齐备，不检查证据真伪。",
+  "items": [
+    {
+      "id": "provider_snapshot",
+      "label": "provider 模型快照：官网可查的具体版本 ID 已由运维注入并复核",
+      "status": "not_started",
+      "evidence": "",
+      "verifiedBy": "",
+      "verifiedAt": "",
+      "ownerHint": "运维 / 平台负责人；LEADPILOT_MODEL_VERSION_<KEY> 禁止 -latest，需附官网版本页链接与变更记录",
+      "required": true
+    },
+    {
+      "id": "oauth_casa",
+      "label": "Google OAuth 同意屏验证 + CASA Tier 2 第三方安全评估",
+      "status": "not_started",
+      "evidence": "",
+      "verifiedBy": "",
+      "verifiedAt": "",
+      "ownerHint": "安全 / 法务；需附 Google 审核通过函与 CASA 评估报告编号",
+      "required": true
+    },
+    {
+      "id": "ev_signature",
+      "label": "EV 代码签名证书与桌面安装包签名链路",
+      "status": "not_started",
+      "evidence": "",
+      "verifiedBy": "",
+      "verifiedAt": "",
+      "ownerHint": "发布工程；需附证书指纹、签名时间戳与可验证的安装包哈希",
+      "required": true
+    },
+    {
+      "id": "legal_pipl_gdpr",
+      "label": "PIPL / GDPR 与数据源授权的法律意见书",
+      "status": "not_started",
+      "evidence": "",
+      "verifiedBy": "",
+      "verifiedAt": "",
+      "ownerHint": "法务 / DPO；需附意见书编号、适用地域与数据留存/删除策略",
+      "required": true
+    }
+  ]
+}

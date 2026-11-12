@@ -15,7 +15,7 @@ import { createOrchestrator, MAX_CONCURRENT } from './orchestrator.mjs'
 import { protocol, assertNoPii } from './protocol.mjs'
 import { evaluateBaseline, baselineManifest, diffEvalRuns } from './eval.mjs'
 import {
-  evaluateIntegrity, evaluateOutcome, integrityManifest, outcomeManifest, releaseStatus,
+  evaluateIntegrity, evaluateOutcome, integrityManifest, outcomeManifest,
   INTEGRITY_GATE_VERSION, OUTCOME_GATE_VERSION, RELEASE_POLICY_VERSION,
 } from './eval.mjs'
 import { createStore } from './store.mjs'
@@ -28,6 +28,7 @@ import {
   contract as baselineContract, BASELINE_CONTRACT_VERSION,
   validateBaselineImport, checkLabeledBaseline,
 } from './baseline.mjs'
+import { evaluateReleaseEvidence } from './release-evidence.mjs'
 
 // B3-4：版本号从 package.json 读取，/health 不再硬编码字面量（README 早已这样声明）
 const PKG_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -358,9 +359,22 @@ export function createApp(opts = {}) {
             note: 'v0.8.0 决策：不再要求 385 家人工标注基准集，本契约降级为 legacy；当前评测口径见 evalGates。',
           },
           evalGates: (() => {
-            const release = releaseStatus()
+            // B4：health 里的发布状态同样读真实证据，不再用 releaseStatus() 的无参默认值假装恒 false。
+            const evidence = evaluateReleaseEvidence()
+            const release = evidence.release
             return {
               mode: protocol.evalGates.integrity.mode,
+              evidence: {
+                contractVersion: evidence.contractVersion,
+                filesPresent: evidence.filesPresent,
+                validationOk: evidence.validation.ok,
+                internalPreviewReady: release.internalPreviewReady,
+                externalValidated: release.externalValidated,
+                snapshotLocked: evidence.snapshot.lockedCount,
+                complianceCompleted: evidence.compliance.completed,
+                blockerCount: evidence.blockers.length,
+                endpoint: 'GET /v1/release/status',
+              },
               integrityVersion: INTEGRITY_GATE_VERSION,
               outcomeVersion: OUTCOME_GATE_VERSION,
               policyVersion: RELEASE_POLICY_VERSION,
@@ -573,19 +587,59 @@ export function createApp(opts = {}) {
       if (method === 'GET' && path === '/v1/eval/outcome/gates') return json(res, 200, outcomeManifest())
       if (method === 'POST' && path === '/v1/eval/integrity') {
         const body = await readBody(req)
+        // B4：调用方只能抬高门槛，不能下调 minSamples 把 1 条样本判成 PASSED。
+        const floor = integrityManifest().minSamples
+        const requested = Number.isInteger(body.minSamples) ? body.minSamples : floor
         const result = evaluateIntegrity(body.records ?? body.evidence ?? [], {
           consistency: body.consistency,
-          minSamples: Number.isInteger(body.minSamples) ? body.minSamples : undefined,
+          minSamples: Math.max(requested, floor),
         })
         return json(res, 200, result)
       }
       if (method === 'POST' && path === '/v1/eval/outcome') {
         const body = await readBody(req)
+        // B4：minSamples 不得下调；windowSize 不得放大（把历史 sent 拉进来稀释退信率也是一种绕过）。
+        const manifest = outcomeManifest()
+        const requestedMin = Number.isInteger(body.minSamples) ? body.minSamples : manifest.minSamples
+        const requestedWindow = Number.isInteger(body.windowSize) ? body.windowSize : manifest.windowSize
         const result = evaluateOutcome(body.events ?? [], {
-          windowSize: Number.isInteger(body.windowSize) ? body.windowSize : undefined,
-          minSamples: Number.isInteger(body.minSamples) ? body.minSamples : undefined,
+          windowSize: Math.min(requestedWindow, manifest.windowSize),
+          minSamples: Math.max(requestedMin, manifest.minSamples),
         })
         return json(res, 200, result)
+      }
+
+      // B4：只读发布状态。证据原文不回传，只给摘要与由真实判定生成的阻断项。
+      if (method === 'GET' && path === '/v1/release/status') {
+        const e = evaluateReleaseEvidence()
+        return json(res, 200, {
+          ok: true,
+          contractVersion: e.contractVersion,
+          releaseBlocked: e.releaseBlocked,
+          releaseEligible: e.release.releaseEligible,
+          internalPreviewReady: e.release.internalPreviewReady,
+          externalValidated: e.release.externalValidated,
+          evidenceReady: e.evidenceReady,
+          accuracyClaim: false,
+          integrity: { status: e.integrity.status, sampleSize: e.integrity.sampleSize, minSamples: e.integrity.minSamples },
+          outcome: { status: e.outcome.status, sampleSize: e.outcome.sampleSize, minSamples: e.outcome.minSamples },
+          consistency: e.consistency
+            ? { status: e.consistency.status, rate: e.consistency.rate }
+            : { status: 'NO_DATA', rate: null },
+          snapshot: {
+            configuredCount: e.snapshot.configuredCount,
+            lockedCount: e.snapshot.lockedCount,
+            ok: e.snapshot.ok,
+          },
+          compliance: {
+            completed: e.compliance.completed, total: e.compliance.total,
+            pending: e.compliance.pending,
+          },
+          filesPresent: e.filesPresent,
+          validation: { ok: e.validation.ok, errorCount: e.validation.errors.length },
+          blockers: e.blockers,
+          note: '只回传摘要，不回传证据原文；代码无法证明证据真实性，真实性由 attestation 签署人负责。',
+        })
       }
 
       if (method === 'POST' && path === '/v1/tasks') {

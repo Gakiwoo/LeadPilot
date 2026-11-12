@@ -23,7 +23,12 @@ import {
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rmSync, readFileSync } from 'node:fs'
+import { rmSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import {
+  evaluateReleaseEvidence, validateIntegrityEvidence, validateOutcomeEvidence,
+  validateConsistencyEvidence, snapshotStatus, complianceStatus, readCompliance,
+  EVIDENCE_CONTRACT_VERSION, EVIDENCE_FILES,
+} from '../release-evidence.mjs'
 
 /** 版本号统一从 package.json 读取，避免每次发版漏改测试里的硬编码 */
 const PKG_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
@@ -2376,5 +2381,185 @@ describe('B3-2 · 持久化与状态机 P2 收口', () => {
       store.close()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+/* ==================================================== B4 · 发布证据通道（门禁不再「红得假」） */
+describe('B4 · 发布证据通道与真实门禁判定', () => {
+  const attestation = {
+    attestedReal: true, signedBy: '单元测试夹具', signedAt: '2026-11-12T00:00:00.000Z',
+    statement: '仅用于验证判定链路会随输入变化，非真实证据，不用于任何发布判定。',
+  }
+  const rec = (i = 0) => ({
+    sourceUrl: `https://b4-evidence.example.com/about/${i}`,
+    capturedAt: '2026-11-12', sourceOrigin: 'user_directed_fetch',
+    quote: `we import fittings ${i}`,
+    sourceText: `about: we import fittings ${i} from asia`,
+    provenance: { matched: 1, total: 1 },
+    rules: { passed: 2, total: 2 },
+    schemaPass: true, refused: false,
+  })
+  const integrityDoc = (over = {}) => ({ attestation, records: [rec(0)], ...over })
+  const outcomeDoc = (over = {}) => ({
+    attestation,
+    events: [{ event: 'sent', refId: 'evt-1', occurredAt: '2026-11-12', source: 'smtp-log' }],
+    ...over,
+  })
+  const consistencyDoc = (over = {}) => ({
+    attestation, prevRun: [{ a: 1 }], currentRun: [{ a: 1 }], ...over,
+  })
+  const withTempDir = (fn) => {
+    const dir = mkdtempSync(join(tmpdir(), 'leadpilot-b4-'))
+    try { return fn(dir) } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+  const write = (dir, name, data) => writeFileSync(join(dir, name), JSON.stringify(data))
+
+  it('证据校验器：合成标记 / 缺签署 / 伪造引用 / 复制凑数 / 空集全部被拒', () => {
+    expect(validateIntegrityEvidence(integrityDoc({ synthetic: true })).ok).toBe(false)
+    const noSign = validateIntegrityEvidence({ records: [rec(0)] })
+    expect(noSign.ok).toBe(false)
+    expect(noSign.errors.join()).toMatch(/attestation/)
+    const forged = validateIntegrityEvidence(integrityDoc({ records: [{ ...rec(0), quote: 'not here' }] }))
+    expect(forged.errors.join()).toMatch(/逐字核验/)
+    const dup = validateIntegrityEvidence(integrityDoc({ records: [rec(0), rec(0)] }))
+    expect(dup.errors.join()).toMatch(/重复/)
+    expect(validateIntegrityEvidence(integrityDoc({ records: [] })).ok).toBe(false)
+  })
+
+  it('证据校验器：outcome 重复 refId / 非法事件 / consistency 长度不等被拒', () => {
+    const e = outcomeDoc().events[0]
+    expect(validateOutcomeEvidence(outcomeDoc({ events: [e, e] })).errors.join()).toMatch(/refId 重复/)
+    expect(validateOutcomeEvidence(outcomeDoc({ events: [{ ...e, event: 'opened' }] })).ok).toBe(false)
+    expect(validateOutcomeEvidence(outcomeDoc({ events: [{ ...e, source: '' }] })).ok).toBe(false)
+    expect(validateConsistencyEvidence(consistencyDoc({ currentRun: [{ a: 1 }, { b: 2 }] })).ok).toBe(false)
+  })
+
+  it('合法形状 + 签署齐备的证据能被接受（链路可通）', () => {
+    expect(validateIntegrityEvidence(integrityDoc()).ok).toBe(true)
+    expect(validateOutcomeEvidence(outcomeDoc()).ok).toBe(true)
+    expect(validateConsistencyEvidence(consistencyDoc()).ok).toBe(true)
+  })
+
+  it('空证据目录：NO_DATA / 真实阻断项 / releaseEligible 恒 false', () => withTempDir((dir) => {
+    const r = evaluateReleaseEvidence({ dir, env: {} })
+    expect(r.contractVersion).toBe(EVIDENCE_CONTRACT_VERSION)
+    expect(r.integrity.status).toBe('NO_DATA')
+    expect(r.outcome.status).toBe('NO_DATA')
+    expect(r.consistency).toBe(null)
+    expect(r.blockers.length).toBeGreaterThanOrEqual(5)
+    expect(r.blockers.join()).toMatch(/NO_DATA/)
+    expect(r.release.releaseEligible).toBe(false)
+    expect(r.release.accuracyClaim).toBe(false)
+    expect(r.evidenceReady).toBe(false)
+    expect(r.releaseBlocked).toBe(true)
+  }))
+
+  it('非法证据文件整份不采信，判定不被污染（行为级）', () => withTempDir((dir) => {
+    write(dir, EVIDENCE_FILES.integrity, integrityDoc({ synthetic: true }))
+    const r = evaluateReleaseEvidence({ dir, env: {} })
+    expect(r.validation.ok).toBe(false)
+    expect(r.integrity.status).toBe('NO_DATA')
+    expect(r.sampleCounts.integrityRecords).toBe(0)
+    expect(r.evidenceReady).toBe(false)
+    expect(r.blockers.join()).toMatch(/校验失败/)
+  }))
+
+  it('达标证据真的能改变判定，但发布资格仍被外部合规卡住', () => withTempDir((dir) => {
+    const min = integrityManifest().minSamples
+    const records = Array.from({ length: min }, (_, i) => rec(i))
+    const runs = records.map((r) => ({ quote: r.quote }))
+    write(dir, EVIDENCE_FILES.integrity, { attestation, records })
+    write(dir, EVIDENCE_FILES.consistency, {
+      attestation, prevRun: runs, currentRun: runs.map((x) => ({ ...x })),
+    })
+    write(dir, EVIDENCE_FILES.outcome, {
+      attestation,
+      events: [
+        ...Array.from({ length: 40 }, (_, i) => ({
+          event: 'sent', refId: `sent-${i}`, occurredAt: '2026-11-12', source: 'smtp-log',
+        })),
+        { event: 'replied', refId: 'reply-0', occurredAt: '2026-11-12', source: 'mailbox' },
+      ],
+    })
+    const env = Object.fromEntries(protocol.providers.flatMap((p) => [
+      [p.envKey, 'test-key'],
+      [`LEADPILOT_MODEL_VERSION_${p.key.toUpperCase().replace(/-/g, '_')}`, `${p.model}-2026-10-15`],
+    ]))
+    const r = evaluateReleaseEvidence({ dir, env })
+    expect(r.validation.ok).toBe(true)
+    expect(r.integrity.status).toBe('PASSED')
+    expect(r.outcome.status).toBe('PASSED')
+    expect(r.consistency.status).toBe('PASSED')
+    expect(r.evidenceReady).toBe(true)
+    expect(r.release.internalPreviewReady).toBe(true)
+    expect(r.release.externalValidated).toBe(true)
+    expect(r.release.releaseEligible).toBe(false)
+    expect(r.blockers.join()).toMatch(/外部合规/)
+    expect(r.compliance.ok).toBe(false)
+  }))
+
+  it('快照读真实环境变量、合规清单只改 status 不算完成', () => {
+    expect(snapshotStatus({}).ok).toBe(false)
+    expect(snapshotStatus({ DEEPSEEK_API_KEY: 'k', LEADPILOT_MODEL_VERSION_DEEPSEEK_PRO: 'x-latest' }).ok).toBe(false)
+    expect(snapshotStatus({ DEEPSEEK_API_KEY: 'k', LEADPILOT_MODEL_VERSION_DEEPSEEK_PRO: 'x-2026-10-15' }).ok).toBe(true)
+    const base = readCompliance()
+    expect(complianceStatus(base).ok).toBe(false)
+    const forged = { ...base, items: base.items.map((i) => ({ ...i, status: 'completed' })) }
+    expect(complianceStatus(forged).ok).toBe(false)
+  })
+
+  it('HTTP：/v1/eval/* 不允许下调 minSamples / 放大 windowSize 绕过门禁', async () => {
+    const app = createApp({ store: createMemoryStore(), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    const post = (path, body) => fetch(`${base}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }))
+    try {
+      // 单条全绿证据 + minSamples:1：旧实现会判 PASSED，现在必须被契约下限挡住
+      const one = await post('/v1/eval/integrity', { records: [rec(0)], minSamples: 1 })
+      expect(one.body.minSamples).toBe(integrityManifest().minSamples)
+      expect(one.body.ok).toBe(false)
+      expect(one.body.status).toBe('BLOCKED')
+
+      // 最近 100 条里 4 条退信（4% > 3%）+ 900 条历史 sent：
+      // 若允许放大 windowSize=1000，退信率会被稀释成 0.4% 而假通过。
+      const events = [
+        ...Array.from({ length: 900 }, () => 'sent'),
+        ...Array.from({ length: 100 }, (_, i) => (i < 4 ? 'bounced' : 'sent')),
+      ]
+      const diluted = await post('/v1/eval/outcome', { events, windowSize: 1000, minSamples: 1 })
+      expect(diluted.body.windowSize).toBe(outcomeManifest().windowSize)
+      expect(diluted.body.minSamples).toBe(outcomeManifest().minSamples)
+      expect(diluted.body.ok).toBe(false)
+      expect(diluted.body.status).toBe('BLOCKED')
+      expect(diluted.body.p0Failures.join()).toMatch(/硬退信率/)
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
+  })
+
+  it('HTTP：/v1/release/status 与 /health 读真实证据，只回传摘要不回传原文', async () => {
+    const app = createApp({ store: createMemoryStore(), orchestratorOptions: { tickMs: 10000 } })
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve))
+    const base = `http://127.0.0.1:${app.server.address().port}`
+    try {
+      const s = await (await fetch(`${base}/v1/release/status`)).json()
+      expect(s.ok).toBe(true)
+      expect(s.contractVersion).toBe(EVIDENCE_CONTRACT_VERSION)
+      expect(s.releaseEligible).toBe(false)
+      expect(s.accuracyClaim).toBe(false)
+      expect(s.evidenceReady).toBe(false)
+      expect(s.integrity.status).toBe('NO_DATA')
+      expect(s.outcome.status).toBe('NO_DATA')
+      expect(Array.isArray(s.blockers)).toBe(true)
+      expect(s.blockers.length).toBeGreaterThanOrEqual(4)
+      const raw = JSON.stringify(s)
+      // 只检查「证据字段 / 样本原文」不出现在响应里；note 中 attestation 作为说明文字的裸词不算泄露
+      expect(raw).not.toMatch(/"(?:attestation|sourceText|quote|records|events|sourceUrl)"\s*:/)
+      expect(raw).not.toMatch(/we import fittings|smtp-log|smtp-20261112/)
+      const health = await (await fetch(`${base}/health`)).json()
+      expect(health.evalGates.evidence.contractVersion).toBe(EVIDENCE_CONTRACT_VERSION)
+      expect(health.evalGates.evidence.endpoint).toBe('GET /v1/release/status')
+      expect(typeof health.evalGates.evidence.validationOk).toBe('boolean')
+    } finally { await new Promise((resolve) => app.server.close(resolve)) }
   })
 })

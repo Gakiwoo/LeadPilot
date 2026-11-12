@@ -268,6 +268,41 @@ async function main() {
     outcomeEmpty.status === 200 && outcomeEmpty.body?.status === 'NO_DATA',
     `status=${outcomeEmpty.body?.status}`)
 
+  // B4：评测端点不得被请求参数绕过（下调样本门槛 / 放大窗口稀释退信率）
+  const floorRecord = {
+    provenance: { matched: 1, total: 1 }, rules: { passed: 2, total: 2 },
+    schemaPass: true, refused: false,
+    quote: 'we import fittings', sourceText: 'about: we import fittings from asia',
+  }
+  const floor = await post('/v1/eval/integrity', { records: [floorRecord], minSamples: 1 })
+  check('评测端点不允许下调 minSamples：单条证据 + minSamples=1 仍被契约下限挡住',
+    floor.status === 200 && floor.body?.minSamples === 100
+    && floor.body?.ok === false && floor.body?.status === 'BLOCKED',
+    `minSamples=${floor.body?.minSamples} status=${floor.body?.status}`)
+
+  const diluted = await post('/v1/eval/outcome', {
+    events: [
+      ...Array.from({ length: 900 }, () => 'sent'),
+      ...Array.from({ length: 100 }, (_, i) => (i < 4 ? 'bounced' : 'sent')),
+    ],
+    windowSize: 1000, minSamples: 1,
+  })
+  check('评测端点不允许放大 windowSize 稀释退信率：最近 100 条 4% 退信仍 BLOCKED',
+    diluted.status === 200 && diluted.body?.windowSize === 100
+    && diluted.body?.minSamples === 30 && diluted.body?.ok === false
+    && diluted.body?.status === 'BLOCKED',
+    `window=${diluted.body?.windowSize} min=${diluted.body?.minSamples} rate=${diluted.body?.metrics?.bounce_rate}`)
+
+  const releaseProbe = await req('/v1/release/status')
+  check('GET /v1/release/status：真实证据判定摘要，阻断项由结果生成（不回传原文）',
+    releaseProbe.status === 200 && releaseProbe.body?.ok === true
+    && releaseProbe.body?.releaseEligible === false
+    && releaseProbe.body?.accuracyClaim === false
+    && releaseProbe.body?.integrity?.status === 'NO_DATA'
+    && Array.isArray(releaseProbe.body?.blockers) && releaseProbe.body.blockers.length >= 4
+    && !JSON.stringify(releaseProbe.body).includes('"sourceText":'),
+    `blockers=${releaseProbe.body?.blockers?.length} eligible=${releaseProbe.body?.releaseEligible}`)
+
   const evalRun = await post('/v1/eval/run', { results: [] })
   check('无标注样本返回 NO_DATA，不编造通过',
     evalRun.status === 200 && evalRun.body.status === 'NO_DATA'

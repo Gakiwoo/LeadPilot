@@ -59,7 +59,7 @@
 | 线索来源 | 用户投喂（CSV / JSON）+ 用户指定 URL 抓取，**`origin=user_imported`** |
 | 当前阶段 | `internal_preview`（内测预览） |
 | 评测口径 | `integrity + outcome`（零人工标注）；`accuracyClaim` 恒 `false` |
-| 正式发布 | `releaseEligible` 恒 `false`；Go / No-Go 第 1 条（数据源合同）与第 3 条（385 标注启动）已由 v0.8.0 决策取消，第 2 / 4 / 5 条继续有效；`npm run gate` 实跑 5 条 `BLOCKED` |
+| 正式发布 | `releaseEligible` 恒 `false`；Go / No-Go 第 1 条（数据源合同）与第 3 条（385 标注启动）已由 v0.8.0 决策取消，第 2 / 4 / 5 条继续有效；`npm run gate` 实跑 5 条 `BLOCKED`（由真实证据判定生成，见 [发布证据与合规清单](docs/RELEASE-CHECKLIST.md)） |
 
 三次用户拍板，均写进代码与门禁：
 
@@ -87,11 +87,13 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict + noUncheckedIndexedAccess（索引访问必须显式判空）
-npm test                # 202 个用例 / 10 文件 / 0 skipped（前端 46 + 服务端 156）
-npm run gate            # 发布门禁 60 项自检，输出 releaseBlocked=true
+npm test                # 211 个用例 / 10 文件 / 0 skipped（前端 46 + 服务端 165）
+npm run gate            # 发布门禁 66 项自检，输出 releaseBlocked=true
+npm run evidence:check -- --self-test  # 证据校验器反例：合成/缺签署/凑数样本必须被拒
+npm run evidence:check  # 查看当前证据目录的真实判定与阻断项
 npm run check:tracked   # 干净检出全量校验：src/server/shared/scripts 与 git ls-files 对账
 npm run build           # 类型检查 + 生产构建
-npm run smoke           # 48 项云端端到端冒烟（默认端口 5181，需先启动 npm run cloud）
+npm run smoke           # 51 项云端端到端冒烟（默认端口 5181，需先启动 npm run cloud）
 npm run verify:restart  # AC-03 真实杀进程 → 同库重启 → 断点续跑（独立端口 5193）
 npm run validate:baseline -- --self-test   # legacy 标注导入校验器反例自检
 ```
@@ -136,6 +138,7 @@ flowchart LR
 | 服务端安全 / 持久化 | ✅ 真实实现 | 非回环强制 Bearer（401 `E6009`）、CORS 白名单、限流（429 `E6010`）、不安全启动组合拒绝；`sqlite / json / memory` 存任务 / 缓存 / 审计 / 账本 / companies / outcomes |
 | 评测口径 integrity + outcome（v0.8.0） | ✅ 纯函数真实实现 | 可溯源 / 规则遵从 / schema / 证据逐字核验 + 真实硬退信率；无真实样本一律 `NO_DATA`；`diffEvalRuns()` 版本 diff 不伪造 delta |
 | 用户指定 URL 抓取（v0.9.0） | ✅ 真实实现 | robots 遵从、每域限速、重定向上限 3 且逐跳重做 SSRF 校验、内容哈希、PII 清洗 |
+| 发布证据通道（v0.9.0 补遗） | ✅ 真实实现 | `.evidence/` → 签署 / 逐字自洽 / 去重校验 → `eval.mjs` 真实计算；快照与合规读真实配置；`BLOCKED` 由结果生成而非硬编码 |
 | **批量 SDR 管道（v0.7.0）** | 🟡 **内测可用** | CSV / JSON 导入 → T0 + 真实 `judge()` 批量研判 → mbox 草稿导出 → 结果回写与 3% 退信熔断；`companies` / `outcomes` 落库 |
 | 真实 provider 调用 | 🟡 配置即用 | Key 从服务端环境变量读取，**且必须锁定 `LEADPILOT_MODEL_VERSION_*` 具体快照**；仓库不内置 Key、不预置猜测版本号 |
 | 数据源注册表（9.3） | ⚪ 契约真实 / 实现 `0/6` | 逐源健康如实上报；即使注入实现也返回 `blocked` 并暂停任务（ADR-017「可插拔 ≠ 可放行」） |
@@ -152,6 +155,7 @@ flowchart LR
 > 六类数据源、Gmail OAuth 与 Tauri 外壳均未接入；客户记录带 `demo: true`，界面常驻 DEMO 黄条。
 > 响应里的 `points` 只是 token 折算估值，**只有 `billing.charged=true` 才代表实际扣点**。
 > v0.8.0 决策不做人工标注集，因此没有准确率可宣称：`accuracyClaim` 恒 `false`，任何以人工真值为前提的数字断言都会被 `npm run gate` 静态扫描拦下。
+> 门禁的 `BLOCKED` 由真实证据判定生成，但代码**无法证明证据真实性**：`attestation` 是签署人的责任声明，发布前必须独立审计。
 > 任何降级路径都**不返回一段看起来像模型写的假正文**；分数改为区间显示并标注「未经模型校验」。这是对 PRD 6.7「不能假知道」的工程落实。
 
 ---
@@ -164,14 +168,14 @@ flowchart LR
 | `externalValidated` | outcome 门禁：真实发送硬退信率 ≤3%（`minSamples=30`）+ 跨运行一致性 | 无真实发送事件 → `NO_DATA` |
 | `releaseEligible` | 前两项 + 外部条件 | **恒 `false`** |
 
-`npm run gate` 当前打印的阻断项（`releaseBlocked = true`）：
+`npm run gate` 实跑 5 条 `BLOCKED`（`releaseBlocked = true`）：integrity `NO_DATA`、outcome `NO_DATA`、0 条真实抓取样本进入 integrity、0 家 provider 快照锁定、外部合规 0/4 完成。
 
-- integrity 门禁 `NO_DATA`、业务结果门禁 `NO_DATA`（无真实样本，不得宣称准确率 / 回复率）；
-- 用户指定抓取器已就绪（robots / 限速 / SSRF），但尚无真实站点样本进入 integrity；
-- provider 模型快照需运行时注入 `LEADPILOT_MODEL_VERSION_*`（未锁即 `E6008`）；
-- Google OAuth / CASA Tier 2 / EV 代码签名 / PIPL·GDPR 法律意见：未开始。
-
+> **这 5 条不是硬编码文案。** v0.9.0 补遗前，门禁末尾写死 `evaluateIntegrity([])` / `evaluateOutcome([])` 与 5 条常量，真实样本永远进不了判定——「红得假」。现在走 [`server/release-evidence.mjs`](server/release-evidence.mjs)：
+> `证据目录（.evidence/，不入库）→ 签署 / 逐字自洽 / 去重校验 → eval.mjs 真实计算 → 快照与合规真实检查 → releaseStatus() → blockers 由结果生成`。
+> 完整格式、签署责任与外部合规清单见 [发布证据与合规清单](docs/RELEASE-CHECKLIST.md)；`npm run evidence:check` 查看当前判定，`GET /v1/release/status` 返回摘要。
+>
 > **自检全绿只证明边界没被伪造，不证明产品可发布。** 门禁断言失败会让 CI 变红；外部条件未满足则明确打印阻断项、退出码 0。
+> `LEADPILOT_REQUIRE_BASELINE=1` 要求内测资格证据达标才放行；**证据达标 ≠ 可发布**，`releaseEligible` 仍恒 `false`。
 
 ---
 
@@ -198,7 +202,8 @@ flowchart LR
 | POST | `/v1/import/outcomes` | 结果回写；`unsubscribed / invalid` 需逐条确认且不可逆 |
 | POST | `/v1/sources/fetch` | 用户指定 URL 临时抓取（单次 ≤10，不写库、不发现 URL） |
 | POST | `/v1/batch/fetch-sources` | 为已导入且缺原文的公司抓官网（≤50），写回 `rawText / sourceUrl / fetchedAt` |
-| POST | `/v1/eval/integrity` · `/v1/eval/outcome` · `/v1/eval/diff` | 零人工评测与版本 diff；无样本 `NO_DATA` / 无基线 `NO_BASELINE` |
+| POST | `/v1/eval/integrity` · `/v1/eval/outcome` · `/v1/eval/diff` | 零人工评测与版本 diff；无样本 `NO_DATA` / 无基线 `NO_BASELINE`；`minSamples` 只能抬高、`windowSize` 只能缩小 |
+| GET | `/v1/release/status` | 发布判定摘要：证据校验 / integrity / outcome / 一致性 / 快照 / 合规 / 真实阻断项（不回传证据原文） |
 
 <details>
 <summary>完整端点清单（legacy / 评测 / 数据源 / 网关诊断）</summary>
@@ -251,6 +256,11 @@ LEADPILOT_MODEL_VERSION_DEEPSEEK_PRO=deepseek-chat-<具体快照ID>
 
 # legacy：仅当将来真导入人工标注时设置；v0.8.0 决策不要求标注，仓库不提供也不生成
 # LEADPILOT_BASELINE_FILE=./data/baseline-legacy.jsonl
+
+# 发布证据目录（真实原文 / 发送结果，不入库、脚本不生成样本）
+# 三份可选文件与 attestation 签署格式见 docs/RELEASE-CHECKLIST.md
+# LEADPILOT_EVIDENCE_DIR=/absolute/path/to/your/evidence
+# LEADPILOT_REQUIRE_BASELINE=1   # 要求内测资格证据达标；证据达标 ≠ 可发布
 ```
 
 > **模型快照纪律**：`shared/model-protocol.json` 的 `rules.requirePinnedModelVersion = true`。
@@ -297,15 +307,16 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | 检查 | 结果（v0.9.0） |
 |---|---|
 | `npm run typecheck` / `npm run build` | 通过；`strict` + `noUncheckedIndexedAccess` 双开，门禁静态锁死；`/health.version` 与侧栏版本号均从 `package.json` 读取，不再硬编码；生产构建 353.78 kB / gzip 119.45 kB |
-| `npm test` | **202 / 202 全绿，0 skipped**（10 文件；前端 46 + 服务端 156） |
-| `npm run gate` | **60 / 60 自检通过**，输出 `releaseBlocked=true` 与 5 条 `BLOCKED` |
-| `npm run check:tracked` | **61 个源码/配置全部纳入版本控制**，84 个 tracked 文件无缺失 |
+| `npm test` | **211 / 211 全绿，0 skipped**（10 文件；前端 46 + 服务端 165） |
+| `npm run gate` | **66 / 66 自检通过**，输出 `releaseBlocked=true` 与 5 条由真实判定生成的 `BLOCKED` |
+| `npm run evidence:check -- --self-test` | **13 / 13 通过**：合成标记 / 缺签署 / 伪造引用 / 复制凑数 / 空集全部被拒 |
+| `npm run check:tracked` | **64 个源码/配置全部纳入版本控制**，88 个 tracked 文件无缺失 |
 | `npm run capture:screenshots` | 5 张 README 截图可由仓库内脚本重生成（Chrome headless / CDP，1600×1000） |
-| `npm run smoke` | **48 / 48 通过**（默认端口 5181，需先启动 `npm run cloud`） |
+| `npm run smoke` | **51 / 51 通过**（默认端口 5181，需先启动 `npm run cloud`） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
-| 干净检出终验 | `git archive` → 84 文件 → `npm ci`（169 packages）→ typecheck / 202 单测 / 60 门禁 / build / 48 冒烟 / AC-03 全绿 |
-| GitHub Actions | 每次 push 的 15 步流水线全绿（干净检出 / 门禁 / AC-03 重启 / 48 冒烟）；最近一次**代码**提交 run `43180916709`，run 号以 `gh run list` 为准，文档不写死 |
+| 干净检出终验 | B3 历史：`git archive` → 84 文件 → `npm ci`（169 packages）→ 202 单测 / 60 门禁 / 48 冒烟 / AC-03 全绿；B4 复跑结果见评估报告第 15 节 |
+| GitHub Actions | 每次 push 的 15 步流水线全绿（干净检出 / 门禁 / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
 
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。
 历史专项（v0.6.0–v0.8.0，仍全绿）：网关计费 9 个单测、评测 diff 8 个单测、并发队列 FIFO 与硬超时、批量管道 8 个单测、integrity / outcome 6 个单测。
