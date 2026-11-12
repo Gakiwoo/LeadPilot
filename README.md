@@ -315,7 +315,7 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | `npm run smoke` | **51 / 51 通过**（默认端口 5181，需先启动 `npm run cloud`） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
-| 干净检出终验 | B3 历史：`git archive` → 84 文件 → `npm ci`（169 packages）→ 202 单测 / 60 门禁 / 48 冒烟 / AC-03 全绿；B4 复跑结果见评估报告第 15 节 |
+| 干净检出终验 | B4 复跑：`git archive HEAD` → 88 文件（4 个新增文件齐全）→ `npm ci` → typecheck / 211 单测 / 66 门禁 / 13 证据自检 / build / 51 冒烟（独立端口 5182）/ AC-03 全绿；B3 历史终验 84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
 | GitHub Actions | 每次 push 的 15 步流水线全绿（干净检出 / 门禁 / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
 
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。

@@ -487,6 +487,10 @@
 | `npm run verify:restart` | **AC-03 PASS** |
 | `npm run validate:baseline -- --self-test` | SELF-TEST PASSED |
 | `REQUIRE_BASELINE` 退出码闭环 | **EXIT-CHECK PASSED**（空目录 1 / 达标目录 0） |
+| 干净检出终验 | `git archive HEAD` → 88 文件（4 个新增文件齐全，`/.evidence/` 规则未误排除源码）→ `npm ci` → typecheck / 211 单测 / 66 门禁 / 13 证据自检 / build / **51 冒烟（独立端口 5182）** / **AC-03 PASS** |
+| 远端 CI | 本次代码提交 15 步流水线 `success`；run 号以 `gh run list` 为准，文档不写死 |
+
+复跑再次确认：本地全绿不等于仓库可构建，尤其在一次性新增 4 个 tracked 文件、且新增了 `.gitignore` 规则之后。终验用的临时检出工作完即删，生产 `.evidence/` 目录始终为空。
 
 ### 15.6 结论与评分
 
