@@ -304,7 +304,8 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | `npm run smoke` | **48 / 48 通过**（默认端口 5181，需先启动 `npm run cloud`） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
-| GitHub Actions | B3 提交 run `42989595650` **15 步全绿**，含干净检出、门禁、AC-03 重启与 48 项冒烟 |
+| 干净检出终验 | `git archive` → 84 文件 → `npm ci`（169 packages）→ typecheck / 202 单测 / 60 门禁 / build / 48 冒烟 / AC-03 全绿 |
+| GitHub Actions | 最新提交 run `43180916709` **15 步全绿**，含干净检出、门禁、AC-03 重启与 48 项冒烟 |
 
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。
 历史专项（v0.6.0–v0.8.0，仍全绿）：网关计费 9 个单测、评测 diff 8 个单测、并发队列 FIFO 与硬超时、批量管道 8 个单测、integrity / outcome 6 个单测。
@@ -317,6 +318,8 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 - **干净检出才暴露的坑（已修）**：`.gitignore` 里写 `data/` 会匹配**任意层级**的 `data` 目录，把源码 `src/data/` 一并排除，首提交漏掉 `demo-data.ts` 与 `repository.ts`。本地全绿、CI 干净检出报 `TS2307`。现改为 `/data/` 锚定仓库根；B3-3 起 CI 不再维护 31 项硬编码清单，改由 `npm run check:tracked` 全量枚举 `src / server / shared / scripts` 与 `git ls-files` 对账。**结论：本地全绿不等于仓库可构建。**
 - **Vite / Vitest 注意**：`server/store.mjs` 用 `process.getBuiltinModule('node:sqlite')` 同步探测，不能用 `await import('node:sqlite')` —— Vite 会把动态 import 重写成 `import('sqlite')`，导致 Vitest 下探测失败、`createStore()` 静默退到 JSON 兜底。B3-3 已消除 `it.skipIf`：sqlite 不可用时改测 JSON 兜底同样能跨实例恢复，绝不以「0 skipped」的假绿掩盖缺失能力。
 - **依赖安全（ADR-018）**：`npm audit` 报 6 项（3 moderate / 1 high / 2 critical），**全部在 dev 工具链**（Vite 5.4.21 / Vitest 2.1.9 / esbuild / tinypool / vite-node / @vitest/mocker），生产 `dist/` 不含这些组件。无损 `npm audit fix` 实测零效果，全部需跨 major 到 Vite 8 / Vitest 5，**不执行 `--force`**；升级需单独分支 + 完整回归。
+- **本机代理会让验证脚本假失败（已修）**：开发机设了 `http_proxy` 时，`verify-restart.sh` 的 `curl` 会把 `127.0.0.1:5193` 的探活也转发给代理，代理回 502，脚本误判「服务启动失败」；CI 无代理所以一直全绿。现在探活 curl 带 `--noproxy '*'`。Node 的 `fetch` 不读 `http_proxy`，所以 `e2e-smoke.mjs` / `verify-restart.mjs` 不受影响。**结论：验证脚本对运行环境的假设，同样会造成「假保证」。**
+- **反向代理不是「本机」**：无 token 时免鉴权只认浏览器直连；Nginx `proxy_pass` 到 `127.0.0.1:5181` 的流量会被 401 `E6009` 挡掉。凡对外暴露必须设置 `LEADPILOT_API_TOKEN`，详见「云端 API」一节。
 
 </details>
 
