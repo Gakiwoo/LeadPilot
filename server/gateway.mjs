@@ -308,7 +308,19 @@ export function createGateway(opts = {}) {
         : {
           model: pinnedModel, messages, temperature: protocol.rules.temperature, max_tokens: 900,
           response_format: { type: 'json_object' },
+          // DeepSeek V4 是推理模型：默认推理档会吃掉全部 max_tokens、跑满 30s 单次超时，
+          // 实测 reasoning_effort=low 也不稳定（同一请求有时 131 token 收尾、有时 900 全烧完）。
+          // 判断/写信是「在给定 T0 事实与原文上做抽取与措辞」的确定性任务，关闭思考更可靠：
+          // 实测 5s 左右完成、输出可校验 JSON。
+          ...(p.vendor === 'deepseek' ? { thinking: { type: 'disabled' } } : {}),
         }
+      if (process.env.LEADPILOT_DEBUG === '1') {
+        console.log('[gateway:debug] request', JSON.stringify({
+          provider: p.key, vendor: p.vendor, model: pinnedModel,
+          thinking: body.thinking ?? null,
+          msgChars: messages.map((m) => String(m?.content ?? '').length),
+        }))
+      }
       const res = await fetchImpl(url, {
         method: 'POST',
         headers: isAnthropic
@@ -323,7 +335,15 @@ export function createGateway(opts = {}) {
       const data = await res.json()
       const content = isAnthropic ? (data.content?.[0]?.text ?? '') : (data.choices?.[0]?.message?.content ?? '')
       let raw
-      try { raw = JSON.parse(content) } catch { return { kind: 'schema_error', latencyMs: nowFn() - started } }
+      try { raw = JSON.parse(content) } catch {
+        if (process.env.LEADPILOT_DEBUG === '1') {
+          console.log('[gateway:debug] schema_error', JSON.stringify({
+            provider: p.key, finish: data.choices?.[0]?.finish_reason,
+            contentLen: content.length, usage: data.usage, head: content.slice(0, 300),
+          }))
+        }
+        return { kind: 'schema_error', latencyMs: nowFn() - started }
+      }
       const usage = isAnthropic
         ? { input: data.usage?.input_tokens ?? 0, output: data.usage?.output_tokens ?? 0 }
         : { input: data.usage?.prompt_tokens ?? 0, output: data.usage?.completion_tokens ?? 0 }
@@ -365,6 +385,22 @@ export function createGateway(opts = {}) {
     return {
       role: 'user',
       content: `上次返回未通过 schema 校验：${errors.slice(0, 3).join('；')}。请严格按枚举与字段要求重新输出 JSON，不要解释。`,
+    }
+  }
+
+  /**
+   * 版本留痕按设计由网关注入（Prompt 里也写明「由网关注入」），但真实模型不一定照抄占位符。
+   * schema 校验前先补齐 model_id / model_version / prompt_version / schema_version，
+   * 校验通过后再统一覆盖为实际 provider 快照 —— 留痕以网关为准，不依赖模型自报。
+   */
+  function withVersionTrace(raw, p) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw
+    return {
+      ...raw,
+      model_id: raw.model_id ?? p.model,
+      model_version: raw.model_version ?? p.modelVersion,
+      prompt_version: raw.prompt_version ?? protocol.promptVersion,
+      schema_version: raw.schema_version ?? protocol.schemaVersion,
     }
   }
 
@@ -467,7 +503,7 @@ export function createGateway(opts = {}) {
       }
     }
 
-    const baseMessages = buildJudgeMessages({ companyId, sourceTexts: sanitized.texts, facts: input.facts, t0: t0Result })
+    const baseMessages = buildJudgeMessages({ companyId, sourceTexts: sanitized.texts, sources: input.sources, facts: input.facts, t0: t0Result })
     // P1-07：请求体校验查不到 companyId；这里对「真正要发出的文本」做最后一道 PII 终检。
     // 必须放在 reserveBilling 之前，否则拒绝时会在账本里留下冻结点数。
     const finalPii = assertNoPiiInMessages(baseMessages)
@@ -490,11 +526,11 @@ export function createGateway(opts = {}) {
       for (const p of chain) {
         let messages = baseMessages
         let result = await callProvider(p, messages, trace)
-        let checked = result.kind === 'ok' ? validateSchema(result.raw) : { valid: false, errors: ['provider 未返回可解析 JSON'] }
+        let checked = result.kind === 'ok' ? validateSchema(withVersionTrace(result.raw, p)) : { valid: false, errors: ['provider 未返回可解析 JSON'] }
         if (result.kind === 'ok' && !checked.valid && protocol.downgrade.schemaRetrySameProvider >= 1) {
           messages = [...baseMessages, jsonSchemaHintForRetry(checked.errors)]
           result = await callProvider(p, messages, trace)
-          checked = result.kind === 'ok' ? validateSchema(result.raw) : { valid: false, errors: ['schema 重试失败'] }
+          checked = result.kind === 'ok' ? validateSchema(withVersionTrace(result.raw, p)) : { valid: false, errors: ['schema 重试失败'] }
         }
         if (result.kind !== 'ok' || !checked.valid) {
           recordFailure(p)

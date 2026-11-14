@@ -186,7 +186,9 @@ export function assertNoPiiInMessages(messages) {
   ]
   const hits = []
   for (const [index, m] of (Array.isArray(messages) ? messages : []).entries()) {
-    const text = String(m?.content ?? '')
+    // fetched_at 之类的 ISO 日期不是 PII：先剔除日期再查手机号，
+    // 避免 2026-11-06 被电话正则（\d[\d\s().-]{7,}\d）误判为号码而拦下整次请求。
+    const text = String(m?.content ?? '').replace(/\b\d{4}-\d{2}-\d{2}(?:[T ][\d:.Z+-]+)?\b/g, '[date]')
     for (const [pattern, re] of patterns.entries()) {
       if (re.test(text)) hits.push({ index, role: String(m?.role ?? ''), pattern })
     }
@@ -276,7 +278,19 @@ function t0FactLines(t0) {
 
 /** PRD 6.7.7 Prompt 层硬隔离：模型只能使用 <context> 内的内容 */
 export function buildJudgeMessages(input) {
-  const context = (input.sourceTexts ?? []).map((t, i) => `[${i + 1}] ${t}`).join('\n')
+  // 原文的来源 URL 与抓取日期必须随 <context> 一起下发：否则模型无从回填 evidence 的
+  // source_url / fetched_at，真实 provider 会因 schema 校验失败被判降级（E6003）。
+  const sources = Array.isArray(input.sources) ? input.sources : []
+  const context = (input.sourceTexts ?? []).map((t, i) => {
+    const s = sources[i]
+    // 与 server/t0.mjs 的归一化口径保持一致：内部格式 url / fetched_at，
+    // PRD 6.7.3 wire 格式 source_url / fetchedAt 也必须带上来源标注，
+    // 否则模型回填不了 evidence 的 source_url / fetched_at，真实 provider 会被判 E6003 降级。
+    const url = String(s?.url ?? s?.source_url ?? '').trim()
+    const fetchedAt = String(s?.fetched_at ?? s?.fetchedAt ?? '').trim()
+    const meta = url ? `source_url=${url} fetched_at=${fetchedAt}` : ''
+    return meta ? `[${i + 1}] ${meta}\n${t}` : `[${i + 1}] ${t}`
+  }).join('\n')
   const hasT0 = Boolean(input.t0?.ok)
   return [
     {
@@ -288,7 +302,16 @@ export function buildJudgeMessages(input) {
         `import_signal.value: ${protocol.enums.import_signal.join('|')}`,
         `size_estimate.tier: ${protocol.enums.size_estimate.join('|')}`,
         `negative_flags: ${protocol.enums.negative_flags.join('|')}`,
-        `禁止输出 ${protocol.forbiddenFields.join(' / ')} 字段。每条 evidence 必须包含 quote / source_url / fetched_at，quote 必须是 <context> 中的原文片段。`,
+        `禁止输出 ${protocol.forbiddenFields.join(' / ')} 字段。`,
+        `输出必须严格匹配以下结构（snake_case，不得增删字段）：`,
+        '{"company_id":"<原样回填>",'
+          + '"customer_type":{"value":"<枚举>","confidence":<0-1 数字>,"evidence":[{"quote":"<原文片段>","source_url":"<取自 <context> 标注>","fetched_at":"<取自 <context> 标注>","label":"<可选短标签>"}]},'
+          + '"import_signal":{"value":"<枚举>","confidence":<0-1 数字>,"evidence":[...]},'
+          + '"size_estimate":{"tier":"<枚举>","employee_range":[下限,上限] 或 null,"confidence":<0-1 数字>,"evidence":[...]},'
+          + '"negative_flags":[],"notes_for_human":"<可选>"}',
+        `每条 evidence 必须包含 quote / source_url / fetched_at。source_url 与 fetched_at 必须原样取自 <context> 中该来源标注的 source_url / fetched_at，不得改写、不得留空、不得省略 https://。quote 必须是 <context> 原文片段。`,
+        `confidence 必须是 0 到 1 之间的小数（如 0.82），不得写成百分数或字符串。`,
+        `即使某个维度无法判断（customer_type=unknown / import_signal=no_signal / size_estimate.tier=unknown），也必须在该维度给出至少一条 <context> 中最相关的原文片段作为 evidence。`,
         `版本留痕固定为：model_id=<由网关注入> model_version=<由网关注入> prompt_version=${protocol.promptVersion} schema_version=${protocol.schemaVersion}`,
         ...t0FactLines(input.t0),
       ].join('\n'),
