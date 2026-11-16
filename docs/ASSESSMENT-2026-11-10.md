@@ -555,9 +555,11 @@
 | `npm audit --omit=dev --audit-level=low` | **found 0 vulnerabilities, exit 0** |
 | `npm run smoke` / `npm run verify:restart` | **51 / 51** / **AC-03 PASS** |
 | `npm run validate:baseline -- --self-test` | SELF-TEST PASSED |
-| 干净检出终验 | 本轮补跑结果见 16.6 |
+| 干净检出终验 | `git archive HEAD` → **90 文件**（含新增决策文档与 CI audit 步骤）→ `npm ci` → 生产依赖审计 **0 漏洞** / typecheck / **220 单测** / **66 门禁** / **13 证据自检** / build / **51 冒烟（独立端口 5182）** / **AC-03 PASS** |
 
-### 16.6 结论与边界
+### 16.6 环境边界与结论
+
+**一处环境边界如实记录**：`npm run check:tracked` 依赖 `git ls-files`，在 `git archive` 导出的无 `.git` 目录里会误报「65 个源码未被跟踪」——是脚本前提不满足，不是缺文件。主工作区（有 `.git`）复核为 **65 源码 / 90 tracked 全部纳入版本控制**，CI 用 `actions/checkout` 同样带 `.git`。归档目录里跳过该检查，其余项全部实跑通过；临时检出用完即删，生产 `.evidence/` 仍为空。远端 CI `7eecc97` run `43889537135` success。
 
 本轮改的是「联调后新暴露的合规细节」与「供应链判据的可执行性」，**维持 4.0 / 5.0**，不再次抬分。发布状态一条未动：`releaseEligible=false` / `accuracyClaim=false` / `0/6` 商业源 / 5 条 `BLOCKED`。
 
