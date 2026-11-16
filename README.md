@@ -87,7 +87,7 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict + noUncheckedIndexedAccess（索引访问必须显式判空）
-npm test                # 211 个用例 / 10 文件 / 0 skipped（前端 46 + 服务端 165）
+npm test                # 220 个用例 / 11 文件 / 0 skipped（前端 46 + 服务端 174）
 npm run gate            # 发布门禁 66 项自检，输出 releaseBlocked=true
 npm run evidence:check -- --self-test  # 证据校验器反例：合成/缺签署/凑数样本必须被拒
 npm run evidence:check  # 查看当前证据目录的真实判定与阻断项
@@ -99,6 +99,7 @@ npm run validate:baseline -- --self-test   # legacy 标注导入校验器反例�
 ```
 
 `VITE_LEADPILOT_API` 覆盖前端网关地址，`LEADPILOT_PORT` / `LEADPILOT_HOST` 控制服务端监听。
+`LEADPILOT_DEBUG=1` 仅用于本地排障：日志只输出元数据与不可逆指纹，**不回显 prompt、官网原文或模型响应正文**。
 完整环境变量样板见 [`.env.example`](.env.example)（**不含任何真实 Key**）。
 
 ---
@@ -140,7 +141,7 @@ flowchart LR
 | 用户指定 URL 抓取（v0.9.0） | ✅ 真实实现 | robots 遵从、每域限速、重定向上限 3 且逐跳重做 SSRF 校验、内容哈希、PII 清洗 |
 | 发布证据通道（v0.9.0 补遗） | ✅ 真实实现 | `.evidence/` → 签署 / 逐字自洽 / 去重校验 → `eval.mjs` 真实计算；快照与合规读真实配置；`BLOCKED` 由结果生成而非硬编码 |
 | **批量 SDR 管道（v0.7.0）** | 🟡 **内测可用** | CSV / JSON 导入 → T0 + 真实 `judge()` 批量研判 → mbox 草稿导出 → 结果回写与 3% 退信熔断；`companies` / `outcomes` 落库 |
-| 真实 provider 调用 | 🟡 配置即用 | Key 从服务端环境变量读取，**且必须锁定 `LEADPILOT_MODEL_VERSION_*` 具体快照**；仓库不内置 Key、不预置猜测版本号 |
+| 真实 provider 调用 | 🟡 配置即用 | Key 从服务端环境变量读取，**且必须锁定 `LEADPILOT_MODEL_VERSION_*` 具体快照**；仓库不内置 Key、不预置猜测版本号。已完成一次真实联调：来源 `source_url` / `fetched_at` 随 `<context>` 下发、DeepSeek 推理档关闭、版本留痕由网关注入而非依赖模型自报 |
 | 数据源注册表（9.3） | ⚪ 契约真实 / 实现 `0/6` | 逐源健康如实上报；即使注入实现也返回 `blocked` 并暂停任务（ADR-017「可插拔 ≠ 可放行」） |
 | 385 家人工标注集 | ❌ 决策不做 | 契约与校验器保留为 legacy（`status=legacy` / `enabled=false`），不参与当前判定；仓库不提供、不生成任何标注样本 |
 | 商业数据源采购 / Gmail OAuth + CASA / Tauri 2 + DPAPI + EV 签名 | ❌ 未接入 | 接口已抽象，属正式发布门禁项，见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
@@ -156,6 +157,7 @@ flowchart LR
 > 响应里的 `points` 只是 token 折算估值，**只有 `billing.charged=true` 才代表实际扣点**。
 > v0.8.0 决策不做人工标注集，因此没有准确率可宣称：`accuracyClaim` 恒 `false`，任何以人工真值为前提的数字断言都会被 `npm run gate` 静态扫描拦下。
 > 门禁的 `BLOCKED` 由真实证据判定生成，但代码**无法证明证据真实性**：`attestation` 是签署人的责任声明，发布前必须独立审计。
+> 生产依赖 0 漏洞由 CI 每次实跑；**dev 工具链仍有 6 条已知漏洞**（跨 major 才能修），表述是「风险已限定且已知」，不是「无漏洞」，见 [依赖升级决策](docs/DEPENDENCY-DECISION.md)。
 > 任何降级路径都**不返回一段看起来像模型写的假正文**；分数改为区间显示并标注「未经模型校验」。这是对 PRD 6.7「不能假知道」的工程落实。
 
 ---
@@ -307,16 +309,17 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | 检查 | 结果（v0.9.0） |
 |---|---|
 | `npm run typecheck` / `npm run build` | 通过；`strict` + `noUncheckedIndexedAccess` 双开，门禁静态锁死；`/health.version` 与侧栏版本号均从 `package.json` 读取，不再硬编码；生产构建 353.78 kB / gzip 119.45 kB |
-| `npm test` | **211 / 211 全绿，0 skipped**（10 文件；前端 46 + 服务端 165） |
+| `npm test` | **220 / 220 全绿，0 skipped**（11 文件；前端 46 + 服务端 174） |
 | `npm run gate` | **66 / 66 自检通过**，输出 `releaseBlocked=true` 与 5 条由真实判定生成的 `BLOCKED` |
 | `npm run evidence:check -- --self-test` | **13 / 13 通过**：合成标记 / 缺签署 / 伪造引用 / 复制凑数 / 空集全部被拒 |
-| `npm run check:tracked` | **64 个源码/配置全部纳入版本控制**，88 个 tracked 文件无缺失 |
+| `npm run check:tracked` | **65 个源码/配置全部纳入版本控制**，无缺失；tracked 总数以 `git ls-files \| wc -l` 为准，文档不写死 |
+| `npm audit --omit=dev --audit-level=low` | **0 漏洞**，已固化为 CI 硬步骤；dev 工具链 6 条漏洞需跨 major 升级，见 [依赖升级决策](docs/DEPENDENCY-DECISION.md) |
 | `npm run capture:screenshots` | 5 张 README 截图可由仓库内脚本重生成（Chrome headless / CDP，1600×1000） |
 | `npm run smoke` | **51 / 51 通过**（默认端口 5181，需先启动 `npm run cloud`） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
-| 干净检出终验 | B4 复跑：`git archive HEAD` → 88 文件（4 个新增文件齐全）→ `npm ci` → typecheck / 211 单测 / 66 门禁 / 13 证据自检 / build / 51 冒烟（独立端口 5182）/ AC-03 全绿；B3 历史终验 84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
-| GitHub Actions | 每次 push 的 15 步流水线全绿（干净检出 / 门禁 / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
+| 干净检出终验 | B5 复跑结果见评估报告第 16 节；B4 历史：88 文件 → `npm ci` → 211 单测 / 66 门禁 / 51 冒烟 / AC-03 全绿；B3 历史：84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
+| GitHub Actions | 每次 push 的流水线全绿（干净检出 / **生产依赖 0 漏洞审计** / 门禁 / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
 
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。
 历史专项（v0.6.0–v0.8.0，仍全绿）：网关计费 9 个单测、评测 diff 8 个单测、并发队列 FIFO 与硬超时、批量管道 8 个单测、integrity / outcome 6 个单测。

@@ -32,6 +32,12 @@ jobs:
       - name: Install
         run: npm ci
 
+      # B5：生产依赖 0 漏洞是发布前置，必须在每次干净检出里实跑，不能只靠一次性人工验证。
+      # 只审计 --omit=dev：dev 工具链 6 条漏洞需 vite 5→8 / vitest 2→5 跨 major，
+      # 决策另见 docs/DEPENDENCY-DECISION.md；不用放宽 audit-level 把它伪装成 0。
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=low
+
       # 干净检出保护：.gitignore 曾因 `data/` 误排除 src/data/，本地全绿但 CI 缺模块。
       # B3-3：不再维护 31 项硬编码清单，改为全量枚举 src/server/shared/scripts 与 git ls-files 对账。
       - name: Tracked sources sanity (clean checkout)

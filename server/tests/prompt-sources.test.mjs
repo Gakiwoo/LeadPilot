@@ -4,8 +4,9 @@
  *  - 内部格式（url / fetched_at）与 PRD 6.7.3 wire 格式（source_url / fetchedAt）都要生效
  *  - ISO 日期不是手机号；但剔除日期不得放宽真实 PII 终检
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { buildJudgeMessages, assertNoPiiInMessages } from '../protocol.mjs'
+import { createGateway } from '../gateway.mjs'
 
 const TEXT_A = 'Authorized distributor for Parker and Eaton across Benelux.'
 const TEXT_B = 'We stock hydraulic hose fittings and brass adapters.'
@@ -71,5 +72,75 @@ describe('assertNoPiiInMessages · ISO 日期不是手机号', () => {
     expect(assertNoPiiInMessages([{ role: 'user', content: 'fetched_at=2026-11-06 +86 138 0013 8000' }]).ok).toBe(false)
     expect(assertNoPiiInMessages([{ role: 'user', content: 'fetched_at=2026-11-06 sales@example.com' }]).ok).toBe(false)
     expect(assertNoPiiInMessages([{ role: 'user', content: 'Authorization: Bearer sk-abcdefgh12345678' }]).ok).toBe(false)
+  })
+})
+
+/* B5 · 联调 debug 日志不得回显模型原文 / PII */
+describe('LEADPILOT_DEBUG · 日志只输出元数据', () => {
+  const SECRET = 'purchasing@secret-vendor.example'
+  const QUOTE = 'Authorized distributor for Parker and Eaton across Benelux'
+  // 模拟真实 provider 返回非 JSON：模型常会把 <context> 原文与联系人信息回带在解释里
+  const BAD_CONTENT = `抱歉，我无法输出 JSON。原文：${QUOTE}；联系人：${SECRET}`
+  const judgeInput = {
+    companyId: 'c_debug_1', domain: 'debug.example', country: '美国',
+    sourceTexts: [QUOTE],
+    facts: { keywordHits: [{ term: 'fittings', count: 2 }], customsRecords: 1 },
+  }
+  const baseEnv = {
+    LEADPILOT_DEBUG: '1',
+    DEEPSEEK_API_KEY: 'debug-key',
+    LEADPILOT_MODEL_VERSION_DEEPSEEK_PRO: 'deepseek-chat-2026-10-15',
+  }
+  const badFetch = async () => ({
+    status: 200, ok: true,
+    json: async () => ({
+      choices: [{ message: { content: BAD_CONTENT }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 100, completion_tokens: 20 },
+    }),
+  })
+  const gatewayWith = (extra = {}) => createGateway({
+    env: { ...baseEnv, ...extra }, fetchImpl: badFetch,
+    sleep: async () => {}, now: () => 1_700_000_000_000,
+  })
+  const capture = () => vi.spyOn(console, 'log').mockImplementation(() => {})
+  const outputOf = (spy) => spy.mock.calls.map((c) => c.map(String).join(' ')).join('\n')
+
+  it('schema_error 与 request 日志都不回显原文 / 邮箱，只给长度与不可逆指纹', async () => {
+    const spy = capture()
+    try {
+      await gatewayWith().judge(judgeInput)
+      const out = outputOf(spy)
+      expect(out).toContain('[gateway:debug] schema_error')
+      expect(out).toContain('[gateway:debug] request')
+      expect(out).toContain('msgChars')
+      expect(out).toContain('startsWithJson')
+      expect(out).toContain('headFingerprint')
+      expect(out).not.toContain(SECRET)
+      expect(out).not.toContain(QUOTE)
+      expect(out).not.toMatch(/"head"\s*:/)
+      expect(out).not.toMatch(/purchasing@|抱歉，我无法输出/)
+    } finally { spy.mockRestore() }
+  })
+
+  it('未开启 debug 时不产生任何网关日志', async () => {
+    const spy = capture()
+    try {
+      await gatewayWith({ LEADPILOT_DEBUG: '0' }).judge(judgeInput)
+      expect(spy).not.toHaveBeenCalled()
+    } finally { spy.mockRestore() }
+  })
+
+  it('debug 读注入 env 而非宿主 process.env（改回全局也不该偷偷打日志）', async () => {
+    const spy = capture()
+    const prev = process.env.LEADPILOT_DEBUG
+    process.env.LEADPILOT_DEBUG = '1'
+    try {
+      await gatewayWith({ LEADPILOT_DEBUG: '0' }).judge(judgeInput)
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      if (prev === undefined) delete process.env.LEADPILOT_DEBUG
+      else process.env.LEADPILOT_DEBUG = prev
+      spy.mockRestore()
+    }
   })
 })

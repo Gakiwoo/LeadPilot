@@ -392,6 +392,7 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 - 本基线**不保存任何 API Key / token / 凭据**；设置页的 BYOK 只是开关，不落密钥。服务端 Key 只从 `process.env` 读取，不写日志、不回传前端、不进审计记录。`.env.example` 只有空值样板，`.gitignore` 排除 `.env` / `data/` / `*.db` / `.workbuddy/`。
 - `mockLlmAdapter.healthCheck()` 返回 `ok: false`；真实网关不可达时 `probeGateway()` 返回 `offline`，顶栏 / 侧栏明确显示，任何依赖它的代码都会走降级分支。
 - 调用审计只记元数据（provider / 模型 / 快照版本 / token 数 / 点数 / 延迟 / 是否降级 / `piiRemoved`），**绝不记 prompt、官网原文、客户邮箱或发件人身份**；冒烟脚本会断言审计条目里没有 `prompt` 字段。审计本身落在持久化 store，但内容仍只有元数据。
+- **诊断日志同样受此约束（B5）**：`LEADPILOT_DEBUG=1` 时网关只输出请求元数据（provider / 模型 / 消息长度）与失败元数据（响应长度 / 是否以 JSON 起始 / 片段不可逆指纹），**不回显 prompt 或模型响应正文**——真实 provider 返回非 JSON 时常把 `<context>` 原文片段与客户邮箱回带在解释里。debug 开关从网关注入的 `env` 读取，与其他配置同源；行为级反例见 `server/tests/prompt-sources.test.mjs`。
 - HTTP 层：Bearer 鉴权 / CORS 白名单 / 每分钟限流 / 256 KB 请求体上限 / 启动前置安全校验，见 ADR-015。
 - 模型层：结构化字段命中 PII 直接 400 `E6004`；官网自由文本先 `sanitizeContext` 清洗再发模型（ADR-011）；浮动模型指针拒绝调用（ADR-014）。
 - 所有演示公司带 `demo: true` 标记；界面常驻演示黄条，无关闭入口。

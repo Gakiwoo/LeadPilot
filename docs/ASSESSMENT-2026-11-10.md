@@ -497,3 +497,68 @@
 **维持 4.0 / 5.0，不因一次补遗再次抬分。** 本批改的是「验证链路的诚实性」，与第 14 节已提升的维度（代码正确性 / 测试与验证）同向但幅度不足以改分；设计侧没有改动。第 14.3 节的判断继续有效：**分数不是发布判据**，`releaseEligible=false` / `accuracyClaim=false` / 0/6 商业源 / 5 条 `BLOCKED` 一条未撤。
 
 现在这 5 条 `BLOCKED` 的含义变了：以前是「文档说没达标」，现在是「代码读了证据目录、环境变量和合规清单后判定没达标」。要让它们消失，需要的是真实样本、真实快照与真实外部流程，不是再改一次脚本。
+
+---
+
+## 16. B5 补遗 · 远端联调提交复核、诊断日志合规与依赖决策（2026-11-16）
+
+### 16.1 会话起点：四端不一致
+
+「继续执行其他任务」后按硬规约先查四端，发现本地停在 `ee2ecdb`，而 `origin/main` / `git ls-remote` / GitHub API 均为 **`d0dc2e2`**：远端在 11-14 新增了一次提交。先 `git merge --ff-only origin/main` 快进，工作区保持 0 改动，再开始任何评估与改动。
+
+远端提交 `d0dc2e2 fix(gateway): 真实 provider 联调修复 + 来源字段兼容与 6 个行为级反例`，改 3 个文件（`server/gateway.mjs` / `server/protocol.mjs` / 新增 `server/tests/prompt-sources.test.mjs`）：
+
+| 改动 | 评价 |
+|---|---|
+| DeepSeek 推理档 `thinking: {type:'disabled'}` | 联调实证（默认档吃满 900 token / 30s 超时），合理 |
+| `withVersionTrace()` schema 前补齐版本留痕 | 正确：留痕以网关注入为准，不依赖模型自报 |
+| `<context>` 随原文下发 `source_url` / `fetched_at`，兼容内部与 wire 两种字段 | 修复真实 provider 因 evidence 无法回填被判 `E6003` 降级 |
+| `assertNoPiiInMessages` 先剔除 ISO 日期再查电话 | 修误拦截，且保留真实 PII 反例，未放宽终检 |
+| 新增 6 个行为级反例 | 覆盖两种来源格式、多源索引对应、日期误判与 PII 不放宽 |
+
+快进后全量回归全绿（220 单测 / 66 门禁 / 13 证据自检 / 65 tracked / build），远端 CI `43554073710` success。**B4 证据通道与发布门禁未被这次联调改动破坏。**
+
+### 16.2 发现并修复：诊断日志回显模型原文
+
+| 项 | 内容 |
+|---|---|
+| 问题 | `LEADPILOT_DEBUG=1` 时 `schema_error` 分支把模型响应 `content.slice(0, 300)` 直接打进 stdout |
+| 为什么是真缺口 | 真实 provider 返回非 JSON 时，常把 `<context>` 原文片段、quote、客户邮箱回带在解释里；这些日志会进 PM2 / 容器 stdout。`docs/ARCHITECTURE.md` 安全边界明确「绝不记 prompt、官网原文、客户邮箱」，旧实现破了这个例 |
+| 附带不一致 | 网关其他配置都从注入的 `opts.env` 读，唯独 debug 开关偷读全局 `process.env`，测试无法确定性注入 |
+| 修复 | debug 改读注入 `env`；失败日志只输出 `provider / finish / contentLen / usage / startsWithJson / headFingerprint`（SHA-256 前 12 位不可逆指纹），并写明不回显原文；请求日志仍只打消息长度 |
+| 行为级反例 | `server/tests/prompt-sources.test.mjs` 新增 3 例：构造含原文片段与邮箱的非法响应并捕获 `console.log`，断言输出不含二者、含元数据字段；debug 关闭无日志；宿主 `process.env.LEADPILOT_DEBUG=1` 也不能影响注入 env 的网关 |
+
+诊断价值没有丢：能区分空响应、markdown 包裹、截断 JSON、重复失败（指纹相同），只是不再把内容写进日志。
+
+### 16.3 供应链：生产 0 漏洞变硬断言，dev 6 条漏洞如实落盘
+
+- `npm audit --omit=dev` → **0 漏洞**；但这此前只是「一次性人工验证」，CI 里没有。已在 `.github/workflows/ci.yml` 的 `npm ci` 之后加 `npm audit --omit=dev --audit-level=low`，每次干净检出实跑，任何级别漏洞都让 CI 红。
+- `npm audit`（含 dev）→ **6 条漏洞**：`vitest` / `tinypool` critical，`vite` high，`@vitest/mocker` / `esbuild` / `vite-node` moderate。修复路径全部 `isSemVerMajor: true`（`vite 5→8`、`vitest 2→5`）。
+- 新增 [`docs/DEPENDENCY-DECISION.md`](DEPENDENCY-DECISION.md)：风险边界（生产运行时不受影响，开发机 dev server / Vitest UI 有暴露面）、为什么不能一键升级、三个决策选项、升级后的 7 条验收标准。
+- **本轮不升级**。默认选 A「保持现状 + 缓解」，措辞是「风险已限定且已知」，不写成「0 漏洞」或「已修复」；要选 B 需用户明确批准。
+
+这一步刻意没有把 dev 漏洞做成门禁里的硬编码常量断言——B3-0 / B4 刚修完两类「静态常量假保证」，再往门禁里塞一份会漂移的漏洞清单就是重蹈覆辙。CI 实跑 + 决策文档是更诚实的形式。
+
+### 16.4 文档漂移收口
+
+远端提交让 README 的 4 处数字过时（211 单测 / 10 文件 / 64 源码 / 88 tracked），已同步为 **220 / 11 / 65 / 89**；补充真实 provider 联调说明、`LEADPILOT_DEBUG` 的日志边界、生产依赖审计行与 dev 漏洞链接；`docs/ARCHITECTURE.md` 安全边界补上「诊断日志同样不回显原文」；`.env.example` 补 `LEADPILOT_DEBUG` 说明。
+
+### 16.5 验证结果
+
+| 检查 | 结果 |
+|---|---|
+| `npm run typecheck` / `npm run build` | 通过 / `353.78 kB · gzip 119.45 kB` |
+| `npm test` | **220 / 220**（11 文件，前端 46 + 服务端 174，0 skipped；新增 3 个 debug 日志反例） |
+| `npm run gate` | **66 / 66**；5 条 `BLOCKED` 保持，`releaseEligible=false` |
+| `npm run evidence:check -- --self-test` | **13 / 13** |
+| `npm run check:tracked` | **65 源码/配置，89 tracked 无缺失** |
+| `npm audit --omit=dev --audit-level=low` | **found 0 vulnerabilities, exit 0** |
+| `npm run smoke` / `npm run verify:restart` | **51 / 51** / **AC-03 PASS** |
+| `npm run validate:baseline -- --self-test` | SELF-TEST PASSED |
+| 干净检出终验 | 本轮补跑结果见 16.6 |
+
+### 16.6 结论与边界
+
+本轮改的是「联调后新暴露的合规细节」与「供应链判据的可执行性」，**维持 4.0 / 5.0**，不再次抬分。发布状态一条未动：`releaseEligible=false` / `accuracyClaim=false` / `0/6` 商业源 / 5 条 `BLOCKED`。
+
+仍未完成的仍是独立决策项，不是缺陷：**dev 工具链跨 major 升级**（需批准）、多实例租约、响应式重构、WCAG 2.1 AA 完整审计，以及外部流程（真实样本、快照、OAuth / CASA / EV / 法务）。其中外部流程代码不能代做，也不能伪造完成。

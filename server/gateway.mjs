@@ -16,6 +16,7 @@ import {
   buildEmailMessages, validateEmailDraft,
 } from './protocol.mjs'
 import { extractFacts, reconcileWithT0 } from './t0.mjs'
+import { createHash } from 'node:crypto'
 
 const EEA_UK = new Set(['德国', '法国', '荷兰', '英国', '西班牙', '意大利', '波兰', '挪威', '瑞典', '丹麦', '比利时', '奥地利', '爱尔兰'])
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -47,6 +48,9 @@ export function regionDecision(country, tier, { policy = 'domestic_first', allow
 export function createGateway(opts = {}) {
   const env = opts.env ?? process.env
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch
+  // B5：debug 开关与其他网关配置一样从注入的 env 读取，不再偷偷读全局 process.env。
+  // 这样测试能确定性注入，生产行为不变（服务端不传 env 时默认仍是 process.env）。
+  const debug = env.LEADPILOT_DEBUG === '1'
   const nowFn = opts.now ?? (() => Date.now())
   const sleepFn = opts.sleep ?? sleep
   const store = opts.store ?? null
@@ -314,7 +318,8 @@ export function createGateway(opts = {}) {
           // 实测 5s 左右完成、输出可校验 JSON。
           ...(p.vendor === 'deepseek' ? { thinking: { type: 'disabled' } } : {}),
         }
-      if (process.env.LEADPILOT_DEBUG === '1') {
+      if (debug) {
+        // 只打元数据与消息长度，绝不打 prompt 内容（可能含官网原文 / 客户邮箱）
         console.log('[gateway:debug] request', JSON.stringify({
           provider: p.key, vendor: p.vendor, model: pinnedModel,
           thinking: body.thinking ?? null,
@@ -336,10 +341,19 @@ export function createGateway(opts = {}) {
       const content = isAnthropic ? (data.content?.[0]?.text ?? '') : (data.choices?.[0]?.message?.content ?? '')
       let raw
       try { raw = JSON.parse(content) } catch {
-        if (process.env.LEADPILOT_DEBUG === '1') {
+        if (debug) {
+          // B5：模型响应里可能回带 <context> 原文片段、quote 或客户邮箱。
+          // 旧实现把前 300 字符直接打进 stdout，与「绝不记官网原文 / 客户 PII」的规约冲突。
+          // 诊断改用元数据 + 不可逆指纹：能区分空响应 / markdown 包裹 / 截断 JSON，且不泄露内容。
+          const head = content.slice(0, 300)
           console.log('[gateway:debug] schema_error', JSON.stringify({
-            provider: p.key, finish: data.choices?.[0]?.finish_reason,
-            contentLen: content.length, usage: data.usage, head: content.slice(0, 300),
+            provider: p.key,
+            finish: data.choices?.[0]?.finish_reason ?? null,
+            contentLen: content.length,
+            usage: data.usage ?? null,
+            startsWithJson: /^\s*[{[]/.test(content),
+            headFingerprint: createHash('sha256').update(head).digest('hex').slice(0, 12),
+            note: '不回显模型原文：仅输出长度 / 结构标志 / 不可逆指纹',
           }))
         }
         return { kind: 'schema_error', latencyMs: nowFn() - started }
