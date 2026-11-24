@@ -352,11 +352,12 @@ function pinnedLookup(addresses) {
  * hostname 仍是原域名（Host 头与 TLS SNI 不变、证书校验正常），只有解析结果被锁死；
  * B1 的「连接前二次校验」保留作纵深防御，但连接本身已不再受 DNS 重绑定影响。
  */
-export function pinnedFetch(url, init = {}, addresses = [], timeoutMs = 10000) {
+export function pinnedFetch(url, init = {}, addresses = [], timeoutMs = 10000, maxBytes = FETCH_LIMITS.maxBytes) {
   if (!addresses.length) return globalThis.fetch(url, init)
   const u = new URL(url)
   const request = u.protocol === 'https:' ? httpsRequest : httpRequest
   return new Promise((resolve, reject) => {
+    let overflowed = false
     const req = request({
       hostname: u.hostname,
       port: u.port || (u.protocol === 'https:' ? 443 : 80),
@@ -368,8 +369,30 @@ export function pinnedFetch(url, init = {}, addresses = [], timeoutMs = 10000) {
       timeout: timeoutMs,
     }, (res) => {
       const chunks = []
-      res.on('data', (c) => chunks.push(c))
+      let bytes = 0
+      // B6 · P1-3：默认出站必须在 data 阶段就有硬上限。
+      // 旧实现无界 chunks.push + Buffer.concat，下游 readLimited 只能「截断后仍报 ok:true」，
+      // 既撑内存又让契约里的「响应过大 E4012」分支永远不触发。
+      const rejectOverflow = () => {
+        if (overflowed) return
+        overflowed = true
+        try { res.destroy() } catch { /* 忽略销毁失败 */ }
+        try { req.destroy() } catch { /* 忽略销毁失败 */ }
+        reject(new Error(`响应体超过 ${maxBytes} 字节上限（E4012）`))
+      }
+      res.on('data', (c) => {
+        if (overflowed) return
+        if (bytes + c.length > maxBytes) {
+          chunks.push(c.subarray(0, Math.max(0, maxBytes - bytes)))
+          bytes = maxBytes
+          rejectOverflow()
+          return
+        }
+        chunks.push(c)
+        bytes += c.length
+      })
       res.on('end', () => {
+        if (overflowed) return
         const headers = new Headers()
         for (const [k, v] of Object.entries(res.headers ?? {})) {
           if (v === undefined) continue
@@ -379,10 +402,11 @@ export function pinnedFetch(url, init = {}, addresses = [], timeoutMs = 10000) {
         const hasBody = ![204, 205, 304].includes(status)
         resolve(new Response(hasBody ? Buffer.concat(chunks) : null, { status, headers }))
       })
-      res.on('error', reject)
+      // destroy() 触发的 socket error 不得覆盖「响应体超限」这个真实原因
+      res.on('error', (err) => { if (!overflowed) reject(err) })
     })
     req.on('timeout', () => req.destroy(new Error(`抓取超时（${timeoutMs}ms）`)))
-    req.on('error', reject)
+    req.on('error', (err) => { if (!overflowed) reject(err) })
     req.end()
   })
 }
@@ -397,9 +421,9 @@ export function createFetcher(opts = {}) {
   const injectedFetch = opts.fetchImpl ?? null
   // 默认走固定 lookup 的 pinnedFetch；测试注入的 fetchImpl 仍按 (url, init) 工作，
   // 第三个参数多传的「已验证地址列表」不影响既有断言，但可被新的行为级反例捕获。
-  const doFetch = (url, init, addresses, timeoutMs) => injectedFetch
+  const doFetch = (url, init, addresses, timeoutMs, maxBytes) => injectedFetch
     ? injectedFetch(url, init, addresses)
-    : pinnedFetch(url, init, addresses, timeoutMs)
+    : pinnedFetch(url, init, addresses, timeoutMs, maxBytes)
   const resolveHost = opts.resolveHost
   const now = opts.now ?? (() => Date.now())
   const sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
@@ -569,7 +593,7 @@ export function createFetcher(opts = {}) {
             accept: P.allowedContentTypes.join(', '),
             'accept-language': 'en,zh-CN;q=0.8',
           },
-        }, recheck.addresses, L.timeoutMs)
+        }, recheck.addresses, L.timeoutMs, L.maxBytes)
       } catch (err) {
         return fail('E4012', `抓取失败：${String(err?.message ?? err)}`, { redirects: chain })
       }
@@ -637,6 +661,14 @@ export function createFetcher(opts = {}) {
       return fail('E4012', `内容类型不支持：${type}`, { url: target.href, finalUrl: finalUrl.href, contentType: type })
     }
     const { buffer, truncated } = await readLimited(res, L.maxBytes)
+    if (truncated) {
+      // B6 · P1-3：超限不是「截断后可用」，而是内容不满足契约，必须如实拒绝。
+      // 注入式 fetchImpl / globalThis.fetch 路径由 readLimited 判定，默认出站由 pinnedFetch 提前断开。
+      counters.failed++
+      return fail('E4012', `响应体超过 ${L.maxBytes} 字节上限，拒绝返回截断原文`, {
+        url: target.href, finalUrl: finalUrl.href, maxBytes: L.maxBytes, redirects,
+      })
+    }
     const rawText = buffer.toString('utf8')
     const isHtml = type === 'text/html' || type === 'application/xhtml+xml' || (!type && /<html[\s>]/i.test(rawText))
     const plain = isHtml ? htmlToText(rawText) : rawText
@@ -655,7 +687,7 @@ export function createFetcher(opts = {}) {
       status: res.status,
       contentType: type || 'unknown',
       bytes: buffer.length,
-      truncated,
+      truncated: false, // B6：成功响应一律未截断；超限已在上面返回 E4012
       hash: createHash('sha256').update(buffer).digest('hex'),
       textChars: text.length,
       text,

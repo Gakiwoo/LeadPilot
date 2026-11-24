@@ -173,25 +173,72 @@ export function assertNoPii(payload) {
   return { ok: violations.length === 0, violations: [...new Set(violations)] }
 }
 
+/** PII 终检的三种模式：邮箱 / 电话 / 凭据。清洗与终检共用同一组定义，避免口径漂移 */
+const PII_PATTERNS = [
+  /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/,
+  /\+?\d[\d\s().-]{7,}\d/,
+  /\b(?:sk-|Bearer\s+)[A-Za-z0-9_-]{8,}/,
+]
+const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}(?:[T ][\d:.Z+-]+)?\b/g
+
+/**
+ * 只解码合法的 %XX（ASCII 可打印）序列，不抛 URIError；
+ * 迭代两轮是为了让 %2540 这类双重编码也还原成 @，而不是绕过终检。
+ */
+function decodePercentEncoded(s) {
+  let out = String(s ?? '')
+  for (let i = 0; i < 2; i++) {
+    const next = out.replace(/%([0-9A-Fa-f]{2})/g, (m, hex) => {
+      const code = parseInt(hex, 16)
+      return code >= 0x20 && code < 0x7f ? String.fromCharCode(code) : m
+    })
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
+/** 原文与解码后的文本一起查；ISO 日期先剔除，避免 2026-11-06 被电话正则误判 */
+function textHasPii(text) {
+  const decoded = decodePercentEncoded(text)
+  const combined = `${text}\n${decoded}`.replace(ISO_DATE_RE, '[date]')
+  return PII_PATTERNS.findIndex((re) => re.test(combined))
+}
+
+/**
+ * 来源 URL 白名单：只保留 scheme + host + pathname，剥掉 userinfo / query / hash。
+ * query 常夹带邮箱、电话与 token，userinfo 本身就是凭据；模型只需回填一个合法 http(s) 地址。
+ * 若 pathname 解码后仍命中 PII，退化为只保留 origin，绝不把原文 PII 拼进 prompt。
+ */
+export function sanitizeSourceUrl(raw) {
+  const s = String(raw ?? '').trim()
+  if (!s) return ''
+  try {
+    const u = new URL(s)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return ''
+    const base = `${u.protocol}//${u.host}`
+    const candidate = `${base}${u.pathname}`
+    return textHasPii(candidate) >= 0 ? base : candidate
+  } catch { return '' }
+}
+
+/** fetched_at 只允许 ISO 日期 / 时间戳，避免该字段被当成 Prompt 注入通道 */
+export function safeFetchedAt(raw) {
+  const s = String(raw ?? '').trim()
+  return /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.Z+-]{1,20})?$/.test(s) ? s : ''
+}
+
 /**
  * P1-07：出站前对最终 prompt 全文做一次 PII 终检。
  * assertNoPii 只查结构化请求体（facts / profile），companyId 之类的字段会原样进 prompt；
  * 这里是「真正要发给 provider 的文本」的最后一道闸，命中即拒绝出站。
+ * B6：原文与解码文本一起查，编码（%40 / %2540）PII 不得绕过终检。
  */
 export function assertNoPiiInMessages(messages) {
-  const patterns = [
-    /[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/,
-    /\+?\d[\d\s().-]{7,}\d/,
-    /\b(?:sk-|Bearer\s+)[A-Za-z0-9_-]{8,}/,
-  ]
   const hits = []
   for (const [index, m] of (Array.isArray(messages) ? messages : []).entries()) {
-    // fetched_at 之类的 ISO 日期不是 PII：先剔除日期再查手机号，
-    // 避免 2026-11-06 被电话正则（\d[\d\s().-]{7,}\d）误判为号码而拦下整次请求。
-    const text = String(m?.content ?? '').replace(/\b\d{4}-\d{2}-\d{2}(?:[T ][\d:.Z+-]+)?\b/g, '[date]')
-    for (const [pattern, re] of patterns.entries()) {
-      if (re.test(text)) hits.push({ index, role: String(m?.role ?? ''), pattern })
-    }
+    const pattern = textHasPii(String(m?.content ?? ''))
+    if (pattern >= 0) hits.push({ index, role: String(m?.role ?? ''), pattern })
   }
   return { ok: hits.length === 0, hits }
 }
@@ -286,8 +333,9 @@ export function buildJudgeMessages(input) {
     // 与 server/t0.mjs 的归一化口径保持一致：内部格式 url / fetched_at，
     // PRD 6.7.3 wire 格式 source_url / fetchedAt 也必须带上来源标注，
     // 否则模型回填不了 evidence 的 source_url / fetched_at，真实 provider 会被判 E6003 降级。
-    const url = String(s?.url ?? s?.source_url ?? '').trim()
-    const fetchedAt = String(s?.fetched_at ?? s?.fetchedAt ?? '').trim()
+    // B6：URL 与日期都必须先过白名单，不能把原始 query / userinfo / 注入文本拼进 prompt。
+    const url = sanitizeSourceUrl(s?.url ?? s?.source_url ?? '')
+    const fetchedAt = safeFetchedAt(s?.fetched_at ?? s?.fetchedAt ?? '')
     const meta = url ? `source_url=${url} fetched_at=${fetchedAt}` : ''
     return meta ? `[${i + 1}] ${meta}\n${t}` : `[${i + 1}] ${t}`
   }).join('\n')

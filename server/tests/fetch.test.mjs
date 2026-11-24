@@ -140,8 +140,16 @@ Allow: /private/public
     const big = await setup({
       'https://example.com/big': page(`<html><body>${'a'.repeat(200)}</body></html>`),
     }, { limits: { maxBytes: 40, maxTextChars: 10000 } }).fetcher.fetchOne('https://example.com/big')
-    expect(big.ok).toBe(true)
-    expect(big.truncated).toBe(true)
+    // B6 · P1-3：超限不是「截断后仍可用」，而是内容不满足契约，必须如实 E4012 拒绝
+    expect(big.ok).toBe(false)
+    expect(big.code).toBe('E4012')
+    expect(big.reason).toMatch(/超过 \d+ 字节上限/)
+
+    const small = await setup({
+      'https://example.com/small': page('<html><body>ok</body></html>'),
+    }, { limits: { maxBytes: 1000 } }).fetcher.fetchOne('https://example.com/small')
+    expect(small.ok).toBe(true)
+    expect(small.truncated).toBe(false)
 
     const loop = await setup({
       'https://example.com/a': redirect('/b'),
@@ -358,6 +366,51 @@ describe('P1-01 · 连接 pin 到已验证 IP（DNS 重绑定彻底消除）', (
       )
       expect(res.status).toBe(200)
       expect(await res.text()).toContain('pinned')
+    } finally {
+      await new Promise((resolve) => server.close(resolve))
+    }
+  })
+
+  it('B6 · pinnedFetch 大响应在 data 阶段即断开，不把整段响应吃进内存', async () => {
+    const server = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      for (let i = 0; i < 40; i++) res.write('x'.repeat(512))
+      res.end()
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = server.address().port
+      // 若把 data 阶段的字节上限删掉，这里会 resolve 一个完整 Response，断言立即变红
+      await expect(pinnedFetch(
+        `http://never-resolves.invalid:${port}/big`,
+        { method: 'GET' },
+        [{ address: '127.0.0.1', family: 4 }],
+        3000,
+        1024,
+      )).rejects.toThrow(/超过 1024 字节上限/)
+    } finally {
+      server.closeAllConnections?.()
+      await new Promise((resolve) => server.close(resolve))
+    }
+  })
+
+  it('B6 · pinnedFetch 未超限响应仍正常返回（上限不得误伤）', async () => {
+    const server = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.end('ok')
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const port = server.address().port
+      const res = await pinnedFetch(
+        `http://never-resolves.invalid:${port}/small`,
+        { method: 'GET' },
+        [{ address: '127.0.0.1', family: 4 }],
+        3000,
+        1024,
+      )
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe('ok')
     } finally {
       await new Promise((resolve) => server.close(resolve))
     }
