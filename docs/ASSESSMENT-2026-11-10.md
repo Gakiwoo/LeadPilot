@@ -564,3 +564,46 @@
 本轮改的是「联调后新暴露的合规细节」与「供应链判据的可执行性」，**维持 4.0 / 5.0**，不再次抬分。发布状态一条未动：`releaseEligible=false` / `accuracyClaim=false` / `0/6` 商业源 / 5 条 `BLOCKED`。
 
 仍未完成的仍是独立决策项，不是缺陷：**dev 工具链跨 major 升级**（需批准）、多实例租约、响应式重构、WCAG 2.1 AA 完整审计，以及外部流程（真实样本、快照、OAuth / CASA / EV / 法务）。其中外部流程代码不能代做，也不能伪造完成。
+
+---
+
+## 17. B6 收口（2026-11-24）
+
+触发：用户「先动手修 B6，3 个 P1 和反例一起做」。**按该优先级先修代码，评估报告 `docs/ASSESSMENT-2026-11-24.html` / `.pdf` 未随本批提交**，仍为未跟踪交付物。
+
+### 17.1 评分口径修订注
+
+§16.6 的「维持 4.0 / 5.0」是 **B5 时点自评**。2026-11-24 增量独立复核（三路只读审计 + 全量实跑 + 关键缺陷复现）结论为 **综合 3.7 / 5.0（质量 4.0 + 设计·产品 3.3）**，产品成熟度「内测工具」，P0 0 / P1 3 / P2 9 / P3 6。B6 只修掉其中 3 个 P1，**不据此回调评分**；评分待 B7 / B8 完成后重新复核。降分与「不发布 / DEMO」无关，全部来自可复现回归与验证链路失真。
+
+### 17.2 三个 P1 的修复与反例
+
+| # | 实锤问题 | 修复 | 行为级反例 |
+|---|---|---|---|
+| 1 | `server/protocol.mjs` 把 `sources[i].url` 原样拼进 `<context>`：`?e=alice@corp.com` 被 PII 终检误拦，`?e=alice%40corp.com` 编码绕过终检随 prompt 外发（B5 联调回归，源头是 `d0dc2e2` 的 wire 兼容补丁） | 新增 `PII_PATTERNS` / `decodePercentEncoded()` / `textHasPii()` / `sanitizeSourceUrl()` / `safeFetchedAt()`；URL 只保留 `scheme + host + pathname`，剥 userinfo / query / hash，pathname 解码后仍含 PII 则退化为 origin；`fetched_at` 只接受 ISO 日期/时间戳；`assertNoPiiInMessages()` 原文 + 解码文本双检（含 `%40` / `%2540`），ISO 日期仍剔除避免电话误判 | `prompt-sources.test.mjs` 扩到 17 例：明文/编码邮箱 query、userinfo + token、pathname PII 退化、`fetched_at` 注入、非 http(s) URL、编码 PII 终检、日期不误判 |
+| 2 | `scripts/check-clean-checkout.mjs` 的 `SKIP_DIRS` 按 basename 跳过任意层级 `data/`，连 `src/data/` 一起漏掉；根级配置与 `.github` 也不对账，实报「65 个源码全部纳入」而 `git ls-files` 实有 67 → ADR-008 同款「干净检出假保证」 | 重写为可测纯函数 `collectLocalSources(root)` / `auditCleanCheckout({trackedList, localList, fileExists})` + CLI 守卫（`pathToFileURL(process.argv[1]).href`）；`SKIP_ROOTS` 只按仓库根相对路径跳过；`SOURCE_DIRS` 纳入 `.github`，根级 `package.json` / `vite.config.ts` / `tsconfig.json` / `README.md` 等全部枚举 | 新增 `clean-checkout.test.mjs` 6 例：`src/data/` 必须枚举、根级配置与 `ci.yml` 必须纳入、全量通过、**故意漏跟踪 `src/data/repository.ts` 必须报红**、干净检出缺 `package.json` 必须报红、根级 `data/` 仍跳过 |
+| 3 | `server/fetch.mjs` 的 `pinnedFetch` 生产默认出站无响应字节上限，`maxBytes=524288` 只在下游截断且仍 `ok:true`，契约里「过大 `E4012`」分支从未实现（独立实测 700 KB 响应被完整读入） | `pinnedFetch(url, init, addresses, timeoutMs, maxBytes)` 在 `data` 阶段累加字节，超限即 `destroy()` response/request 并 reject `E4012`；`doFetch()` / `followAndFetch()` 传入 `L.maxBytes`；error handler 避免 socket error 覆盖超限原因；`fetchOne()` 对超限返回 `E4012`，成功响应固定 `truncated:false` | `fetch.test.mjs` 扩到 27 例：原「`big.truncated=true` 算成功」改为 **必须 `E4012` 拒绝**、小响应不误伤、`pinnedFetch` 大响应 reject / 小响应正常返回 |
+
+`docs/PM-REVIEW.md` 口径同步：响应体超限一律按 `E4012` 拒绝，不再写成「如实标注 `truncated`」。
+
+### 17.3 实跑与发布状态
+
+| 检查 | B6 结果 |
+|---|---|
+| `typecheck` / `build` | 通过 |
+| `npm test` | **236 / 236**（12 文件，前端 46 + 服务端 190，0 skipped；较 B5 的 220 **+16**） |
+| `npm run gate` | **66 / 66**；`releaseBlocked=true`，5 条 `BLOCKED` 由真实判定生成 |
+| `npm run check:tracked` | **76 个源码/配置全部纳入，91 tracked 无缺失**（修复前假报 65） |
+| `evidence:check --self-test` / `validate:baseline --self-test` | **13 / 13** / PASSED |
+| `npm audit --omit=dev --audit-level=low` | **0 漏洞** |
+| `smoke` / `verify:restart` | **51 / 51**（隔离端口 5182 + memory store）/ **AC-03 PASS**（offset=32，reserves=1） |
+| GitHub Actions | **`45379594287` success**，干净检出 12 步全绿（含 Tracked sources sanity / 生产依赖审计 / AC-03） |
+
+提交链：`ef2d28a`（B5）→ **`32455fd` fix(security): B6 修复 3 个 P1 …并补 16 个行为级反例**（7 文件 / +375 −61）→ 本节 docs 记录。临时后台服务 `zkkxOw` 已停止。
+
+发布状态**一条未动**：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` 恒 · `accuracyClaim=false` 恒 · 商业数据源 `0/6` · integrity / outcome 均 `NO_DATA`。B6 是安全与验证链路止血，不改变「内测工具」定位，也不解除任何 Go / No-Go 判据。
+
+### 17.4 残留（B7 / B8，非本批范围）
+
+- B7：G2 服务端黑名单依赖调用方、`settleBilling` 失败不释放 held、CI 补 `evidence:check --self-test`、`clientError` / OPTIONS / smoke 服务可达性前提、探活代理。
+- B8：UI 三步管道数据断裂与批量出信、演示 KPI 未标注且跨页矛盾、前端关键单测、`docs/PRD-COVERAGE.md` 仍写「54 项 / 四条阻断」的历史漂移、截图重生成。
+- 外部：provider 快照注入、真实样本 100 / 30 + attestation、法务意见；OAuth / CASA / EV 取决于产品形态拍板。

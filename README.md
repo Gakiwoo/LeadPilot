@@ -87,7 +87,7 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict + noUncheckedIndexedAccess（索引访问必须显式判空）
-npm test                # 220 个用例 / 11 文件 / 0 skipped（前端 46 + 服务端 174）
+npm test                # 236 个用例 / 12 文件 / 0 skipped（前端 46 + 服务端 190）
 npm run gate            # 发布门禁 66 项自检，输出 releaseBlocked=true
 npm run evidence:check -- --self-test  # 证据校验器反例：合成/缺签署/凑数样本必须被拒
 npm run evidence:check  # 查看当前证据目录的真实判定与阻断项
@@ -309,16 +309,16 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 | 检查 | 结果（v0.9.0） |
 |---|---|
 | `npm run typecheck` / `npm run build` | 通过；`strict` + `noUncheckedIndexedAccess` 双开，门禁静态锁死；`/health.version` 与侧栏版本号均从 `package.json` 读取，不再硬编码；生产构建 353.78 kB / gzip 119.45 kB |
-| `npm test` | **220 / 220 全绿，0 skipped**（11 文件；前端 46 + 服务端 174） |
+| `npm test` | **236 / 236 全绿，0 skipped**（12 文件；前端 46 + 服务端 190；B6 新增 16 个行为级反例） |
 | `npm run gate` | **66 / 66 自检通过**，输出 `releaseBlocked=true` 与 5 条由真实判定生成的 `BLOCKED` |
 | `npm run evidence:check -- --self-test` | **13 / 13 通过**：合成标记 / 缺签署 / 伪造引用 / 复制凑数 / 空集全部被拒 |
-| `npm run check:tracked` | **65 个源码/配置全部纳入版本控制**，无缺失；tracked 总数以 `git ls-files \| wc -l` 为准，文档不写死 |
+| `npm run check:tracked` | **76 个源码/配置全部纳入版本控制**，无缺失；B6 修掉按 basename 跳过 `src/data/` 的假通过（原先误报 65），并纳入根级配置与 `.github`；tracked 总数以 `git ls-files \| wc -l` 为准，文档不写死 |
 | `npm audit --omit=dev --audit-level=low` | **0 漏洞**，已固化为 CI 硬步骤；dev 工具链 6 条漏洞需跨 major 升级，见 [依赖升级决策](docs/DEPENDENCY-DECISION.md) |
 | `npm run capture:screenshots` | 5 张 README 截图可由仓库内脚本重生成（Chrome headless / CDP，1600×1000） |
 | `npm run smoke` | **51 / 51 通过**（默认端口 5181，需先启动 `npm run cloud`） |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
-| 干净检出终验 | B5 复跑：`git archive HEAD` → 90 文件 → `npm ci` → 生产依赖审计 0 漏洞 / typecheck / 220 单测 / 66 门禁 / 13 证据自检 / build / 51 冒烟（独立端口 5182）/ AC-03 全绿；`check:tracked` 依赖 `.git`，归档目录跳过、主工作区全绿；B4 历史 88 文件 / 211 单测 / 66 门禁 / 51 冒烟；B3 历史 84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
+| 干净检出终验 | B6：GitHub Actions `45379594287` 在 `actions/checkout` 干净检出上 **12 步全绿**（Tracked sources sanity / 生产依赖 0 漏洞 / typecheck / 236 单测 / 66 门禁 / build / 51 冒烟 / AC-03）；主工作区 `check:tracked` = 76 源码/配置 · 91 tracked 无缺失。B5 历史：`git archive HEAD` → 90 文件 → `npm ci` → 生产依赖审计 0 漏洞 / typecheck / 220 单测 / 66 门禁 / 13 证据自检 / build / 51 冒烟（独立端口 5182）/ AC-03 全绿；`check:tracked` 依赖 `.git`，归档目录跳过；B4 历史 88 文件 / 211 单测 / 66 门禁 / 51 冒烟；B3 历史 84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
 | GitHub Actions | 每次 push 的流水线全绿（干净检出 / **生产依赖 0 漏洞审计** / 门禁 / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
 
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。
