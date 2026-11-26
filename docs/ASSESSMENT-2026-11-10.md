@@ -719,7 +719,7 @@
 | `evidence:check --self-test` / `validate:baseline --self-test` | **13 / 13** / PASSED |
 | `npm audit --omit=dev --audit-level=low` | **0 漏洞** |
 | `smoke` / `verify:restart` | **53 / 53**（隔离端口 5182 + memory）/ **AC-03 PASS** |
-| CI | 干净检出 13 步，run 号以 `gh run list` 为准 |
+| CI | **`45788253505` success**，干净检出 13 步全绿（生产依赖审计 / 门禁 79 项 / 证据自检 / 293 单测 / build / 53 冒烟 / AC-03） |
 
 门禁里的 4 条 B9 断言是**静态防回退护栏**（9 张 KPI 全部走 `toTileProps`、测试文件在 vitest include 范围、文档不再写死旧数字、attach 模式存在）；行为级保证由 20 个单测在 CI `Unit tests` 步骤执行。两者边界在脚本注释里写明，不把静态检查冒充行为验证。
 
