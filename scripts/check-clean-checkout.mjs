@@ -20,7 +20,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-export const SOURCE_DIRS = ['src', 'server', 'shared', 'scripts', 'tests', '.github']
+export const SOURCE_DIRS = ['src', 'server', 'shared', 'scripts', 'tests', 'config', '.github']
 export const SOURCE_EXT = /\.(?:ts|tsx|mjs|js|cjs|json|sh|yml|yaml|css|html)$/
 /** 只跳过「仓库根下」的这些路径；src/data/ 之类同名子目录必须照常枚举 */
 const SKIP_ROOTS = new Set(['node_modules', 'dist', 'data', 'coverage', '.workbuddy'])

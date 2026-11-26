@@ -1,6 +1,18 @@
+/**
+ * Tailwind 配置（位于 config/）。
+ *
+ * content 用「项目根的绝对路径 + 正斜杠」：Windows 上 fast-glob 不接受反斜杠，
+ * 而相对路径会随配置文件位置漂移。写死绝对路径既跨平台又不会因为 cwd 变化失效。
+ */
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+const projectRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
+const fromRoot = (rel) => path.join(projectRoot, rel).replace(/\\/g, '/')
+
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  content: [fromRoot('index.html'), fromRoot('src/**/*.{js,ts,jsx,tsx}')],
   theme: {
     extend: {
       colors: {

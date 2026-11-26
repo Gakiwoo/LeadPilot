@@ -1,33 +1,36 @@
 /**
- * ESLint 扁平配置（ESLint 9）。
+ * ESLint 扁平配置（ESLint 9）· 位于 config/，由 `npm run lint` 用 --config 指定。
  *
  * 分三层：
  *  1. TS/TSX：保留 hooks 规则与 no-explicit-any；`no-undef` 关闭（类型系统已覆盖）；
- *  2. Node 侧 .mjs（server / scripts / tests）：Node 全局，允许 console；
+ *  2. Node 侧 .mjs（server / scripts / tests / config）：Node 全局，允许 console；
  *  3. 忽略构建产物与本地产物。
  *
- * 注意：`no-console` 在 Node 侧关闭 —— 服务端日志是刻意保留的；
- * 前端侧设为 warn，提醒改用 UI 提示而不是控制台。
+ * 配置搬进子目录后，glob 的相对基准会随 cwd 与文件位置漂移：
+ * 这里统一用 `basePath` 把基准钉在项目根，所有 `files` / `ignores` 都写相对项目根的路径。
  */
 import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import reactHooks from 'eslint-plugin-react-hooks'
 import globals from 'globals'
+import { fileURLToPath } from 'node:url'
+
+const projectRoot = fileURLToPath(new URL('..', import.meta.url))
 
 export default tseslint.config(
   // 全局忽略必须是「只有 ignores 的对象」，否则不生效
   {
-    ignores: [
-      'dist/**', 'node_modules/**', 'data/**', 'coverage/**',
-      'public/**', '.tmp/**', '.evidence/**', 'docs/**',
-    ],
+    basePath: projectRoot,
+    ignores: ['dist/**', 'node_modules/**', 'data/**', 'coverage/**', 'public/**', '.tmp/**', '.evidence/**', 'docs/**'],
   },
   {
+    basePath: projectRoot,
     linterOptions: { reportUnusedDisableDirectives: 'off' },
   },
-  js.configs.recommended,
-  ...tseslint.configs.recommended,
+  { ...js.configs.recommended, basePath: projectRoot },
+  ...tseslint.configs.recommended.map((c) => ({ ...c, basePath: projectRoot })),
   {
+    basePath: projectRoot,
     files: ['src/**/*.{ts,tsx}'],
     languageOptions: {
       globals: { ...globals.browser },
@@ -43,7 +46,8 @@ export default tseslint.config(
     },
   },
   {
-    files: ['server/**/*.mjs', 'scripts/**/*.mjs', 'tests/**/*.{ts,mjs}', 'vite.config.ts'],
+    basePath: projectRoot,
+    files: ['server/**/*.mjs', 'scripts/**/*.mjs', 'tests/**/*.{ts,mjs}', 'config/**/*.{js,ts}'],
     languageOptions: { globals: { ...globals.node } },
     rules: {
       'no-undef': 'off',
@@ -52,6 +56,7 @@ export default tseslint.config(
     },
   },
   {
+    basePath: projectRoot,
     files: ['tests/**/*.{ts,mjs}'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },

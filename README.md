@@ -191,8 +191,11 @@ server/   后端（Node 原生 http，零依赖）
 
 tests/          全部测试（frontend / server）
 shared/         前后端共用的协议定义（改这里两边一起变）
+config/         构建与检查配置（Vite / Tailwind / PostCSS / ESLint）
 scripts/        校验与发布门禁脚本
 ```
+
+根目录只保留必须放在根的文件：`package.json`、`package-lock.json`、`tsconfig.json`、`index.html`、`README.md` 与几个工具自动发现用的点文件。
 
 ### 接口
 

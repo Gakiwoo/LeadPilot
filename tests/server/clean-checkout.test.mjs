@@ -23,9 +23,10 @@ describe('B6 · 干净检出全量对账', () => {
 
   it('根级配置与 .github/workflows 也纳入对账，不再只查四个子目录', () => {
     expect(local).toContain('package.json')
-    expect(local).toContain('vite.config.ts')
+    expect(local).toContain('config/vite.config.ts')
     expect(local).toContain('.github/workflows/ci.yml')
     expect(SOURCE_DIRS).toContain('.github')
+    expect(SOURCE_DIRS).toContain('config')
   })
 
   it('全量跟踪时通过，统计数量与真实枚举一致', () => {

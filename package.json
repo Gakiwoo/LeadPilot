@@ -5,7 +5,7 @@
   "description": "LeadPilot 猎客 · B2B 外贸客户开发工作台（客户端基线 + 云端网关/编排器）",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --config config/vite.config.ts",
     "cloud": "node server/index.mjs",
     "smoke": "node scripts/e2e-smoke.mjs",
     "verify:restart": "bash scripts/verify-restart.sh",
@@ -14,12 +14,12 @@
     "evidence:check": "node scripts/check-release-evidence.mjs",
     "check:tracked": "node scripts/check-clean-checkout.mjs",
     "capture:screenshots": "node scripts/capture-screenshots.mjs",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "build": "tsc -b && vite build --config config/vite.config.ts",
+    "preview": "vite preview --config config/vite.config.ts",
+    "test": "vitest run --config config/vite.config.ts",
+    "test:watch": "vitest --config config/vite.config.ts",
     "typecheck": "tsc -b --pretty false",
-    "lint": "eslint .",
+    "lint": "eslint . --config config/eslint.config.js",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"server/**/*.mjs\" \"scripts/**/*.mjs\" \"tests/**/*.{ts,mjs}\" \"*.{js,ts,json,md}\""
   },
   "engines": {

@@ -780,7 +780,7 @@ function walkTs(dir, out = []) {
     tiles.length === 9 && tiles.every((t) => t.includes('toTileProps(')),
     `tiles=${tiles.length} wrapped=${tiles.filter((t) => t.includes('toTileProps(')).length}`)
   check('B9 / P2-5 护栏：行为级反例文件纳入 vitest include 覆盖范围，且两页共用 metrics.ts',
-    readFileSync(join(ROOT, 'vite.config.ts'), 'utf8').includes("tests/**/*.test.ts")
+    readFileSync(join(ROOT, 'config/vite.config.ts'), 'utf8').includes("tests/**/*.test.ts")
     && existsSync(join(ROOT, 'tests/frontend/b9-metrics.test.ts'))
     && existsSync(join(ROOT, 'tests/frontend/b9-frontend.test.ts'))
     && existsSync(join(ROOT, 'src/domain/metrics.ts'))
