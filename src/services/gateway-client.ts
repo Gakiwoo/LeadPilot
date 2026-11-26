@@ -522,6 +522,26 @@ export interface ImportedCompany {
   domain: string; companyName: string; country: string; status: string
   missingSource: boolean; hasJudgement: boolean; piiFields: string[]
   hasSource?: boolean; sourceOrigin?: string | null; sourceUrl?: string | null
+  contactGrade?: 'A' | 'B' | 'C' | 'D'; gradeSource?: 'imported' | 'default_conservative'
+  hasContactEmail?: boolean; productHint?: string
+}
+
+/** B8 / P2-6：批量出信结果与导入 / 研判共用同一批 domain */
+export type DraftSource = 'provider' | 'local-template' | 'unspecified'
+export interface GenerateDraftsResult {
+  ok: boolean; code?: string; reason?: string; batchId?: string
+  summary?: { total: number; succeeded: number; degraded: number; failed: number }
+  items?: {
+    domain: string; companyName: string; to: string
+    grade: 'A' | 'B' | 'C' | 'D'; gradeSource: 'imported' | 'default_conservative'
+    productHint: string; anchor: string | null
+    bucket: 'succeeded' | 'degraded' | 'failed'
+    draftSource: DraftSource | null
+    subject: string | null; body: string | null
+    anchorUsed?: string | null; codes: string[]; reason: string
+    billing?: unknown | null; note?: string
+  }[]
+  allSucceeded?: boolean; releaseEligible?: boolean; note?: string
 }
 export interface BatchJudgeResult {
   ok: boolean; code?: string; reason?: string; batchId?: string
@@ -540,6 +560,7 @@ export interface ExportDraftItem {
   domain: string; to: string; subject: string; body: string
   grade: 'A' | 'B' | 'C' | 'D'; confirmed?: boolean
   sender: DraftSender; footer: string
+  draftSource?: DraftSource
 }
 export interface ExportDraftsResult {
   ok: boolean; code?: string; reason?: string; errors?: string[]
@@ -620,6 +641,15 @@ export async function runJudgeBatch(payload: { batchSize?: number; domains?: str
   try {
     return await jsonFetch<BatchJudgeResult>('/v1/batch/judge', { method: 'POST', body: JSON.stringify(payload) }, 60000)
   } catch { return offlineBatch<BatchJudgeResult>() }
+}
+
+export async function generateDraftsBatch(payload: {
+  batchSize?: number; domains?: string[]; product?: string; advantages?: string[]
+  purpose?: string; tone?: string; maxWords?: number; language?: string
+} = {}): Promise<GenerateDraftsResult> {
+  try {
+    return await jsonFetch<GenerateDraftsResult>('/v1/batch/generate-drafts', { method: 'POST', body: JSON.stringify(payload) }, 60000)
+  } catch { return offlineBatch<GenerateDraftsResult>() }
 }
 
 export async function exportDrafts(payload: { items: ExportDraftItem[]; blacklist?: string[] }): Promise<ExportDraftsResult> {

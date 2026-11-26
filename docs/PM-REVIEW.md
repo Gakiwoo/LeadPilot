@@ -316,3 +316,28 @@ v0.8.0 决策后，评测口径已经换成 integrity + outcome，但「真实�
 4. **抓取只补原文，不改评分规则**：T0 仍是确定性规则，模型判断仍需 Key + 锁定快照；抓取成功不解除任何发布门禁。
 
 **验证（当前实跑）**：202 单测 / 60 门禁 / 48 冒烟 / AC-03 重启全链路 PASS；历史记录为 146 单测 / 54 门禁，提交 `75dda08` → `980fc87`，GitHub Actions run `42646714121` 全绿（15 步）。提交链以 `git log -1` 为准，文档不再写死最新提交号。
+
+---
+
+## 十六、B8 三步管道打通：定位不变，把断掉的数据层接回去
+
+用户明确拍板「定位还是自动获客，目标用户是批量 SDR」，因此 B8 不讨论收缩形态，只处理独立评估 P2-6 指出的工程事实：**导出项来自前端演示草稿库，与服务端 `companies` 不是同一批数据**。这不是 UI 瑕疵，而是「批量 SDR 管道」承诺的数据层断裂——CSV 导入的客户研判完，导出时却拿另一套演示草稿发信，评级 / 原文 / 逐条确认都对不上。
+
+| 环节 | B8 之前 | B8 之后 |
+|---|---|---|
+| 线索 | 服务端 `companies` | 不变，新增 `contact_grade` 导入契约（非法拒行、缺省保守 C 级） |
+| 研判 | 服务端 T0 + 真实 `judge()` | 不变 |
+| 出信 | ❌ 无服务端实现；前端演示草稿库 | `POST /v1/batch/generate-drafts` 真实 T1 分桶，缺前置逐条 `failed` 且零 provider 调用 |
+| 导出 | 从 `useAppStore.outreach` 拼 items | 只来自出信结果 `succeeded` 项，或用户显式点击生成的本地模板（DEMO） |
+| 来源标识 | 无 | `draftSource` 白名单 + mbox `X-LeadPilot-Draft-Source` / `X-LeadPilot-Demo` 头；非法值 `E4015`、超限 `E4014` |
+
+**必须写进产品口径的四句话（B8）**：
+
+1. **三步同源 ≠ 系统采集**：导入 / 研判 / 出信 / 导出共用云端客户库同一批 `domain`，但这些线索仍是用户投喂，商业 6 类源仍 `0/6`，抓取仍不等于采集。
+2. **降级没有正文**：模型不可用或正文未通过 F6-2 校验时 `body=null`，`degraded` 不计入 `succeeded`；批量出信「有结果」不等于「有可用草稿」。
+3. **模板 ≠ 模型输出**：本地模板是用户显式点击的 DEMO 降级入口，mbox 逐封标 `template-not-model`，不得计作真实 T1 产出、不得当评测样本、不得对外宣称模型写信能力已覆盖。
+4. **导出仍 ≠ 发送**：出信端点不写回客户状态；只有导出才置 `drafted`。`releaseEligible` 恒 `false`，Go / No-Go 判据一条未撤。
+
+**残留（B8 未做，不要误报完成）**：P2-7 演示 KPI 标注与跨页矛盾、P2-5 前端服务层 / 组件关键单测、P3-1 `docs/PRD-COVERAGE.md` 历史口径漂移、P3-2 历史数字动态化、5 张截图重生成（B8 面板文案已变）、P3-6 巨石路由重构；`docs/ASSESSMENT-2026-11-24.html` / `.pdf` 仍未入库。评分仍按 §17.1 的 3.7 / 5.0 口径。
+
+**验证（当前实跑）**：273 单测（B8 新增 25 个行为级反例）/ 75 门禁（新增 6 条 B8 断言）/ 53 冒烟 / 13 证据自检 / build `357.39 kB` / `check:tracked` 79 源码·94 tracked / AC-03 全绿；三处「改坏实现会红」抽样均精准触发失败并逐字节还原。发布状态一条未动：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` / `accuracyClaim=false`、integrity·outcome `NO_DATA`。

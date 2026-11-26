@@ -446,7 +446,9 @@ async function main() {
     && health.body?.batch?.positioning === 'auto_prospecting'
     && health.body?.batch?.releaseEligible === false
     && batchHealth.body?.stage === 'internal_preview'
-    && batchHealth.body?.releaseEligible === false,
+    && batchHealth.body?.releaseEligible === false
+    && String(health.body?.batch?.generateDrafts?.endpoint ?? '').includes('/v1/batch/generate-drafts')
+    && batchHealth.body?.generateDrafts?.draftSources?.includes('local-template'),
     `companies=${batchHealth.body?.companies} circuit=${batchHealth.body?.circuitOpen}`)
 
   const smokeDomain = `smoke-${Date.now()}.example`
@@ -473,6 +475,18 @@ async function main() {
     && batchJudge.body?.releaseEligible === false,
     `succeeded=${batchJudge.body?.summary?.succeeded} degraded=${batchJudge.body?.summary?.degraded}`)
 
+  // B8 / P2-6：批量出信与导入 / 研判共用同一批 domain；缺前置条件逐条失败，绝不伪造正文
+  const batchGenerate = await post('/v1/batch/generate-drafts', { domains: [smokeDomain], batchSize: 1 })
+  check('B8 批量出信：缺邮箱 / 主营产品逐条 failed，body=null 且不发起 provider 调用',
+    batchGenerate.status === 200 && batchGenerate.body?.summary?.failed === 1
+    && batchGenerate.body?.items?.[0]?.body === null
+    && batchGenerate.body?.items?.[0]?.draftSource === null
+    && batchGenerate.body?.releaseEligible === false,
+    `bucket=${batchGenerate.body?.items?.[0]?.bucket}`)
+
+  const overLimit = await post('/v1/batch/generate-drafts', { batchSize: 51 })
+  check('B8 单批超限显式 E4014，不静默截断', overLimit.status === 400 && overLimit.body?.code === 'E4014')
+
   const sender = {
     name: 'Smoke Sender', email: 'smoke@example.com', company: 'Smoke Trading Co',
     postalAddress: '1 Industrial Road, Shenzhen, China',
@@ -492,6 +506,8 @@ async function main() {
       : exp.status === 200 && exp.body?.count === 1 && exp.body?.blocked?.length === 1
         && exp.body?.exportedIsNotSent === true && exp.body?.statusAfterExport === 'drafted'
         && /X-LeadPilot-Status: drafted/.test(exp.body?.content ?? '')
+        && /X-LeadPilot-Draft-Source: unspecified/.test(exp.body?.content ?? '')
+        && !/X-LeadPilot-Demo/.test(exp.body?.content ?? '')
         && /D 级/.test(exp.body?.blocked?.[0]?.reasons?.join('') ?? ''),
     `status=${exp.status} count=${exp.body?.count ?? 0} circuit=${circuitWasOpen}`)
 

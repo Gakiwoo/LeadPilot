@@ -414,6 +414,7 @@ export function createApp(opts = {}) {
               stage: b.stage, companies: b.companies, judged: b.judged,
               exportedToday: b.exportedToday, circuitOpen: b.circuitOpen,
               bounce: b.bounce, releaseEligible: false,
+              generateDrafts: b.generateDrafts,
               userDirectedFetch: b.userDirectedFetch,
               note: '定位仍为自动获客；批量导入是批量 SDR 的线索投喂通道，origin=user_imported，导入≠采集；官网原文由用户指定 URL 抓取（user_directed_fetch），抓取≠采集。外部依赖重分类为发布门禁，releaseEligible 恒 false。',
             }
@@ -514,6 +515,13 @@ export function createApp(opts = {}) {
       if (method === 'POST' && path === '/v1/batch/judge') {
         const body = await readBody(req)
         const result = await batch.runJudgeBatch(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+
+      // B8 / P2-6：批量出信与导入 / 研判共用服务端客户库；降级项 body=null，不伪造正文
+      if (method === 'POST' && path === '/v1/batch/generate-drafts') {
+        const body = await readBody(req)
+        const result = await batch.generateDrafts(body)
         return json(res, result.ok ? 200 : 400, result)
       }
 

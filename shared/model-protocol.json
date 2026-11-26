@@ -277,6 +277,19 @@
       "aggregation": "succeeded / degraded / failed 分桶，逐条带 code 与 reason；degraded 一律不写回 judgement",
       "idempotency": "requestId = batchId:domain，复用网关计费幂等键，重复调用不二次扣点"
     },
+    "generateDrafts": {
+      "$comment": "B8 / P2-6：三步管道的数据源统一到服务端客户库，批量出信不再是前端演示草稿库的孤岛。导入 → 研判 → 出信 → 导出共用同一批 domain。",
+      "endpoint": "POST /v1/batch/generate-drafts",
+      "batchSizeDefault": 20,
+      "batchSizeMax": 50,
+      "sourceRequired": "必须有 source_url + fetched_at + raw_text 三件套；个性化锚点取官网原文的连续子串（逐字可核验），缺原文逐条标 missing_source 且不调用 provider",
+      "providerRequired": "只有 gateway.writeEmail() 返回 ok=true 且正文通过 F6-2 校验才计入 succeeded；E6005 / E6008 / needsConsent / 内容校验失败一律 degraded，body=null，不伪造正文",
+      "gradePolicy": "导入行提供 contact_grade（A/B/C/D）则用之（gradeSource=imported）；未提供按 C 级保守处理（gradeSource=default_conservative），导出前须逐条人工确认",
+      "draftSources": ["provider", "local-template", "unspecified"],
+      "localTemplate": "显式降级入口：客户端本地模板生成的草稿必须带 draftSource=local-template，mbox 写 X-LeadPilot-Demo: template-not-model；绝不冒充模型输出，也不解除发布门禁",
+      "aggregation": "succeeded / degraded / failed 分桶，逐条带 code 与 reason；本端点不写回客户状态、不发送任何邮件",
+      "idempotency": "requestId = batchId:domain:email，复用网关计费幂等键，重复调用不二次扣点"
+    },
     "export": {
       "endpoint": "POST /v1/export/eml",
       "format": "mbox",
@@ -285,6 +298,7 @@
       "forbidDirectSend": true,
       "grades": { "A": "allowed", "B": "allowed", "C": "requires_single_confirmation", "D": "forbidden" },
       "footerPolicy": "调用方提供结构化身份（name / email / company / postalAddress / unsubscribe）与 footer 文本；email 进 From 头，其余四项必须出现在 footer 中。服务端只校验存在性，绝不代生成、绝不代存身份信息",
+      "draftSourcePolicy": "draftSource 只允许 provider / local-template / unspecified（缺省），非法值一律 E4009 拒绝；mbox 逐封写 X-LeadPilot-Draft-Source，local-template 额外写 X-LeadPilot-Demo: template-not-model，绝不把模板草稿伪装成模型输出",
       "draftExportDailyLimit": 100,
       "bounceCircuitThreshold": 0.03,
       "$limitNote": "100 封/日沿用 PRD 的个人邮箱安全余量；此处约束的是「草稿导出」而非「发送」，不得把导出计数说成已发送量。"
@@ -357,7 +371,9 @@
     "E4010": "发送结果回写非法或熔断中（状态流转不允许 / 不可逆终态 / 退信率超阈值）",
     "E4011": "抓取地址被拒绝（非 http(s) / 带凭据 / 私网回环 / 超长 URL / SSRF 防护命中）",
     "E4012": "抓取失败（DNS / 超时 / 重定向过多 / HTTP 错误 / 内容类型不支持 / 响应过大）",
-    "E4013": "robots.txt 禁止抓取该路径（用户指定 URL 也不例外）"
+    "E4013": "robots.txt 禁止抓取该路径（用户指定 URL 也不例外）",
+    "E4014": "批量出信无可用目标（客户库为空 / 指定域名不存在 / 超出单批上限）",
+    "E4015": "草稿来源标识非法（draftSource 不在 provider / local-template / unspecified 白名单）"
   },
   "piiExclusion": {
     "$comment": "PRD 11.4.1：模型判断不需要邮箱/电话/联系人姓名/邮件正文/Gmail 凭据，从协议层硬性剔除。",

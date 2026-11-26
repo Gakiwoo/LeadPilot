@@ -701,6 +701,74 @@ function walkTs(dir, out = []) {
     && bp.export.forbidDirectSend === true)
 }
 
+// 7b. B8 / P2-6：三步管道共用服务端客户库；导出项不得退回前端演示草稿库
+{
+  const bp = protocol.batchPipeline
+  const gd = bp.generateDrafts
+  check('B8 协议：批量出信端点 / 来源白名单 / E4014·E4015 齐备，定位仍是自动获客',
+    gd.endpoint.includes('/v1/batch/generate-drafts') && gd.batchSizeMax === 50
+    && ['provider', 'local-template', 'unspecified'].every((s) => gd.draftSources.includes(s))
+    && /批量出信/.test(protocol.errorCodes.E4014) && /草稿来源/.test(protocol.errorCodes.E4015)
+    && bp.positioning === 'auto_prospecting' && bp.targetUser === 'bulk_sdr')
+
+  const panel = readFileSync(join(ROOT, 'src/components/outreach/BatchPipelinePanel.tsx'), 'utf8')
+  check('B8 前端：导出候选只来自批量出信结果或显式本地模板，不再读演示草稿库',
+    !/s\.outreach/.test(panel) && !/checkSendGates/.test(panel)
+    && /generateDraftsBatch/.test(panel) && /buildImportedTemplateDraft/.test(panel)
+    && /draftSource/.test(panel))
+
+  const b8Body = 'We noticed your company distributes industrial fittings across Benelux. We manufacture hydraulic hose fittings and can share our current catalogue and lead times. Would a short specification sheet be useful for your team this quarter?'
+  const b8Sender = {
+    name: 'Wu Jiaqi', email: 'sales@example.com', company: 'Example Trading Co',
+    postalAddress: 'Room 301, Shenzhen, China', unsubscribe: 'Reply STOP to unsubscribe / 退订',
+  }
+  const b8Footer = [b8Sender.name, b8Sender.company, b8Sender.postalAddress, b8Sender.unsubscribe].join(' | ')
+  const b8Draft = (over = {}) => ({
+    domain: 'b8.example', to: 'buyer@b8.example', subject: 'Hydraulic fittings supply',
+    body: b8Body, grade: 'B', sender: b8Sender, footer: b8Footer, ...over,
+  })
+
+  const missingStore = createMemoryStore()
+  let providerCalls = 0
+  const throwingGateway = { writeEmail: async () => { providerCalls += 1; throw new Error('前置校验失败时不应调用 provider') } }
+  const missing = createBatchPipeline({ store: missingStore, gateway: throwingGateway })
+  missing.importCompanies({ rows: [{ company_name: 'B8 no source', domain: 'b8-nosource.example' }] })
+  const pre = await missing.generateDrafts({})
+  check('B8 行为级：缺原文三件套逐条 failed，provider 零调用且 body=null（不伪造正文）',
+    pre.summary.failed === 1 && pre.items[0].body === null && pre.items[0].draftSource === null
+    && /missing_source/.test(pre.items[0].reason) && providerCalls === 0)
+
+  const okStore = createMemoryStore()
+  const okGateway = { writeEmail: async () => ({ ok: true, subject: 'Hydraulic fittings supply', body: b8Body, errorCodes: [] }) }
+  const okPipeline = createBatchPipeline({ store: okStore, gateway: okGateway })
+  okPipeline.importCompanies({ rows: [{
+    company_name: 'B8 Co', domain: 'b8.example', source_url: 'https://b8.example/about',
+    fetched_at: '2026-11-09', raw_text: 'We import hydraulic hose fittings from Asia.',
+    product_hint: 'hydraulic fittings', contact_email: 'buyer@b8.example',
+  }] })
+  const gen = await okPipeline.generateDrafts({})
+  check('B8 行为级：出信 domain 与导入清单同源，真实 T1 才标 draftSource=provider',
+    gen.ok && gen.summary.succeeded === 1
+    && gen.items[0].domain === okPipeline.listCompanies().companies[0].domain
+    && gen.items[0].draftSource === 'provider' && gen.releaseEligible === false,
+    `succeeded=${gen.summary?.succeeded}`)
+
+  const illegalSource = checkExportGates([b8Draft({ draftSource: 'provider-fake' })], { knownDomains: ['b8.example'] })
+  const templateMbox = buildMbox([b8Draft({ draftSource: 'local-template' })], { now: Date.UTC(2026, 10, 9) })
+  const providerMbox = buildMbox([b8Draft({ draftSource: 'provider' })], { now: Date.UTC(2026, 10, 9) })
+  check('B8 导出闸门：非法来源逐条 E4015，本地模板必写 DEMO 头且 provider 不带',
+    illegalSource.allowed.length === 0 && illegalSource.blocked[0].code === 'E4015'
+    && templateMbox.includes('X-LeadPilot-Demo: template-not-model')
+    && !providerMbox.includes('X-LeadPilot-Demo'))
+
+  const exportStore = createMemoryStore()
+  const exportPipeline = createBatchPipeline({ store: exportStore, gateway: null })
+  exportPipeline.importCompanies({ rows: [{ company_name: 'B8E', domain: 'b8e.example' }] })
+  const rejected = exportPipeline.exportDrafts({ items: [b8Draft({ domain: 'b8e.example', draftSource: 'fake' })] })
+  check('B8 HTTP 契约：非法来源在导出顶层返回 E4015，绝不退化成笼统 E4009',
+    rejected.ok === false && rejected.code === 'E4015' && !rejected.content)
+}
+
 // 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦
 //    旧实现末尾写死 evaluateIntegrity([]) / evaluateOutcome([]) + 5 条硬编码 BLOCKED，
 //    即使真实样本存在也永远 NO_DATA。下面用行为级断言证明判定随输入真实变化。

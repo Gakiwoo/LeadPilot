@@ -2,6 +2,8 @@
 
 > 基线 v0.9.0 · 2026-11-09 · 图例：✅ 真实实现且可验证 · 🟡 界面/规则/网关真实、外部依赖未接 · ⚠️ 部分实现 · ❌ 未实现
 >
+> B8 变更（ADR-033）：**三步管道在数据层打通** —— 导入 / 研判 / 批量出信 / mbox 导出共用服务端 `companies` 同一批 `domain`。新增 `POST /v1/batch/generate-drafts`（真实 T1，`succeeded / degraded / failed` 分桶，缺原文三件套 / 邮箱 / 产品逐条 `failed` 且零 provider 调用，降级 `body=null` 不伪造正文）、`contact_grade` 导入契约（非法拒行、缺省保守 C 级）、`draftSource` 白名单与 `X-LeadPilot-Demo` DEMO 头、`E4014 / E4015`；前端 `BatchPipelinePanel.tsx` 不再从演示草稿库拼导出项，候选只来自出信结果或显式本地模板。**本轮没有让任何一条 AC 从 🟡 变 ✅，也没有解除任何 Go / No-Go 判据**。
+>
 > v0.9.0 变更（ADR-032 落地）：**用户指定 URL 抓取**真实实现——`server/fetch.mjs`（robots 遵从 / 每域 ≤1 req/s / 8s 超时 / ≤512KB / 只收 HTML 与纯文本 / 重定向逐跳 SSRF 校验 / 拒绝回环私网），新增 `GET /v1/sources/health`、`POST /v1/sources/fetch`、`POST /v1/batch/fetch-sources`；抓取原文标 `user_directed_fetch`，公司 `origin` 仍 `user_imported`，抓取 ≠ 采集、商业 6 类源仍 `0/6`。**本轮同样没有新增任何可宣称的准确率**，AC 统计不变。
 >
 > v0.8.0 变更（用户拍板）：**不做 385 家人工标注基准集、不做商业数据源采购**。评测口径改为 **integrity + outcome**（可溯源 / 合规 / 一致性 + 真实退信率，零人工、`accuracyClaim` 恒 `false`）；标注契约降级为 legacy（格式与校验器保留），6 类商业数据源仍如实报 `0/6`，改为用户投喂 + 用户指定抓取。`internalPreviewReady` / `externalValidated` / `releaseEligible` 三状态分离，后两者当前均为 false。**本轮没有让任何一条 AC 变 ✅，也没有新增可宣称的准确率**——这是刻意的（ADR-031 / 032）。
@@ -28,7 +30,7 @@
 | F3 | 客户列表 | P0 | 🟡 | 10 列、快捷/高级筛选、6 种排序、搜索、多选与批量操作栏、CSV 导出、无批量直接发送；列拖拽排序/列宽记忆未做（见 ADR-007） |
 | F4 | 客户详情与五维评分 | P0 | ✅ | 60%+ 抽屉、五维评分卡一键展开证据链、规则分/模型判断/α 全展示、置信度与 warnings、企业概况、联系方式、贸易信号、状态时间轴、数据最小化提示 |
 | F5 | Gmail 账号接入 | P0 | ❌ | 设置页完整呈现 scope 分级、OAuth PKCE 说明、DPAPI 存储方案、账号体检项；未接入真实授权 |
-| F6 | 开发信生成 | P0 | 🟡 | 一次 2 版、目的/语气/长度、可核验个性化锚点、通用邮箱改写、禁词/字数/退订尾巴/占位符实时校验、最多 5 次重写、双版本择优编辑；**网关已配 Key 时走真实 T1 两次调用**（`/v1/email/generate`，服务端 F6-2 硬约束校验），失败或无 Key 时显式回退本地模板并标注 DEMO；**可传 `sources` 走 T0 规则抽取得到逐字可核验的个性化锚点（`anchorSource=t0-rules`），所有降级路径也如实上报来源**；合规尾巴始终由客户端代码注入 |
+| F6 | 开发信生成 | P0 | 🟡 | 一次 2 版、目的/语气/长度、可核验个性化锚点、通用邮箱改写、禁词/字数/退订尾巴/占位符实时校验、最多 5 次重写、双版本择优编辑；**网关已配 Key 时走真实 T1 两次调用**（`/v1/email/generate`，服务端 F6-2 硬约束校验），失败或无 Key 时显式回退本地模板并标注 DEMO；**可传 `sources` 走 T0 规则抽取得到逐字可核验的个性化锚点（`anchorSource=t0-rules`），所有降级路径也如实上报来源**；合规尾巴始终由客户端代码注入。**B8 新增批量出信端点 `POST /v1/batch/generate-drafts`**：与导入 / 研判共用客户库，真实 T1 才计 `succeeded`；显式本地模板草稿标 `draftSource=local-template` 且 mbox 带 `X-LeadPilot-Demo`，不冒充模型输出 |
 | F7 | 草稿创建与发送 | P0 | 🟡 | 本地草稿队列 + 状态自动回写、G1–G4 四道闸门检查器、节流/预热/熔断参数展示；`gmail.send` 与追踪属 V1，未实现 |
 | F8 | 状态管理与跟进 | P0 | ✅ | 12 态、自动流转白名单、任意手动跳转、二次确认、全量留痕、跟进任务与二次触达建议 |
 | F9 | CRM 表格与归集 | P0 | 🟡 | 自动归集、表格 + 看板（可拖拽改状态）、行内编辑备注、统计面板、状态漏斗、CSV（UTF-8 BOM）；XLSX 多 Sheet 属 V1 |

@@ -654,3 +654,39 @@
 发布状态**一条未动**：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` 恒 · `accuracyClaim=false` 恒 · 商业数据源 `0/6` · integrity / outcome 均 `NO_DATA`。B7 是合规与验证链路止血，不改变「内测工具」定位，评分仍按 §17.1 的 **3.7 / 5.0** 口径，待 B8 后重新复核。
 
 **B8 待办（未开始）**：P2-6 打通前端演示草稿库 ↔ 服务端 `companies` 三步管道与批量写信、P2-7 演示 KPI 标注与跨页矛盾、P2-5 前端服务层 / 组件关键单测、P3-1 `docs/PRD-COVERAGE.md` 仍写「54 项 / 四条阻断」的漂移、P3-2 历史数字动态化、5 张截图重生成。P3-6 巨石路由重构另立批次。
+
+---
+
+## 19. B8 收口：P2-6 三步管道打通（上文 §18.3 的 B8 待办状态更新）
+
+用户指令「先开 B8，三步管道打通」，定位仍是「自动获客」、目标用户仍是批量 SDR（§13 拍板不变）。本批次只做 P2-6，**不夹带** P2-7 / P2-5 / P3-x / 截图重生成。
+
+### 19.1 实现与协议
+
+- `shared/model-protocol.json`：`batchPipeline.generateDrafts` 段（端点 / 默认 20 · 上限 50 / 三件套前置 / 真实 T1 才算 succeeded / 评级策略 / `draftSources` 白名单 / 幂等键 `batchId:domain:email`）；`export.draftSourcePolicy`；`errorCodes.E4014`（无可用目标 / 超上限）与 `E4015`（来源标识非法）。
+- `server/batch.mjs`：`generateDrafts()` 从 `store.companyList()` 取目标，与导入 / 研判同源；缺 `source_url + fetched_at + raw_text` / `contact_email` / `product_hint` 逐条 `failed` 且零 provider 调用；`requestId` 复用网关计费幂等键；`checkExportGates()` 加白名单并按 `E4015` 分派 rejected code；`exportDrafts()` 顶层真返回 `E4015`；`buildMbox()` 写 `X-LeadPilot-Draft-Source` 与 `X-LeadPilot-Demo`；`state()` 暴露 `generateDrafts` 能力。
+- `server/index.mjs`：`POST /v1/batch/generate-drafts`；`/health.batch.generateDrafts`。`validateRows()` 支持 `contact_grade`（A/B/C/D，非法整行拒绝，缺省 C + `gradeSource=default_conservative`）；`listCompanies()` 只回传能力标记。
+- 前端：`BatchPipelinePanel.tsx` 移除 `useAppStore.outreach` / `checkSendGates`，导出候选只来自 `generateDraftsBatch()` 的 `succeeded` 项或显式 `buildImportedTemplateDraft()`；换批次 / 导入 / 生成模板清空 C 级确认；`buildImportedTemplateDraft()` 禁词表从共享协议构造、缺产品返回 `null`、正文不含尾巴 / 身份 / 占位符。
+
+### 19.2 反例有效性与实跑
+
+新增 `server/tests/b8-pipeline.test.mjs` **18 个**与 `src/tests/b8-template.test.ts` **7 个**行为级反例：评级保守默认、清单不回传邮箱、空库 `E4014`、缺前置零 provider 调用、真实 T1 同源 3 家、降级 `body=null`、`requestId` 幂等、`batchSize` 超限 `E4014`、HTTP 层 `E4015`、模板 mbox DEMO 头、**跨层模板正文 → 服务端 F6-2 校验 → 导出链**、14 家 HTTP 端到端、无 provider 端到端停在 degraded、降级后本地模板闭环、`/health` 能力暴露、禁词全表遍历、缺产品拒绝。
+
+**改坏实现抽样（真实执行、逐字节还原）**：去掉 `draftSource` 白名单 / 缺前置仍调 provider / `batchSize` 超限改回静默截断，三次分别跑新测试文件，各自精准触发 `AssertionError`（非法来源被放行、failed 变 succeeded、超限不再返回 `E4014`），`exit 1`；还原后 `server/batch.mjs` 与备份逐字节一致（50289/50289）。
+
+| 检查 | B8 结果 |
+|---|---|
+| `typecheck` / `build` | 通过 · `357.39 kB / gzip 120.82 kB` |
+| `npm test` | **273 / 273**（15 文件，前端 53 + 服务端 220，0 skipped；较 B7 的 248 **+25**） |
+| `npm run gate` | **75 / 75**（新增 6 条 B8 行为级断言）；`releaseBlocked=true`，5 条 `BLOCKED` 由真实判定生成 |
+| `check:tracked` | **79 个源码/配置、94 tracked 无缺失** |
+| `evidence:check --self-test` / `validate:baseline --self-test` | **13 / 13** / PASSED |
+| `npm audit --omit=dev --audit-level=low` | **0 漏洞** |
+| `smoke` / `verify:restart` | **53 / 53**（隔离端口 5182 + memory）/ **AC-03 PASS** |
+| CI | 干净检出 13 步，run 号以 `gh run list` 为准 |
+
+### 19.3 边界与残留
+
+发布状态**一条未动**：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` 恒 · `accuracyClaim=false` 恒 · 商业数据源 `0/6` · integrity / outcome 均 `NO_DATA`。B8 接回的是数据层，不是采集能力；本地模板是显式 DEMO，不得计作模型产出或评测样本。评分仍按 §17.1 的 **3.7 / 5.0** 口径。
+
+§18.3 的 B8 待办中 **P2-6 已完成**；P2-7、P2-5、P3-1、P3-2、5 张截图重生成与 P3-6 巨石路由重构**仍未开始**。`docs/ASSESSMENT-2026-11-24.html` / `.pdf` 仍未跟踪入库。

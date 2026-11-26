@@ -79,6 +79,8 @@ const ALIASES = {
   product_hint: ['product_hint', 'producthint', 'product', '产品'],
   contact_email: ['contact_email', 'contactemail', 'email', '邮箱'],
   contact_name: ['contact_name', 'contactname', 'contact', '联系人'],
+  // B8 / P2-6：评级随导入行带入，未提供时按 C 级保守处理（导出前须逐条确认）
+  contact_grade: ['contact_grade', 'contactgrade', 'grade', '联系人评级'],
   origin: ['origin', '来源'],
 }
 
@@ -150,6 +152,12 @@ export function validateRows(rows, opts = {}) {
     if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(contactEmail)) {
       rejected.push({ rowIndex, reason: 'contact_email 格式非法' }); return
     }
+    const rawGrade = String(raw.contact_grade ?? '').trim().toUpperCase()
+    if (rawGrade && !['A', 'B', 'C', 'D'].includes(rawGrade)) {
+      rejected.push({ rowIndex, reason: `contact_grade 非法：${rawGrade.slice(0, 20)}（只允许 A/B/C/D）` }); return
+    }
+    const contactGrade = rawGrade || 'C'
+    const gradeSource = rawGrade ? 'imported' : 'default_conservative'
 
     if (seen.has(domain)) { duplicates.push({ rowIndex, domain, reason: '批内重复（同一规范化域名）' }); return }
     seen.add(domain)
@@ -164,7 +172,7 @@ export function validateRows(rows, opts = {}) {
       country: String(raw.country ?? '').trim().slice(0, 80),
       productHint: String(raw.product_hint ?? '').trim().slice(0, 120),
       sourceUrl, fetchedAt, rawText,
-      contactEmail, contactName, piiFields,
+      contactEmail, contactName, contactGrade, gradeSource, piiFields,
       origin: CFG.import.origin,
       missingSource: !hasSource,
     })
@@ -277,6 +285,11 @@ export function checkExportGates(items, ctx = {}) {
       if (grade === 'D') reasons.push('D 级联系人禁止发信（PRD 11.2）')
       if (grade === 'C' && item.confirmed !== true) reasons.push('C 级联系人需逐条人工确认（PRD 11.2）')
       if (!['A', 'B', 'C', 'D'].includes(grade)) reasons.push('grade 必须是 A/B/C/D')
+      // B8 / P2-6：来源标识白名单，防止本地模板草稿不标注就混进导出
+      const draftSource = String(item.draftSource ?? 'unspecified')
+      if (!CFG.generateDrafts.draftSources.includes(draftSource)) {
+        reasons.push(`草稿来源标识非法：${draftSource.slice(0, 40)}（E4015，只允许 ${CFG.generateDrafts.draftSources.join(' / ')}）`)
+      }
 
       const draft = validateEmailDraft({ subject: item.subject, body: item.body })
       if (!draft.valid) reasons.push(...draft.errors)
@@ -300,8 +313,11 @@ export function checkExportGates(items, ctx = {}) {
       if (usedToday + 1 > dailyLimit) reasons.push(`今日草稿导出已达 ${dailyLimit} 封上限，超额部分进明日队列`)
     }
 
-    if (reasons.length) blocked.push({ index: i, domain: item?.domain ?? null, code: 'E4009', reasons })
-    else { usedToday += 1; allowed.push({ ...item, _wordCount: validateEmailDraft({ subject: item.subject, body: item.body }).value?.wordCount ?? 0 }) }
+    if (reasons.length) {
+      // B8 / P2-6：非法 draftSource 是协议里的独立错误码，不能混进笼统的 E4009
+      const illegalSource = reasons.some((r) => r.includes('E4015'))
+      blocked.push({ index: i, domain: item?.domain ?? null, code: illegalSource ? 'E4015' : 'E4009', reasons })
+    } else { usedToday += 1; allowed.push({ ...item, _wordCount: validateEmailDraft({ subject: item.subject, body: item.body }).value?.wordCount ?? 0 }) }
   })
   return { allowed, blocked, errors: [], circuitOpen, exportedToday: usedToday }
 }
@@ -328,6 +344,8 @@ export function buildMbox(items, opts = {}) {
       'Content-Type: text/plain; charset=UTF-8',
       'Content-Transfer-Encoding: 8bit',
       `X-LeadPilot-Domain: ${headerSafe(it.domain)}`,
+      `X-LeadPilot-Draft-Source: ${headerSafe(String(it.draftSource ?? 'unspecified'))}`,
+      ...(String(it.draftSource ?? '') === 'local-template' ? ['X-LeadPilot-Demo: template-not-model'] : []),
       'X-LeadPilot-Status: drafted',
       `X-LeadPilot-Origin: ${CFG.import.origin}`,
       'X-LeadPilot-Note: exported-not-sent',
@@ -458,6 +476,10 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
         sourceOrigin: c.sourceOrigin ?? null,
         sourceUrl: c.sourceUrl ?? null,
         hasJudgement: Boolean(c.judgement), piiFields: c.piiFields ?? [],
+        contactGrade: c.contactGrade ?? 'C',
+        gradeSource: c.gradeSource ?? 'default_conservative',
+        hasContactEmail: Boolean(String(c.contactEmail ?? '').trim()),
+        productHint: String(c.productHint ?? ''),
       })),
       note: '本接口只返回调用方导入的线索，不代表系统采集结果；sourceOrigin=user_directed_fetch 表示原文由用户指定 URL 抓取。',
     }
@@ -651,6 +673,111 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
     }
   }
 
+  /**
+   * B8 / P2-6 · 批量出信：与导入 / 研判共用服务端客户库，不再依赖前端演示草稿库。
+   * 只产出「草稿内容」，不写回客户状态、不发送任何邮件、不伪造成模型输出。
+   * 锚点取官网原文的连续子串（逐字可核验）；缺原文 / 缺邮箱 / 缺产品一律逐条 failed。
+   */
+  async function generateDrafts(payload = {}) {
+    const cfg = CFG.generateDrafts
+    const all = companies()
+    // B8：超限必须显式拒绝，绝不静默截断后让调用方误以为整批都处理了
+    const requestedSize = Number(payload.batchSize ?? cfg.batchSizeDefault)
+    if (!Number.isFinite(requestedSize) || requestedSize < 1 || requestedSize > cfg.batchSizeMax) {
+      return { ok: false, code: 'E4014', reason: `batchSize 非法或超出单批上限 1..${cfg.batchSizeMax}，请分批` }
+    }
+    const size = Math.min(Math.max(1, Math.trunc(requestedSize)), cfg.batchSizeMax)
+    let selected
+    if (Array.isArray(payload.domains) && payload.domains.length) {
+      if (payload.domains.length > cfg.batchSizeMax) {
+        return { ok: false, code: 'E4014', reason: `单次最多 ${cfg.batchSizeMax} 家，请分批` }
+      }
+      selected = payload.domains.map(normalizeDomain).map((d) => all.find((c) => c.domain === d)).filter(Boolean)
+    } else {
+      selected = all.slice(0, size)
+    }
+    if (!selected.length) {
+      return { ok: false, code: 'E4014', reason: '客户库为空或指定域名不存在；先调用 POST /v1/import/companies 导入线索' }
+    }
+
+    const id = String(payload.batchId ?? batchId())
+    const items = []
+    for (const rec of selected) {
+      const domain = normalizeDomain(rec.domain)
+      const to = String(rec.contactEmail ?? '').trim()
+      const productHint = String(rec.productHint ?? '').trim()
+      const hasSource = !rec.missingSource && rec.sourceUrl && rec.fetchedAt && String(rec.rawText ?? '').trim()
+      const cleaned = hasSource ? sanitizeContext([rec.rawText]).texts[0] : ''
+      const anchor = String(cleaned ?? '').trim().slice(0, 200)
+      const grade = ['A', 'B', 'C', 'D'].includes(String(rec.contactGrade ?? '')) ? rec.contactGrade : 'C'
+      const gradeSource = rec.gradeSource === 'imported' ? 'imported' : 'default_conservative'
+      const base = {
+        domain, companyName: String(rec.companyName ?? ''), to, grade, gradeSource,
+        productHint, anchor: anchor || null,
+      }
+
+      const blockers = []
+      if (!to) blockers.push('缺 contact_email：无法生成收件地址')
+      if (!hasSource || !anchor) blockers.push('缺可核验原文三件套（source_url / fetched_at / raw_text）：missing_source，禁止无依据出信')
+      if (!productHint && !String(payload.product ?? '').trim()) blockers.push('缺 product_hint：无法确定主营产品')
+      if (blockers.length) {
+        items.push({
+          ...base, bucket: 'failed', draftSource: null, subject: null, body: null,
+          codes: ['E6004'], reason: blockers.join('；'),
+          note: '前置校验失败：未发起任何 provider 调用，也不生成正文；补齐后重试或走显式的本地模板（DEMO）入口',
+        })
+        continue
+      }
+
+      const input = {
+        companyId: domain, country: String(rec.country ?? ''),
+        anchor, product: String(payload.product ?? productHint).slice(0, 120),
+        advantages: Array.isArray(payload.advantages) ? payload.advantages.slice(0, 2).map(String) : [],
+        purpose: String(payload.purpose ?? 'intro'), tone: String(payload.tone ?? 'concise'),
+        maxWords: Number(payload.maxWords ?? protocol.emailPolicy.wordLimits.short),
+        language: String(payload.language ?? 'en'),
+        sources: [{ url: rec.sourceUrl, text: cleaned, fetched_at: rec.fetchedAt }],
+        requestId: `${id}:${domain}:email`,
+      }
+      let r
+      try {
+        r = gateway
+          ? await gateway.writeEmail(input)
+          : { ok: false, degraded: true, errorCodes: ['E6005'], reason: '未注入网关实例，未发起任何模型调用' }
+      } catch (err) {
+        r = { ok: false, degraded: true, errorCodes: ['E6001'], reason: String(err?.message ?? err) }
+      }
+
+      if (r.ok && String(r.subject ?? '').trim() && String(r.body ?? '').trim()) {
+        items.push({
+          ...base, bucket: 'succeeded', draftSource: 'provider',
+          subject: String(r.subject), body: String(r.body), anchorUsed: r.anchorUsed ?? null,
+          codes: [], reason: '', billing: r.billing ?? null,
+          note: '真实 T1 写信（正文已通过 F6-2 校验）；合规尾巴未注入，由调用方在本地补齐',
+        })
+      } else {
+        items.push({
+          ...base, bucket: 'degraded', draftSource: null, subject: null, body: null,
+          codes: Array.isArray(r.errorCodes) ? r.errorCodes : [String(r.code ?? 'E6005')],
+          reason: String(r.reason ?? r.errorCodes?.join(',') ?? '模型正文不可用'),
+          note: '模型正文不可用：body=null，绝不伪造。可走显式本地模板（DEMO）补齐，草稿必须标 draftSource=local-template',
+        })
+      }
+    }
+    const summary = {
+      total: items.length,
+      succeeded: items.filter((x) => x.bucket === 'succeeded').length,
+      degraded: items.filter((x) => x.bucket === 'degraded').length,
+      failed: items.filter((x) => x.bucket === 'failed').length,
+    }
+    return {
+      ok: true, version: BATCH_VERSION, batchId: id, summary, items,
+      allSucceeded: summary.succeeded === summary.total,
+      releaseEligible: false,
+      note: '批量出信与导入 / 研判共用服务端客户库（同一批 domain）；只有真实 T1 且正文通过校验才计入 succeeded，降级项 body=null 不伪造，导出 items 必须来自本端点或显式标注的本地模板。导出 ≠ 发送，本端点不写回客户状态。',
+    }
+  }
+
   function state() {
     const { events, exportedToday } = outcomeEventsForExport(store, now())
     const bounce = computeBounceRate(events)
@@ -664,6 +791,14 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       bounce: { ...bounce, threshold: CFG.export.bounceCircuitThreshold },
       circuitOpen: bounce.rate !== null && bounce.rate > CFG.export.bounceCircuitThreshold,
       draftExportDailyLimit: CFG.export.draftExportDailyLimit,
+      generateDrafts: {
+        endpoint: CFG.generateDrafts.endpoint,
+        batchSizeDefault: CFG.generateDrafts.batchSizeDefault,
+        batchSizeMax: CFG.generateDrafts.batchSizeMax,
+        draftSources: CFG.generateDrafts.draftSources,
+        releaseEligible: false,
+        note: '导入 → 研判 → 出信 → 导出共用云端客户库同一批 domain；降级项 body=null，本地模板必须显式标 local-template。',
+      },
       dataSourceReady: '0/6 由 /health.dataSources 单独如实上报；本管道不做采集',
       userDirectedFetch: {
         version: FETCH_VERSION,
@@ -711,10 +846,13 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
     })
     if (gates.errors?.length) return { ok: false, code: 'E4009', errors: gates.errors }
     if (!gates.allowed.length) {
+      const illegalSourceOnly = gates.blocked.length > 0 && gates.blocked.every((b) => b.code === 'E4015')
       return {
-        ok: false, code: ctx.circuitOpen ? 'E4010' : 'E4009',
+        ok: false, code: ctx.circuitOpen ? 'E4010' : (illegalSourceOnly ? 'E4015' : 'E4009'),
         blocked: gates.blocked, state: ctx,
-        reason: ctx.circuitOpen ? '退信熔断中，草稿导出暂停' : '全部草稿被合规闸门拒绝',
+        reason: ctx.circuitOpen ? '退信熔断中，草稿导出暂停'
+          : illegalSourceOnly ? '草稿来源标识非法（E4015）：本地模板必须显式标 draftSource=local-template'
+            : '全部草稿被合规闸门拒绝',
       }
     }
     const content = buildMbox(gates.allowed, { now: now() })
@@ -815,7 +953,7 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
 
   return {
     version: BATCH_VERSION,
-    importCompanies, listCompanies, fetchSources, runJudgeBatch,
+    importCompanies, listCompanies, fetchSources, runJudgeBatch, generateDrafts,
     exportDrafts, importOutcomes, importSuppressions, listSuppressions, state, health: state,
   }
 }

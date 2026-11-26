@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -373,6 +373,26 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 - 合规边界：只抓用户指定 URL、不抓登录后内容、限速、原文可删除；PII 入库登记并在发模型前剥离（`stripPiiForModel` 与 `sanitizeContext` 双闸门）。
 
 **后果**：`origin` 仍只能 `user_imported`；抓取得到的来源标 `user_directed_fetch`，**不得写成 `system_collected`**。`npm run gate` 断言：robots 遵从、限速 > 0、SSRF 命中不发起请求、批量抓取后公司 origin 不变、文档固化。合规上仍需就 robots / ToS / PIPL·GDPR 取得法律意见（保留在 `releasePolicy.remainingExternalBlockers`）。**本 ADR 修订 ADR-017 的接入路径**：不是「等 6 类 adapter」，而是「先让用户指定的真实页面进入评分链」。
+
+---
+
+## ADR-033 · B8 三步管道同源：批量出信走服务端客户库，草稿来源可机读（v0.9.0 增量）
+
+**背景**：独立评估 P2-6 指出，v0.7.0 的「导入 → 研判 → 导出」三步里，前两步读服务端 `companies`，第三步却从前端演示草稿库 `useAppStore.outreach` 拼导出项。结果是：导出项可以与云端客户库无关、C 级确认按演示 `draftId` 计、批量写信没有服务端实现，所谓「自动获客管道」在数据层是断的。用户明确要求定位仍是「自动获客」、目标用户仍是批量 SDR，因此不能用「改成研判提效」绕开，必须把出信补进同一条链。
+
+**决策**：
+
+- 新增 `POST /v1/batch/generate-drafts`：`server/batch.mjs` 的 `generateDrafts()` 只从 `store.companyList()` 取目标，与导入 / 研判共用同一批规范化 `domain`；`requestId = batchId:domain:email` 复用网关计费幂等键。单批默认 20、上限 50；`batchSize` 非法或超限显式 `E4014`，**不静默截断**。
+- **前置失败不调模型**：缺 `source_url + fetched_at + raw_text` 三件套、`contact_email` 或 `product_hint` 逐条 `failed`，`subject/body = null`、不发起任何 provider 调用。锚点取经 `sanitizeContext` 清洗的官网原文连续子串，交给 `gateway.writeEmail()` 的 T0 规则抽取二次校准。只有 `ok=true` 且正文通过 F6-2 校验才计入 `succeeded`；`E6005 / E6008` / 内容校验失败一律 `degraded`，**不伪造正文**。
+- **评级随导入带**：CSV 可带 `contact_grade`（A/B/C/D），非法值整行拒绝；缺省按 C 级保守处理并标 `gradeSource=default_conservative`，导出前须逐条人工确认。`listCompanies()` 只回传 `hasContactEmail / productHint / contactGrade` 等能力标记，不回传邮箱本身。
+- **草稿来源可机读**：`draftSource` 白名单 `provider / local-template / unspecified`，非法值 `E4015`（导出顶层真返回 `E4015`，不是笼统 `E4009`）。`buildMbox()` 逐封写 `X-LeadPilot-Draft-Source`；`local-template` 额外写 `X-LeadPilot-Demo: template-not-model`。
+- **本地模板是显式降级入口，不是模型替身**：`buildImportedTemplateDraft()` 只在用户点击后调用，禁词表从 `shared/model-protocol.json` 单一真源构造（与服务端 `validateEmailDraft` 同源），缺主营产品返回 `null` 不编造，正文不含合规尾巴 / 发件人身份 / 占位符。跨层反例把模板正文直接喂给服务端 F6-2 校验，杜绝前后端各写一套口径。
+- **前端收敛**：`BatchPipelinePanel.tsx` 不再读 `useAppStore.outreach`、不再用 `checkSendGates` 从演示库拼导出项；候选只来自 `generateDraftsBatch()` 的 `succeeded` 项或显式本地模板。换批次 / 导入 / 生成模板一律清空 C 级逐条确认，避免一次确认跨批复用。服务端 `checkExportGates` 仍是最终合规闸门（G2 抑制表 / D 级 / C 级 / footer / 日限）。
+- **可观测**：`state()` 与 `/health.batch.generateDrafts`、`/v1/batch/health` 暴露端点、批量上限与白名单；`npm run gate` 新增 6 条 B8 行为级断言，把「不得退回演示草稿库」「缺前置零调用」「非法来源 E4015」变成 CI 硬约束。
+
+**后果**：`origin` 仍只能 `user_imported`，抓取仍不等于采集；出信端点不写回客户状态、不发送任何邮件；只有 `/v1/export/eml` 才把状态置 `drafted`。本地模板草稿带 DEMO 头，不得计作模型产出或评测样本。**本 ADR 不解除任何 Go / No-Go 判据**：`releaseEligible=false`、商业源 `0/6`、`accuracyClaim=false`、integrity / outcome `NO_DATA` 全部不变；评分仍按 §17.1 的 3.7 / 5.0 口径，待后续复核。
+
+**验证**：273 单测（B8 新增 25 个反例，含 14 家 HTTP 端到端与跨层模板校验）/ 75 门禁 / 53 冒烟 / AC-03 全绿；三处「改坏实现会红」抽样（去掉 `draftSource` 白名单、缺前置仍调 provider、超限静默截断）分别精准触发失败用例，还原后逐字节一致。
 
 ---
 
