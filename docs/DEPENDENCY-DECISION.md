@@ -58,8 +58,8 @@
 |---|---|
 | 跨多个 major | `vite 5.4 → 8.3`、`vitest 2.1 → 5.1`，中间各隔 2–3 个 major；配置 API、插件接口、Node 版本要求都变了 |
 | 插件兼容 | `@vitejs/plugin-react 4.x` 需同步升级；Tailwind / PostCSS / autoprefixer 链路要重验 |
-| 测试运行器 | Vitest 5 的配置项、mock 行为、快照格式可能与现有 12 个测试文件不兼容 |
-| 验证成本 | 必须重跑：干净检出 `npm ci` → typecheck → 236 单测 → 66 门禁 → build → 51 冒烟 → AC-03 → 5 张截图重生成；任何一步红了都要定位是升级导致还是原有问题 |
+| 测试运行器 | Vitest 5 的配置项、mock 行为、快照格式可能与现有 13 个测试文件不兼容 |
+| 验证成本 | 必须重跑：干净检出 `npm ci` → typecheck → 248 单测 → 69 门禁 → build → 51 冒烟 → AC-03 → 5 张截图重生成；任何一步红了都要定位是升级导致还是原有问题 |
 | 收益边界 | 升级只改善开发机安全，不改变 `releaseEligible`（发布门禁由真实样本与外部合规卡住） |
 
 **不做的事**：不把 `npm audit --audit-level=critical` 之类参数放宽来「让 CI 变绿」；不在 CI 里把 dev 漏洞静默忽略；不把「生产 0 漏洞」写成「全项目 0 漏洞」。
@@ -83,7 +83,7 @@
 1. `npm audit`（不加 `--omit=dev`）→ `total 0`；
 2. `npm audit --omit=dev --audit-level=low` → 仍然 0（CI 已固化）；
 3. 干净检出 `git archive HEAD | tar -x` → `npm ci` → 15 步 CI 全绿；
-4. `npm run typecheck` / `npm test`（0 skipped）/ `npm run gate`（66 项）/ `npm run evidence:check -- --self-test` / `npm run check:tracked`；
+4. `npm run typecheck` / `npm test`（0 skipped）/ `npm run gate`（69 项）/ `npm run evidence:check -- --self-test` / `npm run check:tracked`；
 5. `npm run build` 产物可启动；`npm run smoke`（51 项）/ `npm run verify:restart`（AC-03）；
 6. `npm run capture:screenshots` 重生成 5 张截图并目视核验，README 不出现旧 UI；
 7. 更新本文与 README / 评估报告，注明升级前后版本、回归结果与残余风险。

@@ -101,6 +101,8 @@ export function createMemoryStore(opts = {}) {
   const cache = new Map()
   const ledgerState = emptyLedgerState()
   const companyRecords = new Map()
+  // B7 / P2-1：G2 全局黑名单与不可逆终态必须服务端持久化，不能靠调用方每次传参。
+  const suppressions = new Map()
   let outcomes = []
   let audit = []
   return {
@@ -128,8 +130,11 @@ export function createMemoryStore(opts = {}) {
     companyDelete(domain) { companyRecords.delete(domain) },
     outcomeAppend(entry) { outcomes.push(clone(entry)); if (outcomes.length > 10000) outcomes.shift() },
     outcomeList(limit = 500) { return outcomes.slice(-limit).map(clone) },
+    suppressionUpsert(domain, payload) { suppressions.set(domain, clone(payload)) },
+    suppressionGet(domain) { return clone(suppressions.get(domain) ?? null) },
+    suppressionList() { return [...suppressions.values()].map(clone) },
     close() {
-      tasks.clear(); cache.clear(); audit = []; outcomes = []; companyRecords.clear()
+      tasks.clear(); cache.clear(); audit = []; outcomes = []; companyRecords.clear(); suppressions.clear()
       Object.assign(ledgerState, emptyLedgerState())
     },
   }
@@ -171,6 +176,9 @@ function createSqliteStore(opts) {
       event TEXT NOT NULL, payload TEXT NOT NULL, at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_outcomes_at ON outcomes(at);
+    CREATE TABLE IF NOT EXISTS suppressions (
+      domain TEXT PRIMARY KEY, payload TEXT NOT NULL, at INTEGER NOT NULL
+    );
   `)
   const q = {
     taskUpsert: db.prepare('INSERT INTO tasks(id,payload,updated_at) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at'),
@@ -197,6 +205,9 @@ function createSqliteStore(opts) {
     companyDelete: db.prepare('DELETE FROM companies WHERE domain = ?'),
     outcomeAdd: db.prepare('INSERT INTO outcomes(domain,event,payload,at) VALUES(?,?,?,?)'),
     outcomeList: db.prepare('SELECT payload FROM outcomes ORDER BY id DESC LIMIT ?'),
+    suppressionUpsert: db.prepare('INSERT INTO suppressions(domain,payload,at) VALUES(?,?,?) ON CONFLICT(domain) DO UPDATE SET payload=excluded.payload, at=excluded.at'),
+    suppressionGet: db.prepare('SELECT payload FROM suppressions WHERE domain = ?'),
+    suppressionList: db.prepare('SELECT payload FROM suppressions ORDER BY at ASC'),
   }
   const parse = (row) => { try { return JSON.parse(row.payload) } catch { return null } }
   const parseEntry = (row) => {
@@ -271,6 +282,9 @@ function createSqliteStore(opts) {
       q.outcomeAdd.run(String(entry.domain ?? ''), String(entry.event ?? ''), JSON.stringify(entry), Number(entry.at ?? now()))
     },
     outcomeList(limit = 500) { return q.outcomeList.all(limit).map(parse).filter(Boolean).reverse() },
+    suppressionUpsert(domain, payload) { q.suppressionUpsert.run(domain, JSON.stringify(payload), Number(payload?.at ?? now())) },
+    suppressionGet(domain) { const row = q.suppressionGet.get(domain); return row ? parse(row) : null },
+    suppressionList() { return q.suppressionList.all().map(parse).filter(Boolean) },
     close() { db.close() },
   }
 }
@@ -278,7 +292,7 @@ function createSqliteStore(opts) {
 function createJsonStore(opts) {
   const { filePath, now } = opts
   const abs = resolve(filePath)
-  let state = { tasks: {}, cache: {}, audit: [], companies: {}, outcomes: [], ...emptyLedgerState() }
+  let state = { tasks: {}, cache: {}, audit: [], companies: {}, outcomes: [], suppressions: {}, ...emptyLedgerState() }
   if (existsSync(abs)) {
     try {
       const loaded = JSON.parse(readFileSync(abs, 'utf8'))
@@ -286,6 +300,7 @@ function createJsonStore(opts) {
       state = {
         tasks: loaded.tasks ?? {}, cache: loaded.cache ?? {}, audit: loaded.audit ?? [],
         companies: loaded.companies ?? {}, outcomes: loaded.outcomes ?? [],
+        suppressions: loaded.suppressions ?? {},
         ledgerAccounts: loaded.ledgerAccounts ?? ledger.ledgerAccounts,
         ledgerEntries: loaded.ledgerEntries ?? ledger.ledgerEntries,
         ledgerIdem: loaded.ledgerIdem ?? ledger.ledgerIdem,
@@ -334,6 +349,9 @@ function createJsonStore(opts) {
       flush()
     },
     outcomeList(limit = 500) { return state.outcomes.slice(-limit).map(clone) },
+    suppressionUpsert(domain, payload) { state.suppressions[domain] = clone(payload); flush() },
+    suppressionGet(domain) { return clone(state.suppressions[domain] ?? null) },
+    suppressionList() { return Object.values(state.suppressions).map(clone) },
     close() { flush() },
   }
 }

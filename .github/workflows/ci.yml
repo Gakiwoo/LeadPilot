@@ -53,6 +53,10 @@ jobs:
       - name: Baseline import validator self-test
         run: npm run validate:baseline -- --self-test
 
+      # B7 / P2-3：证据校验器 13 项反例此前只在本地手工跑，CLI 改坏 CI 无感。
+      - name: Release evidence validator self-test
+        run: npm run evidence:check -- --self-test
+
       - name: Unit tests
         run: npm test
 
@@ -66,7 +70,8 @@ jobs:
           trap 'kill "$PID" 2>/dev/null || true' EXIT
           ready=0
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:5181/health >/dev/null 2>&1; then
+            # B7 / P3-3：自托管 runner 上有 http_proxy 时，探活会被代理劫持造成假失败
+            if curl --noproxy '*' -fsS http://127.0.0.1:5181/health >/dev/null 2>&1; then
               echo "cloud API ready after ${i}s"
               ready=1
               break

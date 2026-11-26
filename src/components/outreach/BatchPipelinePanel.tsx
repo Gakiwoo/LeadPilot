@@ -123,7 +123,17 @@ export default function BatchPipelinePanel() {
     if (r.ok && r.content && r.filename) {
       downloadMbox(r.filename, r.content)
       showToast(`已导出 ${r.count} 封 mbox 草稿；导出 ≠ 发送，请在邮件客户端逐封确认`, 'ok')
-    } else showToast(`导出被拒绝：${r.code ?? 'E6005'}（${r.reason ?? '见下方闸门明细'}）`, 'warn')
+    } else {
+      // B7：服务端会拒绝「未导入客户库」的域名，必须把具体原因和操作指引说清楚，
+      // 不能只显示笼统的 E4009，否则看起来像导出功能坏了。
+      const firstReason = Array.isArray(r.blocked) && r.blocked[0]?.reasons?.length
+        ? r.blocked[0].reasons.join('；')
+        : (r.reason ?? '见下方闸门明细')
+      const hint = /未导入客户库|knownDomains|服务端持久化|退订/.test(firstReason)
+        ? ' · 请先在「导入线索」把域名导入云端客户库；命中 G2 抑制名单的域名不可导出'
+        : ''
+      showToast(`导出被拒绝：${r.code ?? 'E6005'}（${firstReason}）${hint}`, 'warn')
+    }
   }
 
   return (

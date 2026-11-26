@@ -87,8 +87,8 @@ npm run dev
 
 ```bash
 npm run typecheck       # TS strict + noUncheckedIndexedAccess（索引访问必须显式判空）
-npm test                # 236 个用例 / 12 文件 / 0 skipped（前端 46 + 服务端 190）
-npm run gate            # 发布门禁 66 项自检，输出 releaseBlocked=true
+npm test                # 248 个用例 / 13 文件 / 0 skipped（前端 46 + 服务端 202）
+npm run gate            # 发布门禁 69 项自检，输出 releaseBlocked=true
 npm run evidence:check -- --self-test  # 证据校验器反例：合成/缺签署/凑数样本必须被拒
 npm run evidence:check  # 查看当前证据目录的真实判定与阻断项
 npm run check:tracked   # 干净检出全量校验：src/server/shared/scripts 与 git ls-files 对账
@@ -121,7 +121,7 @@ flowchart LR
 
 1. **导入 ≠ 采集**：每行标 `origin=user_imported`，出现 `system_collected` / `auto_collected` / `scraped` / `crawled` 一律拒行；域名规范化后批内 / 库内去重，逐行返回 `accepted / rejected / duplicates`，单行失败不影响整批。
 2. **抓取 ≠ 采集**：`/v1/sources/fetch` 只抓调用方显式给出的 URL，不发现、不爬全站、不猜地址；原文经 PII 清洗后进入 T0 → judge。
-3. **导出 ≠ 发送**：`/v1/export/eml` 只生成 mbox 草稿，`exportedIsNotSent=true`、状态停在 `drafted`，不调用任何邮件 API；D 级禁发、C 级逐条确认、真实身份与退订尾巴由调用方本地注入，服务端只校验存在性。
+3. **导出 ≠ 发送**：`/v1/export/eml` 只生成 mbox 草稿，`exportedIsNotSent=true`、状态停在 `drafted`，不调用任何邮件 API；D 级禁发、C 级逐条确认、真实身份与退订尾巴由调用方本地注入，服务端只校验存在性。**B7 起 G2 黑名单 / 退订终态由服务端持久化**（`/v1/import/suppressions`），不依赖调用方传 `blacklist`；收件域名必须已导入云端客户库，未知域名一律拒绝。
 4. **降级 ≠ 成功**：批量研判按 `succeeded / degraded / failed` 分桶，`E6005` / `E6008` 不写回 `judgement`；退信样本为 0 时 `rate=null`，不伪造 0%。
 
 ---
@@ -201,7 +201,8 @@ flowchart LR
 | POST | `/v1/import/companies` | 批量导入；伪称 `system_collected` 的行直接拒绝；无可接受行 → `E4007` |
 | POST | `/v1/batch/judge` | 批量研判（`batchSize` ≤ 50）；降级计入 `degraded`，不写回 `judgement` |
 | POST | `/v1/export/eml` | mbox 草稿导出；合规闸门拒绝 `E4009`、熔断中 `423 E4010` |
-| POST | `/v1/import/outcomes` | 结果回写；`unsubscribed / invalid` 需逐条确认且不可逆 |
+| POST | `/v1/import/outcomes` | 结果回写；`unsubscribed / invalid` 需逐条确认且不可逆，并自动写入服务端 G2 抑制表 |
+| GET / POST | `/v1/suppressions` · `/v1/import/suppressions` | 只读列出 / 登记服务端持久化 G2 抑制名单（只增不删，domain 必须已入库） |
 | POST | `/v1/sources/fetch` | 用户指定 URL 临时抓取（单次 ≤10，不写库、不发现 URL） |
 | POST | `/v1/batch/fetch-sources` | 为已导入且缺原文的公司抓官网（≤50），写回 `rawText / sourceUrl / fetchedAt` |
 | POST | `/v1/eval/integrity` · `/v1/eval/outcome` · `/v1/eval/diff` | 零人工评测与版本 diff；无样本 `NO_DATA` / 无基线 `NO_BASELINE`；`minSamples` 只能抬高、`windowSize` 只能缩小 |
@@ -308,18 +309,18 @@ docs/                  PM-REVIEW · ARCHITECTURE（ADR-001–032）· PRD-COVERA
 
 | 检查 | 结果（v0.9.0） |
 |---|---|
-| `npm run typecheck` / `npm run build` | 通过；`strict` + `noUncheckedIndexedAccess` 双开，门禁静态锁死；`/health.version` 与侧栏版本号均从 `package.json` 读取，不再硬编码；生产构建 353.78 kB / gzip 119.45 kB |
-| `npm test` | **236 / 236 全绿，0 skipped**（12 文件；前端 46 + 服务端 190；B6 新增 16 个行为级反例） |
-| `npm run gate` | **66 / 66 自检通过**，输出 `releaseBlocked=true` 与 5 条由真实判定生成的 `BLOCKED` |
+| `npm run typecheck` / `npm run build` | 通过；`strict` + `noUncheckedIndexedAccess` 双开，门禁静态锁死；`/health.version` 与侧栏版本号均从 `package.json` 读取，不再硬编码；生产构建 354.03 kB / gzip 119.60 kB |
+| `npm test` | **248 / 248 全绿，0 skipped**（13 文件；前端 46 + 服务端 202；B7 新增 12 个行为级反例，含 3 处「改坏实现会红」抽样） |
+| `npm run gate` | **69 / 69 自检通过**，输出 `releaseBlocked=true` 与 5 条由真实判定生成的 `BLOCKED` |
 | `npm run evidence:check -- --self-test` | **13 / 13 通过**：合成标记 / 缺签署 / 伪造引用 / 复制凑数 / 空集全部被拒 |
-| `npm run check:tracked` | **76 个源码/配置全部纳入版本控制**，无缺失；B6 修掉按 basename 跳过 `src/data/` 的假通过（原先误报 65），并纳入根级配置与 `.github`；tracked 总数以 `git ls-files \| wc -l` 为准，文档不写死 |
+| `npm run check:tracked` | **77 个源码/配置全部纳入版本控制**，无缺失；B6 修掉按 basename 跳过 `src/data/` 的假通过（原先误报 65），并纳入根级配置与 `.github`；tracked 总数以 `git ls-files \| wc -l` 为准，文档不写死 |
 | `npm audit --omit=dev --audit-level=low` | **0 漏洞**，已固化为 CI 硬步骤；dev 工具链 6 条漏洞需跨 major 升级，见 [依赖升级决策](docs/DEPENDENCY-DECISION.md) |
 | `npm run capture:screenshots` | 5 张 README 截图可由仓库内脚本重生成（Chrome headless / CDP，1600×1000） |
-| `npm run smoke` | **51 / 51 通过**（默认端口 5181，需先启动 `npm run cloud`） |
+| `npm run smoke` | **51 / 51 通过**（默认端口 5181，需先启动 `npm run cloud`）；B7 起先探活，服务未启动明确输出 `SMOKE_PRECONDITION` 并以退出码 2 退出，不再打印「0/45 checks passed」误导成代码回归 |
 | `npm run verify:restart` | **AC-03 全链路 PASS**：杀进程 → 同库重启 → `paused`、游标 / 点数 / 冻结额一致、显式继续从原游标续跑、只有一条预扣流水 |
 | `npm run validate:baseline -- --self-test` | 继续拒绝非法标注与空基准集（legacy 通道） |
-| 干净检出终验 | B6：GitHub Actions `45379594287` 在 `actions/checkout` 干净检出上 **12 步全绿**（Tracked sources sanity / 生产依赖 0 漏洞 / typecheck / 236 单测 / 66 门禁 / build / 51 冒烟 / AC-03）；主工作区 `check:tracked` = 76 源码/配置 · 91 tracked 无缺失。B5 历史：`git archive HEAD` → 90 文件 → `npm ci` → 生产依赖审计 0 漏洞 / typecheck / 220 单测 / 66 门禁 / 13 证据自检 / build / 51 冒烟（独立端口 5182）/ AC-03 全绿；`check:tracked` 依赖 `.git`，归档目录跳过；B4 历史 88 文件 / 211 单测 / 66 门禁 / 51 冒烟；B3 历史 84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
-| GitHub Actions | 每次 push 的流水线全绿（干净检出 / **生产依赖 0 漏洞审计** / 门禁 / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
+| 干净检出终验 | B7：在 `actions/checkout` 干净检出上 **13 步全绿**（B7 新增 `Release evidence validator self-test` 与探活 `--noproxy`）· 生产依赖 0 漏洞 / typecheck / 248 单测 / 69 门禁 / 13 证据自检 / build / 51 冒烟 / AC-03；主工作区 `check:tracked` = 77 源码/配置 · 92 tracked 无缺失；`smoke` 门槛改读 `/v1/eval/*/gates` manifest，不再写死 100 / 30。B6 历史：GitHub Actions `45379594287` **12 步全绿**（Tracked sources sanity / 生产依赖 0 漏洞 / typecheck / 236 单测 / 66 门禁 / build / 51 冒烟 / AC-03）；76 源码/配置 · 91 tracked。B5 历史：`git archive HEAD` → 90 文件 → `npm ci` → 生产依赖审计 0 漏洞 / typecheck / 220 单测 / 66 门禁 / 13 证据自检 / build / 51 冒烟（独立端口 5182）/ AC-03 全绿；`check:tracked` 依赖 `.git`，归档目录跳过；B4 历史 88 文件 / 211 单测 / 66 门禁 / 51 冒烟；B3 历史 84 文件 / 202 单测 / 60 门禁 / 48 冒烟 |
+| GitHub Actions | 每次 push 的 **13 步**流水线全绿（干净检出 / **生产依赖 0 漏洞审计** / 发布门禁 / **证据校验器 13 项反例** / AC-03 重启 / 51 冒烟）；run 号以 `gh run list` 为准，文档不写死 |
 
 提交链（历史节选）：`75dda08 feat(eval,fetch) …（v0.9.0）` → `980fc87 docs …` → `e37ac53 docs: 记录 CI run 与提交链` → `f9bcd69`（v0.9.0 远端）→ `4bccea9`（B1 · 3 个 P0）→ `000a8c0`（B2 · 17 个 P1）→ B3 修复批次。**当前 HEAD 一律以 `git log -1` 为准**，文档不再写死最新提交号，避免提交链随每次提交漂移。
 历史专项（v0.6.0–v0.8.0，仍全绿）：网关计费 9 个单测、评测 diff 8 个单测、并发队列 FIFO 与硬超时、批量管道 8 个单测、integrity / outcome 6 个单测。

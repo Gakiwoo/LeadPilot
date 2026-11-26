@@ -66,6 +66,18 @@ async function sseProbe(taskId, maxEvents = 4) {
 }
 
 async function main() {
+  // B7 / P2-8：先探活。此前服务未启动会打印「0/45 checks passed」，容易被误读成代码回归。
+  // 前提不满足时明确退出码 2，且不输出任何冒烟统计，绝不把环境问题伪装成断言失败。
+  const probe = await req('/health', { signal: AbortSignal.timeout(2000) })
+  if (probe.status !== 200 || probe.body?.ok !== true || probe.body?.service !== 'leadpilot-cloud') {
+    console.error(`[LeadPilot] SMOKE_PRECONDITION: 云端服务不可达或不是 LeadPilot（${BASE}/health）`)
+    console.error(`  请先启动：npm run cloud；或用 LEADPILOT_API=http://127.0.0.1:<port> npm run smoke 指定端口`)
+    console.error(`  探测结果：status=${probe.status} detail=${JSON.stringify(probe.body).slice(0, 160)}`)
+    console.error('  这是环境前提不满足，不是代码回归；本次不计入冒烟结果（退出码 2）。')
+    process.exitCode = 2
+    return
+  }
+
   const health = await req('/health')
   check('云端服务健康检查（版本与 package.json 一致）',
     health.status === 200 && health.body.ok === true && health.body.version === PKG_VERSION,
@@ -269,6 +281,15 @@ async function main() {
     `status=${outcomeEmpty.body?.status}`)
 
   // B4：评测端点不得被请求参数绕过（下调样本门槛 / 放大窗口稀释退信率）
+  // B7 / P3-4：门槛与窗口一律从服务端 manifest 读取，契约改值不产生假失败 / 假通过
+  const integrityGates = await req('/v1/eval/integrity/gates')
+  const outcomeGates = await req('/v1/eval/outcome/gates')
+  const MIN_INTEGRITY = Number(integrityGates.body?.minSamples)
+  const MIN_OUTCOME = Number(outcomeGates.body?.minSamples)
+  const WINDOW = Number(outcomeGates.body?.windowSize)
+  const contractReadable = Number.isInteger(MIN_INTEGRITY) && MIN_INTEGRITY > 0
+    && Number.isInteger(MIN_OUTCOME) && MIN_OUTCOME > 0
+    && Number.isInteger(WINDOW) && WINDOW > 0
   const floorRecord = {
     provenance: { matched: 1, total: 1 }, rules: { passed: 2, total: 2 },
     schemaPass: true, refused: false,
@@ -276,21 +297,23 @@ async function main() {
   }
   const floor = await post('/v1/eval/integrity', { records: [floorRecord], minSamples: 1 })
   check('评测端点不允许下调 minSamples：单条证据 + minSamples=1 仍被契约下限挡住',
-    floor.status === 200 && floor.body?.minSamples === 100
+    contractReadable && floor.status === 200 && floor.body?.minSamples === MIN_INTEGRITY
     && floor.body?.ok === false && floor.body?.status === 'BLOCKED',
-    `minSamples=${floor.body?.minSamples} status=${floor.body?.status}`)
+    `minSamples=${floor.body?.minSamples} expect=${MIN_INTEGRITY} status=${floor.body?.status}`)
 
+  // 契约窗口内构造 ~4% 退信，前面灌入大量 sent 试图放大 windowSize 稀释
+  const recentBounces = Math.max(1, Math.ceil(WINDOW * 0.04))
   const diluted = await post('/v1/eval/outcome', {
     events: [
-      ...Array.from({ length: 900 }, () => 'sent'),
-      ...Array.from({ length: 100 }, (_, i) => (i < 4 ? 'bounced' : 'sent')),
+      ...Array.from({ length: contractReadable ? WINDOW * 2 : 0 }, () => 'sent'),
+      ...Array.from({ length: contractReadable ? WINDOW : 0 }, (_, i) => (i < recentBounces ? 'bounced' : 'sent')),
     ],
-    windowSize: 1000, minSamples: 1,
+    windowSize: contractReadable ? WINDOW * 10 : 1, minSamples: 1,
   })
-  check('评测端点不允许放大 windowSize 稀释退信率：最近 100 条 4% 退信仍 BLOCKED',
-    diluted.status === 200 && diluted.body?.windowSize === 100
-    && diluted.body?.minSamples === 30 && diluted.body?.ok === false
-    && diluted.body?.status === 'BLOCKED',
+  check('评测端点不允许放大 windowSize 稀释退信率：契约窗口内 4% 退信仍判失败',
+    contractReadable && diluted.status === 200 && diluted.body?.windowSize === WINDOW
+    && diluted.body?.minSamples === MIN_OUTCOME && diluted.body?.ok === false
+    && Number(diluted.body?.metrics?.bounce_rate) > 0.03,
     `window=${diluted.body?.windowSize} min=${diluted.body?.minSamples} rate=${diluted.body?.metrics?.bounce_rate}`)
 
   const releaseProbe = await req('/v1/release/status')

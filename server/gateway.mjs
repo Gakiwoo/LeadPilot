@@ -178,6 +178,14 @@ export function createGateway(opts = {}) {
       taskType, tier, providerKey: null, cached: false, input: 0, output: 0, points: 0,
       degraded: true, code: hold.code, billingRefused: true, latencyMs: 0,
     })
+    // B7 / P3-5：文案必须跟随账本返回的真实错误码，不能把 E4002 / E4003 / E4005 一律说成「已结算」
+    const REASONS = {
+      E4001: (r) => `点数不足，未发起任何 provider 调用：${r}`,
+      E4002: (r) => `同一计费键金额不一致，拒绝重复预扣：${r}`,
+      E4003: (r) => `账本预扣校验失败，未发起任何 provider 调用：${r}`,
+      E4005: (r) => `计费幂等键已结算/已释放或存在并发预扣，拒绝重复调用与重复扣点：${r}`,
+    }
+    const describe = REASONS[hold.code] ?? ((r) => `计费预扣被拒（${hold.code ?? 'E4003'}），未发起任何 provider 调用：${r}`)
     return {
       ok: false, degraded: true, judgement: null, subject: null, body: null,
       tier, region, errorCodes: [hold.code], code: hold.code,
@@ -185,9 +193,7 @@ export function createGateway(opts = {}) {
         charged: false, scope: 'ledger-v2', refId: hold.refId,
         reason: hold.reason, available: hold.available,
       },
-      reason: hold.code === 'E4001'
-        ? `点数不足，未发起任何 provider 调用：${hold.reason}`
-        : `计费幂等键已结算，拒绝重复调用与重复扣点：${hold.reason}`,
+      reason: describe(hold.reason),
       ...extra,
     }
   }
@@ -199,9 +205,23 @@ export function createGateway(opts = {}) {
     const amount = Math.min(estimated, hold.reserve)
     const r = ledger.settle({ refId: hold.refId, amount, reason: '网关真实调用结算（内容已通过校验）' })
     if (!r.ok) {
+      // B7 / P2-2：结算失败必须释放冻结额。此前只写「需人工核对」，
+      // held 会永久挂着，违反 chargeOn / releaseOn 契约里「失败全额释放」。
+      let released
+      try {
+        released = ledger.release({ refId: hold.refId, reason: `结算失败（${r.code}）自动全额释放预扣` })
+      } catch (err) {
+        released = { ok: false, code: 'E4003', reason: String(err?.message ?? err) }
+      }
+      const releaseCode = released?.ok ? null : (released?.code ?? 'E4003')
       return {
-        charged: false, scope: 'ledger-v2', refId: hold.refId,
-        error: r.code, reason: r.reason, note: `结算失败（${r.code}）：本次未扣点，预扣状态需人工核对`,
+        charged: false, settleFailed: true, scope: 'ledger-v2', refId: hold.refId,
+        released: Boolean(released?.ok),
+        refunded: released?.ok ? (released.refunded ?? hold.reserve) : 0,
+        releaseCode, error: r.code, reason: r.reason,
+        note: released?.ok
+          ? `结算失败（${r.code}）：${r.reason}。本次未扣点，预扣已全额释放（失败调用成本由平台自担）`
+          : `结算失败（${r.code}）且释放失败（${releaseCode}）：${released?.reason ?? r.reason}，预扣状态需人工核对账本`,
       }
     }
     return {
@@ -234,6 +254,19 @@ export function createGateway(opts = {}) {
     if (!hold?.active) return '本次未产生账本预扣，不计点'
     if (billing?.released === true) return '预扣点数已全额释放'
     return `预扣释放失败（${billing?.code ?? 'E4003'}），需人工核对账本`
+  }
+
+  /** B7 / P2-2：异常路径不得把「结算失败」说成「已完成结算」 */
+  function exceptionBillingNote(settled, hold, billing) {
+    if (settled?.settleFailed) {
+      return settled.released
+        ? '结算失败，预扣已全额释放，本次未扣点'
+        : `结算失败且预扣释放失败（${settled.releaseCode ?? 'E4003'}），需人工核对账本`
+    }
+    if (settled) {
+      return `异常前已完成结算，账本${settled.charged ? `实扣 ${settled.chargedPoints} 点` : '未扣点'}，需人工核对`
+    }
+    return releaseNote(hold, billing)
   }
 
   function health() {
@@ -642,9 +675,7 @@ export function createGateway(opts = {}) {
       // P1-05 / P1-08：异常前若已结算，账本事实不可回滚，必须如实说明；
       // 内部错误只进服务端日志，绝不把路径 / SQLite 状态回显给调用方。
       const billing = settled ?? releaseBilling(hold, '网关调用异常')
-      const moneyNote = settled
-        ? `异常前已完成结算，账本${settled.charged ? `实扣 ${settled.chargedPoints} 点` : '未扣点'}，需人工核对`
-        : releaseNote(hold, billing)
+      const moneyNote = exceptionBillingNote(settled, hold, billing)
       // eslint-disable-next-line no-console
       console.warn(`[LeadPilot] 网关判断调用异常：${String(err?.message ?? err)}`)
       appendAudit({ taskType: 'judge', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6001', billingCharged: Boolean(settled?.charged), billingRefId: billing.refId ?? null, latencyMs: nowFn() - started })
@@ -802,9 +833,7 @@ export function createGateway(opts = {}) {
       }
     } catch (err) {
       const billing = settled ?? releaseBilling(hold, '网关写信异常')
-      const moneyNote = settled
-        ? `异常前已完成结算，账本${settled.charged ? `实扣 ${settled.chargedPoints} 点` : '未扣点'}，需人工核对`
-        : releaseNote(hold, billing)
+      const moneyNote = exceptionBillingNote(settled, hold, billing)
       // eslint-disable-next-line no-console
       console.warn(`[LeadPilot] 网关写信调用异常：${String(err?.message ?? err)}`)
       appendAudit({ taskType: 'write_email', tier, providerKey: null, cached: false, input: 0, output: 0, points: 0, degraded: true, code: 'E6001', billingCharged: Boolean(settled?.charged), billingRefId: billing.refId ?? null, latencyMs: nowFn() - started })

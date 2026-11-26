@@ -292,10 +292,12 @@ export function createApp(opts = {}) {
       const path = url.pathname
       const method = req.method ?? 'GET'
 
-      if (method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return }
       if (!rateOk(req, res)) {
         return fail(res, 429, 'E6010', '请求过于频繁', `同一 IP 每分钟超过 ${sec.rateLimit} 次`, '稍后重试或调高 LEADPILOT_RATE_LIMIT')
       }
+      // B7 / P2-9：OPTIONS 预检此前在限流之前短路，可无限发预检绕开计数。
+      // 现在与其它请求一样计入限流，但仍免鉴权（浏览器预检不会携带 Bearer）。
+      if (method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return }
       // /health 供探活与前端启动探测，其余 /v1/* 全部要求鉴权（配置了 token 或对外监听时）
       if (!(method === 'GET' && path === '/health') && !authOk(req)) {
         const proxied = !sec.token && looksProxied(req)
@@ -525,6 +527,16 @@ export function createApp(opts = {}) {
       if (method === 'POST' && path === '/v1/import/outcomes') {
         const body = await readBody(req)
         const result = batch.importOutcomes(body)
+        return json(res, result.ok ? 200 : 400, result)
+      }
+
+      // B7 / P2-1：G2 抑制名单由服务端登记与持久化；导出闸门不依赖调用方传参
+      if (method === 'GET' && path === '/v1/suppressions') {
+        return json(res, 200, batch.listSuppressions())
+      }
+      if (method === 'POST' && path === '/v1/import/suppressions') {
+        const body = await readBody(req)
+        const result = batch.importSuppressions(body)
         return json(res, result.ok ? 200 : 400, result)
       }
       // -------------------------------------------------------------------------

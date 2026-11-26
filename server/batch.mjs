@@ -213,10 +213,37 @@ export function checkExportGates(items, ctx = {}) {
   let usedToday = Number(ctx.exportedToday ?? 0)
   // B3-0（假设 #4 核查）：G2 不能只靠前端自觉。服务端同时接收调用方黑名单，
   // 并联合客户库里的不可逆终态做硬拦截，直接调 /v1/export/eml 也绕不过去。
+  // B7 / P2-1：不再「依赖」调用方传参——抑制名单来自服务端持久化表，
+  // 调用方 blacklist 只作为临时补充；且每条草稿的 domain 必须已在客户库中，
+  // 缺失客户库上下文时一律 fail-closed，禁止给未知域名凭空生成草稿。
   const blacklist = Array.isArray(ctx.blacklist)
     ? ctx.blacklist.map((b) => String(b).toLowerCase().trim()).filter(Boolean) : []
   const terminalDomains = Array.isArray(ctx.terminalDomains)
     ? ctx.terminalDomains.map((d) => String(d).toLowerCase().trim()).filter(Boolean) : []
+  const rawKnown = ctx.knownDomains instanceof Set
+    ? [...ctx.knownDomains]
+    : Array.isArray(ctx.knownDomains) ? ctx.knownDomains : null
+  const knownDomains = rawKnown
+    ? new Set(rawKnown.map((d) => normalizeDomain(String(d).toLowerCase().trim())).filter(Boolean))
+    : null
+  // 服务端持久化抑制条目：支持 {domain, email} 与 'email' / '@domain' 字符串
+  const serverBlacklist = Array.isArray(ctx.serverBlacklist) ? ctx.serverBlacklist : []
+  const serverEmails = new Set()
+  const serverDomains = new Set()
+  for (const b of serverBlacklist) {
+    if (isObj(b)) {
+      const d = normalizeDomain(String(b.domain ?? ''))
+      if (d) serverDomains.add(d)
+      const e = String(b.email ?? '').toLowerCase().trim()
+      if (e) serverEmails.add(e)
+    } else {
+      const s = String(b ?? '').toLowerCase().trim()
+      if (!s) continue
+      if (s.startsWith('@')) serverDomains.add(normalizeDomain(s.slice(1)))
+      else if (s.includes('@')) { serverEmails.add(s); serverDomains.add(normalizeDomain(s.split('@')[1] ?? '')) }
+      else serverDomains.add(normalizeDomain(s))
+    }
+  }
 
   if (!Array.isArray(items) || !items.length) {
     return { allowed, blocked, errors: ['items 为空'], circuitOpen, exportedToday: usedToday }
@@ -232,6 +259,16 @@ export function checkExportGates(items, ctx = {}) {
       const emailDomain = email.split('@')[1] ?? ''
       if (blacklist.some((b) => (b.startsWith('@') ? emailDomain === b.slice(1) : email === b))) {
         reasons.push('收件人命中黑名单/退订（G2，全局禁止发送）')
+      }
+      // B7 / P2-1：domain 必须已在客户库中，且服务端持久化名单独立生效
+      const itemDomain = normalizeDomain(String(item.domain ?? '').toLowerCase())
+      if (knownDomains === null) {
+        reasons.push('导出闸门缺少客户库上下文（knownDomains），拒绝生成草稿（fail-closed）')
+      } else if (!itemDomain || !isDomain(itemDomain) || !knownDomains.has(itemDomain)) {
+        reasons.push('收件域名未导入客户库：禁止对未知域名生成草稿（G2）')
+      }
+      if (serverEmails.has(email) || serverDomains.has(itemDomain) || serverDomains.has(normalizeDomain(emailDomain))) {
+        reasons.push('命中服务端持久化黑名单 / 退订终态（G2，不依赖调用方传参）')
       }
       if (terminalDomains.includes(String(item.domain ?? '').toLowerCase().trim())) {
         reasons.push('客户已处于退订/无效终态（G2，不可逆，禁止导出）')
@@ -331,6 +368,53 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
 
   function companies() { return typeof store.companyList === 'function' ? store.companyList() : [] }
   function existingDomains() { return new Set(companies().map((c) => c.domain)) }
+
+  /** B7 / P2-1：服务端持久化的 G2 全局抑制名单。返回 null = 存储层不支持，必须 fail-closed。 */
+  function suppressionRecords() {
+    if (typeof store.suppressionList !== 'function' || typeof store.suppressionUpsert !== 'function') return null
+    const list = store.suppressionList()
+    return Array.isArray(list) ? list : null
+  }
+
+  /** 显式登记黑名单 / 退订域名：只增不删（不可逆），且 domain 必须已在客户库中。 */
+  function importSuppressions(payload = {}) {
+    if (suppressionRecords() === null) {
+      return { ok: false, code: 'E4009', reason: '存储层缺少服务端 G2 抑制表，拒绝登记（fail-closed）' }
+    }
+    const rows = Array.isArray(payload.entries) ? payload.entries : []
+    if (!rows.length) return { ok: false, code: 'E4009', reason: 'entries 为空' }
+    if (rows.length > 500) return { ok: false, code: 'E4009', reason: '单批最多 500 条抑制记录' }
+    const reasonsAllowed = [...CFG.outcomes.terminalStatuses, 'manual_blacklist']
+    const known = new Set(companies().map((c) => normalizeDomain(String(c?.domain ?? ''))).filter(Boolean))
+    const applied = []
+    const rejected = []
+    rows.forEach((r, i) => {
+      const domain = normalizeDomain(r?.domain)
+      const reason = String(r?.reason ?? 'unsubscribed').trim()
+      const errs = []
+      if (!isDomain(domain)) errs.push('domain 非法')
+      if (!known.has(domain)) errs.push('该域名不在已导入客户库中，禁止登记未知域名')
+      if (!reasonsAllowed.includes(reason)) errs.push(`reason 必须是 ${reasonsAllowed.join(' / ')}`)
+      if (errs.length) { rejected.push({ index: i, domain, reason, code: 'E4009', reasons: errs }); return }
+      store.suppressionUpsert(domain, {
+        domain, reason, at: now(),
+        operator: String(r?.operator ?? '本地用户'), note: String(r?.note ?? ''),
+        source: 'server_registered',
+      })
+      applied.push({ domain, reason })
+    })
+    return {
+      ok: true, version: BATCH_VERSION, applied, rejected,
+      total: suppressionRecords().length,
+      note: 'G2 抑制名单由服务端持久化，只增不删；导出闸门不依赖调用方传 blacklist，直接调 API 也绕不过去。',
+    }
+  }
+
+  function listSuppressions() {
+    const entries = suppressionRecords()
+    if (entries === null) return { ok: false, code: 'E4009', reason: '存储层缺少服务端 G2 抑制表' }
+    return { ok: true, version: BATCH_VERSION, count: entries.length, entries }
+  }
 
   function importCompanies(payload = {}) {
     const parsed = typeof payload.csv === 'string' && payload.csv.trim()
@@ -574,6 +658,7 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       version: BATCH_VERSION,
       positioning: CFG.positioning, targetUser: CFG.targetUser, stage: CFG.stage,
       companies: companies().length,
+      suppressions: suppressionRecords()?.length ?? null,
       judged: companies().filter((c) => c.judgement).length,
       exportedToday,
       bounce: { ...bounce, threshold: CFG.export.bounceCircuitThreshold },
@@ -601,17 +686,28 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       return { ok: false, code: 'E4009', reason: `今日草稿导出已达 ${ctx.draftExportDailyLimit} 封上限` }
     }
     const items = Array.isArray(payload.items) ? payload.items : []
+    // B7 / P2-1：抑制名单从服务端持久化表读取，调用方不传 blacklist 也必须生效。
+    // 存储层缺表时 fail-closed，绝不退回「只靠调用方传参」的旧路径。
+    const persisted = suppressionRecords()
+    if (persisted === null) {
+      return { ok: false, code: 'E4009', reason: '存储层缺少服务端 G2 抑制表，拒绝导出（fail-closed）' }
+    }
+    const knownDomains = new Set(companies().map((c) => normalizeDomain(String(c?.domain ?? ''))).filter(Boolean))
     const terminalDomains = []
     for (const item of items) {
       const domain = normalizeDomain(item?.domain ?? '')
       const rec = domain ? store.companyGet(domain) : null
       if (rec && CFG.outcomes.terminalStatuses.includes(rec.status)) terminalDomains.push(domain)
     }
+    for (const s of persisted) {
+      const domain = normalizeDomain(String(s?.domain ?? ''))
+      if (domain) terminalDomains.push(domain)
+    }
     const gates = checkExportGates(payload.items, {
       circuitOpen: ctx.circuitOpen, bounceRate: ctx.bounce.rate,
       exportedToday: ctx.exportedToday, dailyLimit: ctx.draftExportDailyLimit,
       blacklist: Array.isArray(payload.blacklist) ? payload.blacklist : [],
-      terminalDomains,
+      knownDomains, serverBlacklist: persisted, terminalDomains,
     })
     if (gates.errors?.length) return { ok: false, code: 'E4009', errors: gates.errors }
     if (!gates.allowed.length) {
@@ -647,6 +743,12 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       exportedIsNotSent: true,
       note: '导出 ≠ 发送：本接口只生成 mbox 草稿文件，未调用任何邮件 API，状态不自动置 sent。请导入邮件客户端后由人逐封确认发送；OAuth / CASA Tier 2 仍是正式发布门禁。',
       disclaimer: '合规尾巴由调用方在本地注入，服务端只校验存在性，不代生成、不代存身份信息。',
+      compliance: {
+        knownDomains: knownDomains.size,
+        persistedSuppressions: persisted.length,
+        source: 'server-side',
+        note: 'G2 抑制名单与客户库归属由服务端判定，不依赖调用方传 blacklist；未知域名一律拒绝（fail-closed）。',
+      },
     }
   }
 
@@ -664,6 +766,10 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       if (!CFG.outcomes.allowedEvents.includes(event)) reasons.push(`event 不在白名单：${event || '空'}`)
       if (CFG.outcomes.requiresConfirmation.includes(event) && e?.confirmed !== true) {
         reasons.push(`${event} 属不可逆终态，必须逐条人工确认（confirmed=true）`)
+      }
+      // B7 / P2-1：终态必须同步落到服务端持久化抑制表，否则换个进程 / 不传 blacklist 就能绕过 G2
+      if (CFG.outcomes.terminalStatuses.includes(event) && typeof store.suppressionUpsert !== 'function') {
+        reasons.push('存储层缺少 G2 抑制表，拒绝登记不可逆终态（fail-closed）')
       }
       if (reasons.length) { rejected.push({ index: i, domain, event, code: 'E4010', reasons }); return }
       const rec = store.companyGet(domain)
@@ -685,6 +791,12 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
       }
       const at = Number.isFinite(Number(e?.at)) && Number(e?.at) > 0 ? Number(e.at) : now()
       store.outcomeAppend({ domain, event, at, meta: { operator: String(e?.operator ?? '本地用户'), note: String(e?.note ?? '') } })
+      if (CFG.outcomes.terminalStatuses.includes(event)) {
+        store.suppressionUpsert(domain, {
+          domain, reason: event, at, source: 'outcome',
+          operator: String(e?.operator ?? '本地用户'), note: String(e?.note ?? ''),
+        })
+      }
       store.companyUpsert(domain, {
         ...rec, status: event,
         statusLog: [...(rec.statusLog ?? []), {
@@ -704,6 +816,6 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
   return {
     version: BATCH_VERSION,
     importCompanies, listCompanies, fetchSources, runJudgeBatch,
-    exportDrafts, importOutcomes, state, health: state,
+    exportDrafts, importOutcomes, importSuppressions, listSuppressions, state, health: state,
   }
 }

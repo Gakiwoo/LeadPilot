@@ -25,6 +25,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { protocol } from '../server/protocol.mjs'
 import { createLedger } from '../server/ledger.mjs'
+import { createGateway } from '../server/gateway.mjs'
 import { createMemoryStore, createStore } from '../server/store.mjs'
 import {
   evaluateBaseline, baselineManifest, diffEvalRuns,
@@ -504,7 +505,8 @@ function walkTs(dir, out = []) {
     body: 'We noticed your company distributes industrial fittings across Benelux. We manufacture hydraulic hose fittings and can share our current catalogue and lead times. Would a short specification sheet be useful for your team this quarter?',
     grade: 'B', sender, footer, ...over,
   })
-  const gates = checkExportGates([draft({ grade: 'D' }), draft({ grade: 'C' }), draft({ footer: '' }), draft()])
+  const gates = checkExportGates([draft({ grade: 'D' }), draft({ grade: 'C' }), draft({ footer: '' }), draft()],
+    { knownDomains: ['acme.example'] })
   check('导出闸门：D 级禁发 / C 级需逐条确认 / 合规尾巴缺失，且只放行合规草稿',
     gates.allowed.length === 1 && gates.blocked.length === 3
     && /D 级/.test(gates.blocked[0].reasons.join())
@@ -569,6 +571,78 @@ function walkTs(dir, out = []) {
     listBlocked.ok === false && /G2/.test(JSON.stringify(listBlocked.blocked ?? []))
     && terminalBlocked.ok === false && /G2|终态/.test(JSON.stringify(terminalBlocked.blocked ?? [])),
     `list=${listBlocked.blocked?.length ?? 0} terminal=${terminalBlocked.blocked?.length ?? 0}`)
+
+  // B7 / P2-1：G2 抑制名单必须由服务端持久化，导出不再依赖调用方传参
+  const b7Store = createMemoryStore()
+  const b7 = createBatchPipeline({ store: b7Store, gateway: null })
+  b7.importCompanies({ rows: [{ company_name: 'B7', domain: 'b7.example' }] })
+  const b7Draft = draft({ domain: 'b7.example', to: 'buyer@b7.example' })
+  const b7Before = b7.exportDrafts({ items: [b7Draft] })
+  b7.importSuppressions({ entries: [{ domain: 'b7.example', reason: 'unsubscribed' }] })
+  const b7After = createBatchPipeline({ store: b7Store, gateway: null }).exportDrafts({ items: [b7Draft] })
+  const b7Unknown = createBatchPipeline({ store: b7Store, gateway: null })
+    .exportDrafts({ items: [draft({ domain: 'ghost.example', to: 'buyer@ghost.example' })] })
+  const b7NoCtx = checkExportGates([b7Draft])
+  check('B7 G2：不传 blacklist / 换实例仍被持久化名单拦下，未知域名与缺上下文 fail-closed',
+    b7Before.ok === true && b7After.ok === false && /服务端持久化/.test(JSON.stringify(b7After.blocked))
+    && b7Unknown.ok === false && /未导入客户库/.test(JSON.stringify(b7Unknown.blocked))
+    && b7NoCtx.allowed.length === 0 && /fail-closed/.test(b7NoCtx.blocked[0].reasons.join()),
+    `before=${b7Before.ok} after=${b7After.ok} unknown=${b7Unknown.ok}`)
+
+  // B7 / P2-2：结算失败必须释放 held，不能让冻结额永久挂着
+  const b7LedgerStore = createMemoryStore()
+  const b7RealLedger = createLedger({ store: b7LedgerStore, openingBalance: 200 })
+  const b7FakeLedger = Object.create(b7RealLedger)
+  b7FakeLedger.settle = () => ({ ok: false, code: 'E4003', reason: '注入的结算失败' })
+  const b7Pinned = Object.fromEntries(protocol.providers.map((p) => [
+    `LEADPILOT_MODEL_VERSION_${p.key.toUpperCase().replace(/-/g, '_')}`, `${p.model}-2026-10-15`,
+  ]))
+  const b7Wire = {
+    company_id: 'c_b7',
+    customer_type: { value: 'distributor', confidence: 0.82, evidence: [{ quote: 'Authorized distributor for Parker and Eaton across Benelux', source_url: 'https://x.example/about', fetched_at: '2026-11-06' }] },
+    import_signal: { value: 'confirmed', confidence: 0.9, evidence: [{ quote: 'We stock hydraulic hose fittings, JIC fittings and brass adapters', source_url: 'https://x.example/products', fetched_at: '2026-11-06' }] },
+    size_estimate: { tier: 'M', employee_range: [11, 50], confidence: 0.61, evidence: [{ quote: 'Team of 23 across Rotterdam and Antwerp', source_url: 'https://x.example/team', fetched_at: '2026-11-06' }] },
+    negative_flags: [], model_id: 'deepseek-flash', model_version: '2026-10-15',
+    prompt_version: protocol.promptVersion, schema_version: protocol.schemaVersion,
+  }
+  const b7Gateway = createGateway({
+    env: { ...b7Pinned, DEEPSEEK_API_KEY: 'k' },
+    fetchImpl: async () => ({
+      status: 200, ok: true,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify(b7Wire) } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 200 },
+      }),
+    }),
+    ledger: b7FakeLedger, sleep: async () => {}, now: () => 1_700_000_000_000,
+  })
+  const b7Judge = await b7Gateway.judge({
+    companyId: 'c_b7', domain: 'x.example', country: '美国', requestId: 'b7-gate-settle-fail',
+    sourceTexts: [
+      'About: Authorized distributor for Parker and Eaton across Benelux.',
+      'We stock hydraulic hose fittings, JIC fittings and brass adapters for industrial distributors.',
+      'Team of 23 across Rotterdam and Antwerp. FOB Rotterdam, CIF terms available.',
+    ],
+    facts: { keywordHits: [{ term: 'hydraulic fittings', count: 14 }], customsRecords: 9 },
+  })
+  check('B7 账本：结算失败自动全额释放预扣，held 归零且不谎报已扣点',
+    b7Judge.ok === true && b7Judge.billing?.settleFailed === true && b7Judge.billing?.released === true
+    && b7Judge.billing?.charged === false
+    && b7RealLedger.state().held === 0 && b7RealLedger.state().spent === 0
+    && b7RealLedger.entries('gw:judge:b7-gate-settle-fail').map((e) => e.kind).join() === 'reserve,release',
+    `settleFailed=${b7Judge.billing?.settleFailed} held=${b7RealLedger.state().held}`)
+
+  // B7 / P2-3 / P2-8 / P3-3 / P3-4：验证链路配置必须在场，且契约门槛不再写死
+  const ciYml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')
+  const smokeSrc = readFileSync(join(ROOT, 'scripts/e2e-smoke.mjs'), 'utf8')
+  check('B7 验证链路：CI 补证据自检与 --noproxy，smoke 有前提探活且门槛读 manifest',
+    /npm run evidence:check -- --self-test/.test(ciYml)
+    && /--noproxy '\*'/.test(ciYml)
+    && /SMOKE_PRECONDITION/.test(smokeSrc)
+    && /\/v1\/eval\/integrity\/gates/.test(smokeSrc)
+    && /\/v1\/eval\/outcome\/gates/.test(smokeSrc)
+    && !/minSamples === 100/.test(smokeSrc),
+    `ciSteps=${(ciYml.match(/- name:/g) ?? []).length} smokePrecondition=${/SMOKE_PRECONDITION/.test(smokeSrc)}`)
 
   // B3-2（P2）：状态机不能任意回退，约束必须真实执行（不是只读协议常量）
   const monoStore = createMemoryStore()

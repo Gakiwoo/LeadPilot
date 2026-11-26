@@ -1625,12 +1625,13 @@ describe('v0.7.0 · 批量 SDR 管道（定位不变：自动获客）', () => {
   })
 
   it('导出合规闸门：D 级禁发 / C 级需确认 / 尾巴缺失 / 熔断，mbox 明确未发送', () => {
+    // B7 / P2-1：纯函数也必须拿到客户库上下文，缺失时 fail-closed
     const gates = checkExportGates([
       validDraft({ grade: 'D' }),
       validDraft({ grade: 'C' }),
       validDraft({ footer: '' }),
       validDraft(),
-    ])
+    ], { knownDomains: ['acme.example'] })
     expect(gates.allowed).toHaveLength(1)
     expect(gates.blocked).toHaveLength(3)
     expect(gates.blocked[0].reasons.join()).toContain('D 级')
@@ -1641,7 +1642,7 @@ describe('v0.7.0 · 批量 SDR 管道（定位不变：自动获客）', () => {
     expect(mbox).toContain('X-LeadPilot-Origin: user_imported')
     expect(mbox).toContain('exported-not-sent')
     expect(mbox).toContain('unsubscribe')
-    const circuit = checkExportGates([validDraft()], { circuitOpen: true })
+    const circuit = checkExportGates([validDraft()], { circuitOpen: true, knownDomains: ['acme.example'] })
     expect(circuit.allowed).toHaveLength(0)
     expect(circuit.blocked[0].reasons.join()).toContain('熔断')
   })
@@ -2142,12 +2143,13 @@ describe('B2 · 安全 P1 行为级反例', () => {
 
 describe('B3-0 · 导出链 G2 与状态落盘行为级反例', () => {
   it('服务端导出闸门按调用方黑名单（邮箱 / 域名）与客户终态硬拦 G2', () => {
-    const byEmail = checkExportGates([validDraft()], { blacklist: ['buyer@acme.example'] })
+    const knownDomains = ['acme.example']
+    const byEmail = checkExportGates([validDraft()], { knownDomains, blacklist: ['buyer@acme.example'] })
     expect(byEmail.allowed).toHaveLength(0)
     expect(byEmail.blocked[0].reasons.join()).toContain('G2')
-    const byDomain = checkExportGates([validDraft()], { blacklist: ['@acme.example'] })
+    const byDomain = checkExportGates([validDraft()], { knownDomains, blacklist: ['@acme.example'] })
     expect(byDomain.blocked[0].reasons.join()).toContain('G2')
-    const byTerminal = checkExportGates([validDraft()], { terminalDomains: ['acme.example'] })
+    const byTerminal = checkExportGates([validDraft()], { knownDomains, terminalDomains: ['acme.example'] })
     expect(byTerminal.blocked[0].reasons.join()).toContain('终态')
   })
 
