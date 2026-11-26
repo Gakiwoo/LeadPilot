@@ -5,13 +5,13 @@
  * 导出项不再来自前端演示草稿库；降级项 body=null 不伪造；本地模板必须显式标 DEMO。
  */
 import { describe, expect, it } from 'vitest'
-import { createMemoryStore } from '../store.mjs'
-import { createGateway } from '../gateway.mjs'
-import { createApp } from '../index.mjs'
+import { createMemoryStore } from '../../server/persistence/store.mjs'
+import { createGateway } from '../../server/services/gateway.mjs'
+import { createApp } from '../../server/index.mjs'
 import {
   createBatchPipeline, validateRows, checkExportGates, buildMbox, normalizeDomain,
-} from '../batch.mjs'
-import { validateEmailDraft } from '../protocol.mjs'
+} from '../../server/services/batch.mjs'
+import { validateEmailDraft } from '../../server/core/protocol.mjs'
 // 跨层反例：前端本地模板的正文必须能通过服务端 F6-2 硬校验，不能各写一套口径
 import { buildImportedTemplateDraft } from '../../src/services/email-generator.ts'
 

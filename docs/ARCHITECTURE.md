@@ -2,6 +2,14 @@
 
 > 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-034 B9 演示 KPI 口径与文档动态化；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
 
+> **目录分层（v0.9.1 重构）**：ADR 正文记录的是做决策当时的路径，保留原样不追改（决策理由与文件位置无关）。当前实际布局见 README「工程结构」，映射如下：
+> `server/{protocol,t0,ledger,eval,baseline,data-sources,release-evidence}.mjs` → `server/core/`；
+> `server/{gateway,orchestrator,batch,fetch}.mjs` → `server/services/`；
+> `server/store.mjs` → `server/persistence/`；
+> `server/index.mjs` 的路由与鉴权拆为 `server/app.mjs` + `server/http/` + `server/routes/`，入口只保留启动引导；
+> `src/tests/` → `tests/frontend/`，`server/tests/` → `tests/server/`；
+> `src/{App,main}.tsx` → `src/app/`，`src/components/{Sidebar,TopBar}.tsx` → `src/components/layout/`，`src/components/ui.tsx` → `src/components/ui/index.tsx`。
+
 ## 0. 架构总览（本次交付边界）
 
 ```

@@ -1,7 +1,6 @@
 import { Compass, LayoutGrid, Mail, Settings2, RotateCcw, Radar, CircleDot } from 'lucide-react'
 import { useAppStore, type ViewKey } from '@/store/useAppStore'
 import { ADAPTER_STATUS } from '@/services/adapters'
-import pkg from '../../package.json'
 
 const NAV: { key: ViewKey; label: string; en: string; icon: typeof Compass }[] = [
   { key: 'developer', label: '客户开发', en: 'Developer', icon: Compass },
@@ -86,7 +85,7 @@ export default function Sidebar() {
         >
           <RotateCcw size={12} /> 重置演示数据
         </button>
-        <p className="mt-2 text-center text-[11px] text-slate-300">v{pkg.version}·内部预览</p>
+        <p className="mt-2 text-center text-[11px] text-slate-300">v{__APP_VERSION__}·内部预览</p>
       </div>
     </aside>
   )

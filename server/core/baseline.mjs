@@ -9,12 +9,11 @@ import { readFileSync, existsSync } from 'node:fs'
 import { basename } from 'node:path'
 
 export const contract = JSON.parse(
-  readFileSync(new URL('../shared/baseline-contract.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('../../shared/baseline-contract.json', import.meta.url), 'utf8'),
 )
 export const BASELINE_CONTRACT_VERSION = contract.contractVersion
 
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
-const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 
 /** 简单 CSV 解析：支持双引号包裹与转义双引号，不做类型推断（后续由字段校验统一转换） */
 function parseCsv(text) {

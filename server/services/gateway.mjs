@@ -14,8 +14,8 @@ import {
   protocol, validateSchema, verifyEvidence, assertNoPii, assertNoPiiInMessages, pointCost, billingPoints,
   cacheKey, buildJudgeMessages, toClientJudgement, sanitizeContext,
   buildEmailMessages, validateEmailDraft,
-} from './protocol.mjs'
-import { extractFacts, reconcileWithT0 } from './t0.mjs'
+} from '../core/protocol.mjs'
+import { extractFacts, reconcileWithT0 } from '../core/t0.mjs'
 import { createHash } from 'node:crypto'
 
 const EEA_UK = new Set(['德国', '法国', '荷兰', '英国', '西班牙', '意大利', '波兰', '挪威', '瑞典', '丹麦', '比利时', '奥地利', '爱尔兰'])
@@ -64,7 +64,6 @@ export function createGateway(opts = {}) {
     set(key, value) { store.cacheSet(key, value, protocol.rules.cacheTtlDays * 86400000) },
     get size() { return store.cacheStats().entries },
   } : memoryCache
-  const audit = memoryAudit
   const failures = new Map() // providerKey -> number[] (timestamps)
   const circuit = new Map()  // providerKey -> openUntil
 
@@ -408,7 +407,6 @@ export function createGateway(opts = {}) {
     const d = protocol.downgrade
     let rateLimitAttempts = 0
     let timeoutRetries = 0
-    let schemaRetries = 0
     for (let round = 0; round < 8; round++) {
       const result = await callOnce(p, messages)
       log.push({ providerKey: p.key, event: result.kind, latencyMs: result.latencyMs })

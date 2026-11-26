@@ -328,6 +328,31 @@ export async function generateEmailWithGateway(input: EmailGenerateInput): Promi
 }
 
 /** 服务端任务权威状态（v0.6.0：排队位次 / 并发上限一并回传，前端不得自行乐观猜测） */
+/**
+ * 服务端账本是点数余额的唯一权威来源。
+ * 前端只做展示镜像：任何加减都以 /v1/points 的 available 覆盖，不自行累积。
+ */
+export interface PointsSnapshot {
+  ok: boolean
+  available?: number
+  held?: number
+  spent?: number
+  granted?: number
+  exists?: boolean
+  reason?: string
+}
+
+export async function getPointsSnapshot(): Promise<PointsSnapshot> {
+  try {
+    const res = await jsonFetch<{ available?: number; held?: number; spent?: number; granted?: number; exists?: boolean }>(
+      '/v1/points', undefined, 3000,
+    )
+    return typeof res.available === 'number' ? { ok: true, ...res } : { ok: false, reason: '账本响应缺少 available' }
+  } catch {
+    return { ok: false, reason: '云端账本不可达：请启动 npm run cloud' }
+  }
+}
+
 export interface CloudTaskStatus {
   status: 'queued' | 'running' | 'paused' | 'done' | 'failed' | 'aborted'
   queuePosition: number
@@ -392,10 +417,11 @@ export function startCloudTask(
         headers: authHeaders(), signal: controller.signal,
       })
     } catch {
-      return { ok: false, reason: 'SSE 连接失败', close }
+      // 任务已在服务端创建：必须把 taskId 带出去，调用方不得据此退还本地点数
+      return { ok: false, taskId: res.task.id, reason: 'SSE 连接失败', close }
     }
     if (!response.ok || !response.body) {
-      return { ok: false, reason: `SSE 订阅被拒绝（HTTP ${response.status}）`, close }
+      return { ok: false, taskId: res.task.id, reason: `SSE 订阅被拒绝（HTTP ${response.status}）`, close }
     }
     const reader = response.body.getReader()
     activeReader = reader

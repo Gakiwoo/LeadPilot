@@ -12,8 +12,8 @@
  *    **导出 ≠ 发送**，状态不自动置 sent，禁止批量直接发送。
  *  - 本模块不生成标注、不伪造 provider 调用、不解除任何 Go / No-Go 判据。
  */
-import { protocol, validateEmailDraft, sanitizeContext } from './protocol.mjs'
-import { extractFacts } from './t0.mjs'
+import { protocol, validateEmailDraft, sanitizeContext } from '../core/protocol.mjs'
+import { extractFacts } from '../core/t0.mjs'
 import { createFetcher, FETCH_VERSION } from './fetch.mjs'
 
 const CFG = protocol.batchPipeline
@@ -323,6 +323,8 @@ export function checkExportGates(items, ctx = {}) {
 }
 
 const headerSafe = (v) => String(v ?? '').replace(/[\r\n]+/g, ' ').trim()
+// 检测非 ASCII 需要显式控制字符范围，这里是有意为之
+// eslint-disable-next-line no-control-regex
 const mimeSubject = (s) => (/[^\x00-\x7F]/.test(s)
   ? `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`
   : headerSafe(s))

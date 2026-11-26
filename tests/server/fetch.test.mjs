@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   createFetcher, parseTargetUrl, parseRobots, robotsAllows, htmlToText,
   isPrivateAddress, assertPublicHost, pinnedFetch, FETCH_VERSION, FETCH_ORIGIN,
-} from '../fetch.mjs'
+} from '../../server/services/fetch.mjs'
 import { createServer as createHttpServer } from 'node:http'
-import { protocol } from '../protocol.mjs'
-import { createBatchPipeline } from '../batch.mjs'
-import { createMemoryStore } from '../store.mjs'
+import { protocol } from '../../server/core/protocol.mjs'
+import { createBatchPipeline } from '../../server/services/batch.mjs'
+import { createMemoryStore } from '../../server/persistence/store.mjs'
 
 const PUBLIC_ADDRESS = [{ address: '93.184.216.34', family: 4 }]
 const resolveHost = async (host) => (host === 'private.example'

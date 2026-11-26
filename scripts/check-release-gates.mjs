@@ -23,30 +23,30 @@
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { protocol } from '../server/protocol.mjs'
-import { createLedger } from '../server/ledger.mjs'
-import { createGateway } from '../server/gateway.mjs'
-import { createMemoryStore, createStore } from '../server/store.mjs'
+import { protocol } from '../server/core/protocol.mjs'
+import { createLedger } from '../server/core/ledger.mjs'
+import { createGateway } from '../server/services/gateway.mjs'
+import { createMemoryStore, createStore } from '../server/persistence/store.mjs'
 import {
   evaluateBaseline, baselineManifest, diffEvalRuns,
   evaluateIntegrity, evaluateOutcome, evaluateConsistency, releaseStatus,
   integrityManifest, outcomeManifest,
-} from '../server/eval.mjs'
-import { createOrchestrator } from '../server/orchestrator.mjs'
-import { validateBaselineImport } from '../server/baseline.mjs'
-import { extractFacts, reconcileWithT0 } from '../server/t0.mjs'
-import { createDataSourceRegistry } from '../server/data-sources.mjs'
+} from '../server/core/eval.mjs'
+import { createOrchestrator } from '../server/services/orchestrator.mjs'
+import { validateBaselineImport } from '../server/core/baseline.mjs'
+import { extractFacts, reconcileWithT0 } from '../server/core/t0.mjs'
+import { createDataSourceRegistry } from '../server/core/data-sources.mjs'
 import {
   createBatchPipeline, validateRows, checkExportGates, buildMbox,
   computeBounceRate, normalizeDomain, BATCH_VERSION,
-} from '../server/batch.mjs'
+} from '../server/services/batch.mjs'
 import {
   createFetcher, FETCH_VERSION as FETCH_GATE_VERSION, FETCH_ORIGIN as FETCH_GATE_ORIGIN,
-} from '../server/fetch.mjs'
+} from '../server/services/fetch.mjs'
 import {
   evaluateReleaseEvidence, snapshotStatus, complianceStatus, readCompliance,
   EVIDENCE_FILES, EVIDENCE_CONTRACT_VERSION,
-} from '../server/release-evidence.mjs'
+} from '../server/core/release-evidence.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const results = []
@@ -81,9 +81,9 @@ function walkTs(dir, out = []) {
 // 1. 前端服务层边界：业务代码只能从 adapters.ts 取能力
 {
   const files = [
+    ...walkTs(join(ROOT, 'src/app')),
     ...walkTs(join(ROOT, 'src/components')),
     ...walkTs(join(ROOT, 'src/store')),
-    join(ROOT, 'src/App.tsx'),
   ].filter(existsSync)
   const direct = /from\s+['"]@\/services\/(gateway-client|task-runner|email-generator)['"]/g
   const offenders = []
@@ -442,8 +442,8 @@ function walkTs(dir, out = []) {
     && diffEvalRuns({ status: 'NO_DATA', metrics: {} }, archive()).rows.every((r) => r.delta === null),
     `releaseEligible=${up.releaseEligible}`)
   check('源码中不再残留「需在 CI 中读取历史评测归档」占位字符串',
-    !readFileSync(join(ROOT, 'server/eval.mjs'), 'utf8').includes('需在 CI'),
-    'server/eval.mjs')
+    !readFileSync(join(ROOT, 'server/core/eval.mjs'), 'utf8').includes('需在 CI'),
+    'server/core/eval.mjs')
 
   const o = createOrchestrator({ tickMs: 10000, maxConcurrent: 1 })
   const cfg = { keywords: ['gate queue'], markets: ['德国'], depth: 1, targetCount: 10 }
@@ -771,7 +771,7 @@ function walkTs(dir, out = []) {
 
 // 7c. B9 · 演示 KPI 护栏 / 文档数字动态化 / 截图可复现
 //     边界：这里是「防 UI 回退」的静态护栏，B9 的行为级保证在
-//     src/tests/b9-metrics.test.ts 与 b9-frontend.test.ts，由 CI Unit tests 步骤真实执行。
+//     tests/frontend/b9-metrics.test.ts 与 b9-frontend.test.ts，由 CI Unit tests 步骤真实执行。
 {
   const views = ['src/components/outreach/OutreachView.tsx', 'src/components/crm/CrmView.tsx']
     .map((f) => readFileSync(join(ROOT, f), 'utf8'))
@@ -780,9 +780,9 @@ function walkTs(dir, out = []) {
     tiles.length === 9 && tiles.every((t) => t.includes('toTileProps(')),
     `tiles=${tiles.length} wrapped=${tiles.filter((t) => t.includes('toTileProps(')).length}`)
   check('B9 / P2-5 护栏：行为级反例文件纳入 vitest include 覆盖范围，且两页共用 metrics.ts',
-    readFileSync(join(ROOT, 'vite.config.ts'), 'utf8').includes("src/**/*.test.ts")
-    && existsSync(join(ROOT, 'src/tests/b9-metrics.test.ts'))
-    && existsSync(join(ROOT, 'src/tests/b9-frontend.test.ts'))
+    readFileSync(join(ROOT, 'vite.config.ts'), 'utf8').includes("tests/**/*.test.ts")
+    && existsSync(join(ROOT, 'tests/frontend/b9-metrics.test.ts'))
+    && existsSync(join(ROOT, 'tests/frontend/b9-frontend.test.ts'))
     && existsSync(join(ROOT, 'src/domain/metrics.ts'))
     && views.every((v) => v.includes('@/domain/metrics')))
 

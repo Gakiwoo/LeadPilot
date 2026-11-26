@@ -39,12 +39,17 @@ jobs:
         run: npm audit --omit=dev --audit-level=low
 
       # 干净检出保护：.gitignore 曾因 `data/` 误排除 src/data/，本地全绿但 CI 缺模块。
-      # B3-3：不再维护 31 项硬编码清单，改为全量枚举 src/server/shared/scripts 与 git ls-files 对账。
+      # B3-3：不再维护 31 项硬编码清单，改为全量枚举 src/server/shared/scripts/tests 与 git ls-files 对账。
       - name: Tracked sources sanity (clean checkout)
         run: npm run check:tracked
 
       - name: Typecheck (TS strict)
         run: npm run typecheck
+
+      # v0.9.1：ESLint 9 扁平配置（TS + React Hooks + Node 双环境）。
+      # 此前代码里存在 15+ 处 eslint-disable 抑制注释但从未安装 ESLint，属于「假保证」。
+      - name: Lint
+        run: npm run lint
 
       # v0.6.0：把「未标注 / 未接数据源 / 审计估值不等于扣点 / diff 与队列非占位」变成可执行断言
       - name: Release gate self-check

@@ -13,7 +13,7 @@
  *    health 必须如实暴露 scope 与 ledgerConsumers，绝不把审计估值说成已扣点。
  */
 import { protocol } from './protocol.mjs'
-import { createMemoryStore } from './store.mjs'
+import { createMemoryStore } from '../persistence/store.mjs'
 
 const CFG = protocol.billing.ledger
 export const LEDGER_VERSION = CFG.version

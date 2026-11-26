@@ -11,8 +11,8 @@
  * v0.6.0：修复 v0.5.0 的「queued 永不启动」缺陷 —— FIFO 自动出队、并发上限真实生效；
  *         排队/暂停时间不计入硬超时；任何启动路径（创建 / 出队 / 续跑）都走同一道闸门。
  */
-import { createDataSourceRegistry } from './data-sources.mjs'
-import { protocol } from './protocol.mjs'
+import { createDataSourceRegistry } from '../core/data-sources.mjs'
+import { protocol } from '../core/protocol.mjs'
 
 export const STAGES = ['检索候选', '规范化', '去重', '抓取详情', '验证邮箱', '模型判断与评分']
 

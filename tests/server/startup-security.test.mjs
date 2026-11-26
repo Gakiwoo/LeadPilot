@@ -11,7 +11,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)))
-const ENTRY = fileURLToPath(new URL('../index.mjs', import.meta.url))
+const ENTRY = fileURLToPath(new URL('../../server/index.mjs', import.meta.url))
 
 function boot(extra = {}) {
   return spawnSync(process.execPath, [ENTRY], {

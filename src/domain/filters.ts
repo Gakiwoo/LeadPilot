@@ -30,13 +30,14 @@ export function filterAndSort(companies: Company[], f: Filters): Company[] {
       case 'import': return b.scoreCard.dimensions.import.score - a.scoreCard.dimensions.import.score
       case 'name': return a.name.localeCompare(b.name)
       case 'discovered': return new Date(b.firstSeenAt).getTime() - new Date(a.firstSeenAt).getTime()
-      default:
+      default: {
         // ORDER BY can_send DESC, total_score DESC（PRD 6.6）
         const send = Number(b.scoreCard.canSend) - Number(a.scoreCard.canSend)
         if (send !== 0) return send
         const grade = (gradeRank[b.contacts[0]?.grade ?? 'D'] ?? 0) - (gradeRank[a.contacts[0]?.grade ?? 'D'] ?? 0)
         if (grade !== 0) return grade
         return b.scoreCard.totalScore - a.scoreCard.totalScore
+      }
     }
   })
 }

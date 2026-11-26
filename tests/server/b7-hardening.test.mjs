@@ -11,12 +11,12 @@ import { connect } from 'node:net'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createMemoryStore, createStore, sqliteAvailable } from '../store.mjs'
-import { createLedger } from '../ledger.mjs'
-import { createGateway } from '../gateway.mjs'
-import { createApp } from '../index.mjs'
-import { createBatchPipeline, checkExportGates } from '../batch.mjs'
-import { protocol } from '../protocol.mjs'
+import { createMemoryStore, createStore, sqliteAvailable } from '../../server/persistence/store.mjs'
+import { createLedger } from '../../server/core/ledger.mjs'
+import { createGateway } from '../../server/services/gateway.mjs'
+import { createApp } from '../../server/index.mjs'
+import { createBatchPipeline, checkExportGates } from '../../server/services/batch.mjs'
+import { protocol } from '../../server/core/protocol.mjs'
 
 const SOURCES = [
   'About: Authorized distributor for Parker and Eaton across Benelux.',

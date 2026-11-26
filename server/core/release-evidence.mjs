@@ -34,7 +34,7 @@ import {
 } from './eval.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const COMPLIANCE_PATH = new URL('../shared/release-compliance.json', import.meta.url)
+const COMPLIANCE_PATH = new URL('../../shared/release-compliance.json', import.meta.url)
 
 export const EVIDENCE_CONTRACT_VERSION = 'release-evidence-v1'
 export const EVIDENCE_DIR_ENV = 'LEADPILOT_EVIDENCE_DIR'

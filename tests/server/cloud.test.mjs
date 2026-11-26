@@ -1,25 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createGateway, route, regionDecision } from '../gateway.mjs'
-import { createOrchestrator } from '../orchestrator.mjs'
+import { createGateway, route, regionDecision } from '../../server/services/gateway.mjs'
+import { createOrchestrator } from '../../server/services/orchestrator.mjs'
 import {
   evaluateBaseline, baselineManifest, diffEvalRuns, EVAL_DIFF_VERSION,
   evaluateIntegrity, evaluateOutcome, evaluateConsistency, releaseStatus,
   integrityManifest, outcomeManifest,
   INTEGRITY_GATE_VERSION, OUTCOME_GATE_VERSION, RELEASE_POLICY_VERSION,
-} from '../eval.mjs'
-import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft, buildJudgeMessages } from '../protocol.mjs'
-import { createApp, verifyToken, createRateLimiter } from '../index.mjs'
-import { createStore, createMemoryStore, sqliteAvailable } from '../store.mjs'
-import { extractFacts, validateT0Input, T0_RULES_VERSION } from '../t0.mjs'
-import { createDataSourceRegistry, SOURCE_DEFS } from '../data-sources.mjs'
-import { sanitizeContext } from '../protocol.mjs'
-import { createLedger, LEDGER_VERSION } from '../ledger.mjs'
-import { validateBaselineImport, BASELINE_CONTRACT_VERSION } from '../baseline.mjs'
-import { reconcileWithT0 } from '../t0.mjs'
+} from '../../server/core/eval.mjs'
+import { protocol, validateSchema, verifyEvidence, assertNoPii, pointCost, quoteMatchesContext, buildEmailMessages, validateEmailDraft, buildJudgeMessages } from '../../server/core/protocol.mjs'
+import { createApp, verifyToken, createRateLimiter } from '../../server/index.mjs'
+import { createStore, createMemoryStore, sqliteAvailable } from '../../server/persistence/store.mjs'
+import { extractFacts, validateT0Input, T0_RULES_VERSION } from '../../server/core/t0.mjs'
+import { createDataSourceRegistry, SOURCE_DEFS } from '../../server/core/data-sources.mjs'
+import { sanitizeContext } from '../../server/core/protocol.mjs'
+import { createLedger, LEDGER_VERSION } from '../../server/core/ledger.mjs'
+import { validateBaselineImport, BASELINE_CONTRACT_VERSION } from '../../server/core/baseline.mjs'
+import { reconcileWithT0 } from '../../server/core/t0.mjs'
 import {
   createBatchPipeline, normalizeDomain, isDomain, parseCsv, validateRows,
   buildMbox, checkExportGates, computeBounceRate, BATCH_VERSION,
-} from '../batch.mjs'
+} from '../../server/services/batch.mjs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,7 +28,7 @@ import {
   evaluateReleaseEvidence, validateIntegrityEvidence, validateOutcomeEvidence,
   validateConsistencyEvidence, snapshotStatus, complianceStatus, readCompliance,
   EVIDENCE_CONTRACT_VERSION, EVIDENCE_FILES,
-} from '../release-evidence.mjs'
+} from '../../server/core/release-evidence.mjs'
 
 /** 版本号统一从 package.json 读取，避免每次发版漏改测试里的硬编码 */
 const PKG_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
@@ -562,7 +562,8 @@ describe('HTTP 安全边界 · 鉴权 / CORS / 限流', () => {
     try {
       const evil = await fetch(`${s.base}/v1/gateway/health`, { headers: { origin: 'https://evil.example' } })
       expect(evil.status).toBe(200)
-      expect(evil.headers.get('access-control-allow-origin')).toBe('http://127.0.0.1:5180')
+      // 非白名单 Origin 连「回填首个白名单值」都不做：直接不下发 ACAO，语义无歧义
+      expect(evil.headers.get('access-control-allow-origin')).toBeNull()
       const local = await fetch(`${s.base}/v1/gateway/health`, { headers: { origin: 'http://127.0.0.1:5180' } })
       expect(local.headers.get('access-control-allow-origin')).toBe('http://127.0.0.1:5180')
       const h = await (await fetch(`${s.base}/health`)).json()

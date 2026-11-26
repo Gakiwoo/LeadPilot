@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react'
-import Sidebar from '@/components/Sidebar'
-import TopBar from '@/components/TopBar'
+import Sidebar from '@/components/layout/Sidebar'
+import TopBar from '@/components/layout/TopBar'
 import DeveloperView from '@/components/developer/DeveloperView'
 import CompanyDetail from '@/components/developer/CompanyDetail'
 import CrmView from '@/components/crm/CrmView'
@@ -9,6 +9,7 @@ import OutreachView from '@/components/outreach/OutreachView'
 import EmailComposer from '@/components/outreach/EmailComposer'
 import SettingsView from '@/components/settings/SettingsView'
 import { useAppStore } from '@/store/useAppStore'
+import { parseHash, toHash } from './router'
 
 function Toast() {
   const toast = useAppStore((s) => s.toast)
@@ -47,6 +48,25 @@ export default function App() {
     // 启动时探测云端网关。离线时也保留状态，界面明确显示「网关离线」，不伪造在线。
     void probeGateway()
   }, [probeGateway])
+
+  // 路由 → store：URL 是唯一可分享的入口，刷新 / 直接打开链接都能落到同一视图与同一家公司
+  useEffect(() => {
+    const apply = () => {
+      const { view, companyId } = parseHash(window.location.hash)
+      const s = useAppStore.getState()
+      if (s.activeView !== view) s.setActiveView(view)
+      if (s.drawerCompanyId !== companyId) s.openCompany(companyId)
+    }
+    apply()
+    window.addEventListener('hashchange', apply)
+    return () => window.removeEventListener('hashchange', apply)
+  }, [])
+
+  // store → 路由：切换视图 / 打开详情时同步地址栏，但不写历史（避免返回键在抽屉间反复跳）
+  useEffect(() => {
+    const next = toHash(activeView, drawerCompanyId)
+    if (window.location.hash !== next) window.history.replaceState(null, '', next)
+  }, [activeView, drawerCompanyId])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

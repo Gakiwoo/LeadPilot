@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+data
+.tmp
+.evidence
+docs/screenshots
+package-lock.json
+*.tsbuildinfo

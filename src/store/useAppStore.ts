@@ -11,7 +11,7 @@ import { acceptModelJudgement } from '@/domain/llm-judgement'
 import { buildScoreCard } from '@/domain/scoring'
 import {
   createTaskRunner, type TaskRunner,
-  probeGateway, judgeCompany, startCloudTask, controlCloudTask,
+  probeGateway, judgeCompany, startCloudTask, controlCloudTask, getPointsSnapshot,
   type GatewayHealth,
 } from '@/services/adapters'
 
@@ -84,8 +84,18 @@ function demoTask(companies: Company[]): DevTask {
   }
 }
 
+const ENV = (import.meta as ImportMeta & { env?: Record<string, string> }).env ?? {}
+
+/**
+ * 演示数据集只在非生产构建、或显式 `VITE_LEADPILOT_DEMO=1` 时加载。
+ * 生产构建默认零演示客户 —— 演示数据一旦被当成真实线索，就是最严重的产品事故。
+ */
+const DEMO_ENABLED = ENV.MODE !== 'production' || ENV.VITE_LEADPILOT_DEMO === '1'
+
 const persisted = localRepository.load()
-const initialCompanies = persisted?.companies?.length ? persisted.companies : buildDemoCompanies(48)
+const initialCompanies = persisted?.companies?.length
+  ? persisted.companies
+  : (DEMO_ENABLED ? buildDemoCompanies(48) : [])
 
 interface AppState {
   companies: Company[]
@@ -102,6 +112,8 @@ interface AppState {
   toast: { id: number; message: string; tone: 'info' | 'warn' | 'error' | 'ok' } | null
   gateway: GatewayHealth | null
   probing: boolean
+  /** local-demo = 本地演示余额；server = 已与服务端账本对齐 */
+  pointsSource: 'local-demo' | 'server'
   judgingCompanyId: string | null
   lastGatewayResult: {
     companyId: string; at: string; provider?: string; model?: string; cached: boolean
@@ -136,6 +148,8 @@ interface AppState {
   updateSettings(patch: Partial<Settings>): void
   addBlacklist(value: string): void
   probeGateway(): Promise<void>
+  /** 以服务端账本覆盖本地余额镜像（唯一权威） */
+  syncPoints(): Promise<void>
   judgeWithGateway(companyId: string): Promise<void>
   undo(): void
   resetDemo(): void
@@ -257,11 +271,16 @@ function applyCloudEvent(taskId: string, evt: CloudEvent): void {
       activeTaskId: terminal && s.activeTaskId === taskId ? null : s.activeTaskId,
     }
   })
+  // 终态后与服务端账本对齐，避免本地镜像余额长期偏离真实扣点
+  const current = useAppStore.getState().tasks.find((t) => t.id === taskId)
+  if (current && ['done', 'aborted', 'failed'].includes(current.status)) {
+    void useAppStore.getState().syncPoints()
+  }
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
   companies: initialCompanies,
-  tasks: persisted?.tasks?.length ? persisted.tasks : [demoTask(initialCompanies)],
+  tasks: persisted?.tasks?.length ? persisted.tasks : (DEMO_ENABLED ? [demoTask(initialCompanies)] : []),
   outreach: persisted?.outreach ?? [],
   settings: persisted?.settings ?? DEFAULT_SETTINGS,
   activeView: 'developer',
@@ -274,6 +293,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   toast: null,
   gateway: null,
   probing: false,
+  pointsSource: 'local-demo',
   judgingCompanyId: null,
   lastGatewayResult: null,
   undoStack: [],
@@ -338,7 +358,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       companyIds: [],
     }
     const existingDomains = new Set(state.companies.map((c) => c.domain))
-    const pool = buildDemoCompanies(120).filter((c) => !existingDomains.has(c.domain))
+    const pool = DEMO_ENABLED
+      ? buildDemoCompanies(120).filter((c) => !existingDomains.has(c.domain))
+      : []
 
     set((s) => ({
       tasks: [task, ...s.tasks],
@@ -349,8 +371,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     if (mode === 'cloud') {
       void startCloudTask(config, (evt) => applyCloudEvent(id, evt)).then((res) => {
-        if (!res.ok || !res.taskId) {
-          // 不静默失败：任务标 failed、退还预扣点数、日志留痕
+        if (res.taskId) {
+          // 任务已在服务端创建（账本已预扣），后续一切以服务端状态为准
+          cloudTaskId = res.taskId
+          cloudClose = res.close
+        }
+        if (!res.taskId) {
+          // 仅「服务端没有产生任务」时才退还本地镜像余额
           useAppStore.setState((s) => ({
             tasks: s.tasks.map((t) => t.id === id ? {
               ...t, status: 'failed', finishedAt: new Date().toISOString(),
@@ -362,8 +389,17 @@ export const useAppStore = create<AppState>((set, get) => ({
           useAppStore.getState().showToast(`云端编排器不可用：${res.reason ?? '服务未启动'}，已退还点数`, 'error')
           return
         }
-        cloudTaskId = res.taskId
-        cloudClose = res.close
+        if (!res.ok) {
+          // 任务已创建、点数已预扣，只是实时推送没连上：绝不回退点数，也不把任务标成失败
+          useAppStore.setState((s) => ({
+            tasks: s.tasks.map((t) => t.id === id ? {
+              ...t,
+              progress: { ...t.progress, log: [...t.progress.log, logLine(`任务已在云端创建，但 SSE 订阅失败：${res.reason ?? '连接异常'}；服务端仍在执行，可稍后刷新任务状态`, 'warn')] },
+            } : t),
+          }))
+          useAppStore.getState().showToast('任务已在云端创建，但实时推送未连上；点数以服务端账本为准', 'warn')
+        }
+        void useAppStore.getState().syncPoints()
       })
       return { ok: true, message: '云端编排任务已提交 · SSE 流式推送中（数据源未接入，不产生客户记录）' }
     }
@@ -535,6 +571,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ gateway: health, probing: false })
   },
 
+  /**
+   * 余额以服务端账本为准：本地 pointsBalance 只是展示镜像。
+   * 离线 / 未启动云端时保持原值并保留 pointsSource='local-demo'，不假装已同步。
+   */
+  syncPoints: async () => {
+    const snap = await getPointsSnapshot()
+    if (!snap.ok || typeof snap.available !== 'number') return
+    const available = snap.available
+    set((s) => ({ settings: { ...s.settings, pointsBalance: available }, pointsSource: 'server' }))
+  },
+
   /** 用云端网关重新判断一家客户：结果无论成功或降级都要显式落到评分卡上 */
   judgeWithGateway: async (companyId) => {
     const company = get().companies.find((c) => c.id === companyId)
@@ -623,6 +670,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       companies, tasks: [demoTask(companies)], outreach: [], settings: DEFAULT_SETTINGS,
       activeTaskId: null, drawerCompanyId: null, composerCompanyId: null, selectedIds: [],
+      pointsSource: 'local-demo',
       filters: { quick: 'all', search: '', sort: 'default', minScore: 0, hideCompetitors: true, grade: 'ALL' },
     })
     get().showToast('演示数据已重置', 'ok')

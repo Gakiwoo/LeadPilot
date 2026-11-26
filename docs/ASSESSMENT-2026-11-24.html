@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LeadPilot 项目专业评估 · 2026-11-24</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1f2329; --sub:#5c6672; --line:#e3e8ef;
+    --blue:#2563eb; --blue-soft:#eff4ff; --red:#dc2626; --red-soft:#fef2f2;
+    --amber:#d97706; --amber-soft:#fffbeb; --green:#059669; --green-soft:#ecfdf5;
+    --slate:#64748b; --slate-soft:#f1f5f9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.75;font-size:14px}
+  .wrap{max-width:1100px;margin:0 auto;padding:32px 24px 80px}
+  header{background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;border-radius:16px;padding:34px 36px;margin-bottom:24px}
+  header h1{margin:0 0 8px;font-size:28px;letter-spacing:.5px}
+  header p{margin:4px 0;opacity:.92;font-size:13px}
+  .badges{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px}
+  .badge{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.28);padding:4px 11px;border-radius:999px;font-size:12px}
+  h2{font-size:20px;margin:34px 0 14px;padding-left:12px;border-left:4px solid var(--blue)}
+  h3{font-size:16px;margin:22px 0 10px;color:#243042}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-bottom:16px;box-shadow:0 1px 3px rgba(20,30,50,.04)}
+  .lead{border-left:4px solid var(--blue);background:var(--blue-soft)}
+  .warn{border-left:4px solid var(--amber);background:var(--amber-soft)}
+  .danger{border-left:4px solid var(--red);background:var(--red-soft)}
+  .ok{border-left:4px solid var(--green);background:var(--green-soft)}
+  table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
+  th,td{padding:9px 11px;border:1px solid var(--line);text-align:left;vertical-align:top}
+  th{background:#f0f3f8;font-weight:600;color:#334155}
+  tbody tr:nth-child(even){background:#fafbfd}
+  .tag{display:inline-block;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600;white-space:nowrap}
+  .p1{background:var(--red-soft);color:var(--red);border:1px solid #fecaca}
+  .p2{background:var(--amber-soft);color:var(--amber);border:1px solid #fde68a}
+  .p3{background:var(--slate-soft);color:var(--slate);border:1px solid #cbd5e1}
+  .good{background:var(--green-soft);color:var(--green);border:1px solid #a7f3d0}
+  .score{display:flex;flex-wrap:wrap;gap:16px;align-items:stretch}
+  .score-box{flex:1;min-width:180px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 20px;text-align:center}
+  .score-box .num{font-size:36px;font-weight:700;color:var(--blue);line-height:1.2}
+  .score-box .lbl{font-size:12px;color:var(--sub)}
+  .score-box .delta{font-size:12px;margin-top:6px;color:var(--red)}
+  .bar-row{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:12.5px}
+  .bar-row .name{width:140px;flex-shrink:0;color:#334155}
+  .bar-track{flex:1;background:#eef2f7;border-radius:6px;height:14px;position:relative;overflow:hidden}
+  .bar-now{position:absolute;left:0;top:0;height:100%;background:var(--blue);border-radius:6px}
+  .bar-old{position:absolute;top:0;height:100%;width:2px;background:var(--amber)}
+  .bar-row .val{width:66px;text-align:right;font-variant-numeric:tabular-nums;color:var(--sub)}
+  code{background:#f1f4f8;padding:1px 5px;border-radius:4px;font-family:"Cascadia Code",Consolas,monospace;font-size:12px;color:#1e40af}
+  pre{background:#0f172a;color:#e2e8f0;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:12px;line-height:1.6;margin:10px 0}
+  pre code{background:none;color:inherit;padding:0}
+  ul,ol{margin:8px 0 8px 20px;padding:0}
+  li{margin:4px 0}
+  .muted{color:var(--sub);font-size:12.5px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+  .flow .step{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:12.5px}
+  .flow .step.ok-step{border-color:#a7f3d0;background:var(--green-soft)}
+  .flow .step.gap{border-color:#fecaca;background:var(--red-soft);color:var(--red)}
+  .flow .arrow{color:var(--slate);font-size:13px}
+  footer{margin-top:36px;padding-top:16px;border-top:1px solid var(--line);color:var(--sub);font-size:12px}
+  @media (max-width:760px){.grid2{grid-template-columns:1fr}.wrap{padding:16px}}
+  @media print{body{background:#fff}.wrap{max-width:none;padding:0}header{background:#1e3a8a!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.card,table{box-shadow:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>LeadPilot 猎客 · 项目专业评估</h1>
+  <p>评估日期：2026-11-24 · 基线：<code style="background:rgba(255,255,255,.2);color:#fff">ef2d28a</code>（main = origin/main，工作区干净）· 角色：高级产品经理 + 高级工程师</p>
+  <p>方法：三路独立只读审计（服务端与安全 / 产品与前端 / 工程化与测试）+ 本地全量实跑 + 关键缺陷交叉复现 + 文档口径核验</p>
+  <p>口径声明：刻意设计的 <code style="background:rgba(255,255,255,.2);color:#fff">DEMO</code>、商业数据源 <code style="background:rgba(255,255,255,.2);color:#fff">0/6</code>、标注集 legacy、<code style="background:rgba(255,255,255,.2);color:#fff">releaseEligible=false</code> 均不计为缺陷；「不发布」不是扣分理由。</p>
+  <div class="badges">
+    <span class="badge">v0.9.0</span><span class="badge">internal_preview</span><span class="badge">auto_prospecting / bulk_sdr</span>
+    <span class="badge">220 单测</span><span class="badge">66 门禁</span><span class="badge">51 冒烟</span><span class="badge">CI success</span>
+  </div>
+</header>
+
+<div class="card lead">
+  <h2 style="margin-top:0;border:none;padding:0">1. 结论先行</h2>
+  <p><strong>综合 3.7 / 5.0（质量 4.0 + 设计·产品 3.3），较历史自评 4.0 下调 0.3。产品成熟度判定：内测工具，不是可交付产品。</strong></p>
+  <p>B1–B5 五轮修复确实把「门禁很严、实现有洞」的倒挂消掉了：SSRF pin IP、代理鉴权、计费释放、状态机终态、证据通道都已闭合，220 单测 / 66 门禁 / 51 冒烟 / AC-03 全绿。<strong>但本次复核抓到 3 个 P1，其中两个是「诚实性」承诺的直接破口</strong>：B5 联调新增的 <code>&lt;context&gt;</code> 来源标注没有清洗 URL，导致合法 URL 被误判 PII、编码 PII 反而能外发；<code>check:tracked</code> 用 basename 跳过 <code>src/data/</code>，把历史 <code>.gitignore</code> 同款「干净检出假保证」又带了回来（实跑报 65 个，<code>git ls-files</code> 实有 67 个）。第三个 P1 是 <code>pinnedFetch</code> 没有响应字节上限，大响应可撑满进程内存。</p>
+  <p>产品侧更值得警惕：三步批量管道的服务端 <code>companies</code> 表与前端演示草稿库不连通，<strong>批量出信未实现</strong>，导出与发送之间是人工外挂；<code>OutreachView</code> / <code>CrmView</code> 把演示「已发 18 / 退信 13.8% / 回复 69.0%」当成 KPI 展示且两页数字互相矛盾，与 outcome 门禁的 <code>NO_DATA</code> 并存——这是「演示数据伪装成业务结果」的残余，直接冲击产品「不能假知道」的核心承诺。</p>
+  <p class="muted">下调 0.3 分的理由与「不发布」无关，全部来自可定位、可复现的实现回归与验证链路失真。历史 4.0 分的评估口径保留在 <code>docs/ASSESSMENT-2026-11-10.md</code>，本文是增量复核，不重复报告已修好的 66 项。</p>
+</div>
+
+<h2>2. 评分与对比</h2>
+<div class="score">
+  <div class="score-box"><div class="lbl">质量 8 维度</div><div class="num">4.0</div><div class="delta">历史 4.3 → −0.3</div></div>
+  <div class="score-box"><div class="lbl">设计·产品 14 维度</div><div class="num">3.3</div><div class="delta">历史 3.6 → −0.3</div></div>
+  <div class="score-box"><div class="lbl">综合</div><div class="num">3.7</div><div class="delta">历史 4.0 → −0.3</div></div>
+  <div class="score-box"><div class="lbl">产品成熟度</div><div class="num" style="font-size:24px;color:var(--amber)">内测工具</div><div class="muted" style="margin-top:8px">原型 / <strong>内测工具</strong> / 可交付产品 / 可发布产品</div></div>
+</div>
+
+<div class="card">
+  <h3>2.1 质量 8 维度（蓝条＝本次，橙线＝历史 14.2 节）</h3>
+  <div class="bar-row"><div class="name">架构与模块边界</div><div class="bar-track"><div class="bar-now" style="width:78%"></div><div class="bar-old" style="left:78%"></div></div><div class="val">3.9 / 3.9</div></div>
+  <div class="bar-row"><div class="name">代码正确性</div><div class="bar-track"><div class="bar-now" style="width:80%"></div><div class="bar-old" style="left:84%"></div></div><div class="val">4.0 / 4.2</div></div>
+  <div class="bar-row"><div class="name">安全</div><div class="bar-track"><div class="bar-now" style="width:80%"></div><div class="bar-old" style="left:86%"></div></div><div class="val">4.0 / 4.3</div></div>
+  <div class="bar-row"><div class="name">并发与可靠性</div><div class="bar-track"><div class="bar-now" style="width:86%"></div><div class="bar-old" style="left:86%"></div></div><div class="val">4.3 / 4.3</div></div>
+  <div class="bar-row"><div class="name">测试与验证</div><div class="bar-track"><div class="bar-now" style="width:86%"></div><div class="bar-old" style="left:96%"></div></div><div class="val">4.3 / 4.8</div></div>
+  <div class="bar-row"><div class="name">可维护性</div><div class="bar-track"><div class="bar-now" style="width:76%"></div><div class="bar-old" style="left:80%"></div></div><div class="val">3.8 / 4.0</div></div>
+  <div class="bar-row"><div class="name">工程化 / CI / 供应链</div><div class="bar-track"><div class="bar-now" style="width:80%"></div><div class="bar-old" style="left:94%"></div></div><div class="val">4.0 / 4.7</div></div>
+  <div class="bar-row"><div class="name">文档一致性</div><div class="bar-track"><div class="bar-now" style="width:80%"></div><div class="bar-old" style="left:90%"></div></div><div class="val">4.0 / 4.5</div></div>
+  <p class="muted">降分集中在「测试与验证」「工程化」「安全」三项——恰是历史 4.7 / 4.8 分的核心依据，本次实测发现其依据本身有假保证。其余 5 维认可 B1–B5 修复，不重复扣分。</p>
+</div>
+
+<div class="card">
+  <h3>2.2 设计·产品 14 维度（本次 / 历史）</h3>
+  <table>
+    <thead><tr><th>维度</th><th>本次</th><th>历史</th><th>维度</th><th>本次</th><th>历史</th></tr></thead>
+    <tbody>
+      <tr><td>视觉层级</td><td>3.6</td><td>3.6</td><td>信息密度</td><td>3.0</td><td>3.2</td></tr>
+      <tr><td>色彩与语义 token</td><td>3.3</td><td>3.3</td><td>可访问性</td><td>3.6</td><td>3.6</td></tr>
+      <tr><td>排版与字号</td><td>3.4</td><td>3.4</td><td>键盘与交互反馈</td><td>3.5</td><td>3.5</td></tr>
+      <tr><td>组件一致性</td><td>3.8</td><td>3.8</td><td><strong>响应式</strong></td><td>2.0</td><td>2.0</td></tr>
+      <tr><td>空 / 错 / 加载态</td><td>3.5</td><td>3.5</td><td><strong>文案准确性</strong></td><td>3.4</td><td>4.2</td></tr>
+      <tr><td><strong>降级诚实性</strong></td><td>3.5</td><td>4.3</td><td><strong>导航与状态一致</strong></td><td>3.0</td><td>3.7</td></tr>
+      <tr><td>表单与校验</td><td>3.7</td><td>3.7</td><td>品牌与版本一致</td><td>4.0</td><td>4.3</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">四处不一致均与「不发布 / DEMO」无关：① 文案准确性——设置页仍保留「建议先采购 3 国数据源·阻塞研发」与 v0.8.0「决策不做采购」冲突，¥199 / 63% 毛利为纸面估算当现状；② 降级诚实性——演示 KPI 未标注且跨页矛盾，与 <code>NO_DATA</code> 并存；③ 导航与状态一致——服务端导入结果不回前端 store；④ 信息密度 / 品牌版本——9–10 列 10–11px 未做 IA 重排，文档数字仍漂移（见 §6）。</p>
+</div>
+
+<h2>3. 实跑验证（本次会话，全部实测）</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>检查</th><th>结果</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>git fetch --prune</code> + <code>pull --ff-only</code></td><td><span class="tag good">一致</span></td><td>本地 <code>d0dc2e2</code> → 快进 <code>ef2d28a</code>（落后 2 提交），<code>origin/main...main = 0 0</code>，工作区干净</td></tr>
+      <tr><td><code>npm run typecheck</code></td><td><span class="tag good">exit 0</span></td><td>TS strict + <code>noUncheckedIndexedAccess</code></td></tr>
+      <tr><td><code>npm test</code></td><td><span class="tag good">220 / 220</span></td><td>11 文件，0 skipped</td></tr>
+      <tr><td><code>npm run gate</code></td><td><span class="tag good">66 / 66</span></td><td><code>releaseBlocked=true</code>，5 条 BLOCKED 由真实证据判定生成</td></tr>
+      <tr><td><code>npm run build</code></td><td><span class="tag good">exit 0</span></td><td>353.78 kB / gzip 119.45 kB</td></tr>
+      <tr><td><code>npm run evidence:check -- --self-test</code></td><td><span class="tag good">13 / 13</span></td><td>伪造证据被拒</td></tr>
+      <tr><td><code>npm run check:tracked</code></td><td><span class="tag p1">假通过</span></td><td>报「65 个源码全部纳入」，<code>git ls-files</code> 实有 <strong>67</strong> 个（<code>src/data/</code> 2 个被跳过）·见 §5.2</td></tr>
+      <tr><td><code>npm audit --omit=dev</code></td><td><span class="tag good">0 漏洞</span></td><td>已入 CI 硬断言</td></tr>
+      <tr><td><code>npm audit</code>（含 dev）</td><td><span class="tag p2">6 条</span></td><td>3 moderate / 1 high / 2 critical，全在 Vite 5 / Vitest 2 工具链，需跨 major</td></tr>
+      <tr><td><code>npm run smoke</code></td><td><span class="tag good">51 / 51</span></td><td>隔离端口 5182 + memory store；直连 5181 无服务时 <code>0/45</code> 是<strong>环境前提缺失</strong>，不是代码回归</td></tr>
+      <tr><td><code>npm run verify:restart</code></td><td><span class="tag good">AC-03 PASS</span></td><td>杀进程 → 同库重启 → 游标 16 续跑、只有一条预扣流水</td></tr>
+      <tr><td><code>validate:baseline -- --self-test</code></td><td><span class="tag good">PASSED</span></td><td>legacy 通道保留</td></tr>
+      <tr><td>GitHub Actions</td><td><span class="tag good">success</span></td><td><code>43890234011</code>（B5 文档提交）；实际 <strong>12 步</strong>，文档多处仍写 15 步</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card warn">
+  <strong>验证链路自身的诚实性问题</strong>：<code>scripts/e2e-smoke.mjs</code> 头部注释要求「另开终端启动服务」，但脚本不检查服务可达性，服务没起时返回 <code>0/45 checks passed</code> 且退出码可能被误读。这与 B3-0 修掉的「门禁假保证」、14.4 节的「代理假失败」是同一类问题——<strong>验证脚本对被验证环境之外的假设仍会给出失真结论</strong>。本次评估通过隔离端口重跑才拿到可信结果。
+</div>
+
+<h2>4. 产品兑现度：用户旅程断在哪里</h2>
+<div class="card">
+  <div class="flow">
+    <span class="step ok-step">① 用户投喂 CSV / 指定 URL 抓取</span><span class="arrow">→</span>
+    <span class="step ok-step">② T0 规则事实 + 五维评分</span><span class="arrow">→</span>
+    <span class="step ok-step">③ 批量研判（需 Key + 快照）</span><span class="arrow">→</span>
+    <span class="step gap">④ 批量出信：未实现，逐家人工点开详情</span><span class="arrow">→</span>
+    <span class="step ok-step">⑤ mbox 草稿导出</span><span class="arrow">→</span>
+    <span class="step gap">⑥ 发送：无通道，用户自有邮箱外挂</span><span class="arrow">→</span>
+    <span class="step gap">⑦ 结果回写：无检测，人工整理事件</span>
+  </div>
+  <p class="muted">另有一条横向断裂：服务端 <code>/v1/import/companies</code> 与 <code>/v1/batch/judge</code> 的数据落在 <code>companies</code> 表，而前端 <code>BatchPipelinePanel.doExport</code> 消费的是 <code>useAppStore</code> 里 48 家演示草稿，两者不是同一批数据。</p>
+  <table>
+    <thead><tr><th>能力</th><th>状态</th><th>代码证据</th><th>缺口</th><th>解锁所需</th></tr></thead>
+    <tbody>
+      <tr><td>CSV 导入 / 去重 / origin 拒伪</td><td><span class="tag good">真实实现</span></td><td><code>index.mjs:488</code></td><td>结果不回写前端 store</td><td>代码可做</td></tr>
+      <tr><td>用户指定 URL 抓取 / SSRF / robots</td><td><span class="tag good">真实实现</span></td><td><code>fetch.mjs</code></td><td>依赖目标站可达</td><td>无</td></tr>
+      <tr><td>T0 事实链 / 五维评分 / 证据校验</td><td><span class="tag good">真实实现</span></td><td><code>scoring.ts</code> / <code>t0.mjs</code></td><td>演示评分卡未经模型校验（DEMO 口径）</td><td>无</td></tr>
+      <tr><td>真实 LLM 研判 / 写信</td><td><span class="tag p2">配置即用</span></td><td><code>gateway.mjs</code> / <code>.env.example:76-89</code></td><td>当前 0 家 Key / 0 家锁快照</td><td>运维注入具体快照 ID（小时级）</td></tr>
+      <tr><td>批量出信</td><td><span class="tag p1">未实现</span></td><td><code>BatchPipelinePanel.tsx:86-127</code></td><td>无批量调 <code>/v1/email/generate</code> 入口</td><td>代码可做</td></tr>
+      <tr><td>mbox 草稿导出 / 四道闸门</td><td><span class="tag good">内测可用</span></td><td><code>batch.mjs</code> / <code>compliance.ts</code></td><td>消费演示草稿，G2 依赖调用方传黑名单</td><td>代码可做</td></tr>
+      <tr><td>邮件实际发送</td><td><span class="tag p3">决策不做</span></td><td><code>BATCH_DIRECT_SEND_ENABLED=false</code></td><td>合规红线，产品形态决定</td><td>仅当改自动发送才需 OAuth+CASA</td></tr>
+      <tr><td>结果回写 / 3% 熔断</td><td><span class="tag p2">内测可用</span></td><td><code>index.mjs:525</code></td><td>无回复 / 退信检测，样本 0/30</td><td>真实发送事件（外部必须）</td></tr>
+      <tr><td>发布证据通道</td><td><span class="tag p2">有代码无数据</span></td><td><code>release-evidence.mjs</code></td><td><code>.evidence/</code> 不存在，0/100 · 0/30 · 0/4</td><td>真实样本 + 人工签署（外部必须）</td></tr>
+      <tr><td>点数账本 / 定价</td><td><span class="tag p3">本地测试账本</span></td><td><code>ledger.mjs</code> / <code>SettingsView.tsx:359</code></td><td>无支付、无客户、¥199 / 63% 毛利为纸面估算</td><td>支付通道 + 种子客户（外部必须）</td></tr>
+      <tr><td>6 类商业源 / 385 标注集</td><td><span class="tag p3">决策不做</span></td><td><code>README.md</code> / legacy 契约</td><td>—</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p class="muted"><code>docs/PRD-COVERAGE.md</code> 的 AC 统计（✅6 / 🟡3 / ⚠️4 / ❌3）与代码一致，但缺口清单只列外部依赖，<strong>未列上述 ④⑥⑦ 三段产品侧代码缺口</strong>，评审者无法只靠文档判断离可发布还差什么。</p>
+</div>
+
+<div class="card ok">
+  <strong>已有真实业务雏形，只是没接进证据链</strong>：本地 <code>data/candidates-smartlock-2026-11-13.csv</code> 有 14 家带 <code>source_url</code> / <code>type_quote</code> 的真实线索，<code>data/outreach-drafts-smartlock.md</code> 有 7 封标注「LeadPilot 真实模型（deepseek-v4-pro）·锚点取自官网可核验原句」的开发信草稿，状态明确写「未发送」。但 <code>.evidence/</code> 不存在、<code>release-compliance.json</code> 四项全 <code>not_started</code>、无 <code>.env</code>、门禁报 0 Key / 0 快照。<strong>说明项目已跑过真实模型，却没有把真实产物沉淀成可审计的发布证据</strong>——这是当前最划算的一步改进，不需要任何采购。
+</div>
+
+<h2>5. 本次实锤复核：三处「诚实性」破口</h2>
+
+<div class="card danger">
+  <h3>5.1 <span class="tag p1">P1</span> · <code>&lt;context&gt;</code> 来源 URL 未清洗 → PII 终检双向破口（B5 联调回归）</h3>
+  <p><code>server/protocol.mjs:289-292</code> 把 <code>input.sources[i].url</code> 原样拼进 <code>&lt;context&gt;</code>，只有正文 <code>sourceTexts</code> 过了 <code>sanitizeContext()</code>；<code>gateway.mjs:520</code> / <code>batch.mjs:512</code> 传入的是原始 sources。本次实跑：</p>
+  <pre>url=https://x.example/about?e=alice@corp.com        context-has-literal-url=true  pii-ok=false  hits=[0]
+url=https://x.example/about?e=alice%40corp.com       context-has-literal-url=true  pii-ok=true   hits=[]
+url=https://user:pass@x.example/about                context-has-literal-url=true  pii-ok=false  hits=[0]</pre>
+  <p>即：合法 URL 带 <code>@</code> 会被电话/邮箱正则误判 → 整次请求被 <code>E6004</code> 拦下（可用性回归）；把 <code>@</code> 编码成 <code>%40</code> 则绕过终检，原文邮箱随 prompt 外发给 provider（违反「官网原文 / 客户邮箱不进 provider」的数据最小化红线）。修复：URL 先过白名单清洗（仅保留 scheme + host + path，剥 query / userinfo），终检对 URL 做 decode 后再匹配，并补 3 个行为级反例。</p>
+</div>
+
+<div class="card danger">
+  <h3>5.2 <span class="tag p1">P1</span> · <code>check:tracked</code> 与历史 <code>.gitignore</code> 同款假保证</h3>
+  <pre>SKIP_DIRS = new Set(['node_modules','dist','data','coverage','.workbuddy'])   // 按 basename 匹配任意层级
+git ls-files src/data -> 2 files: src/data/demo-data.ts, src/data/repository.ts
+node scripts/check-clean-checkout.mjs -> 「干净检出校验通过：65 个源码/配置全部纳入版本控制，90 个 tracked 文件无缺失」
+git ls-files src server shared scripts | grep -E '\.(ts|tsx|mjs|json|sh|yml|css|html)$' | wc -l -> 67</pre>
+  <p><code>SKIP_DIRS.has(name)</code> 命中任意层级的 <code>data</code>，把 <code>src/data/</code> 排除在 walk 之外；根级 8 个配置（<code>package.json</code> / <code>vite.config.ts</code> / <code>ci.yml</code> …）也不在对账范围。<strong>如果这 2 个文件哪天未被 git 跟踪，脚本仍会报「全部纳入」，CI 绿而干净检出缺模块</strong>——正是 ADR-008 教训的重演。修复：按仓库相对路径锚定（仅根 <code>/data/</code>），根级 tracked 文件纳入全量对账，补「故意漏跟踪一个源码必须报红」的反例。</p>
+</div>
+
+<div class="card danger">
+  <h3>5.3 <span class="tag p1">P1</span> · <code>pinnedFetch</code> 没有响应字节上限</h3>
+  <p><code>server/fetch.mjs:355-388</code> 的生产默认出站用 <code>res.on('data', c =&gt; chunks.push(c))</code> 全量收集再 <code>Buffer.concat</code>，<code>maxBytes=524288</code> 只在下游 <code>readLimited</code> 截断，超限时仍 <code>ok:true, truncated:true</code>——契约里「响应过大 <code>E4012</code>」分支从未实现。独立实测 700000 字节响应被完整读入。修复：data 回调累加字节，超限 <code>req.destroy()</code> 并 reject；<code>fetchOne</code> 对 <code>truncated</code> 返回 <code>E4012</code>。</p>
+</div>
+
+<h2>6. 问题清单（合并三路审计、去重后 17 项）</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>ID</th><th>级别</th><th>位置</th><th>问题</th><th>影响</th><th>建议</th></tr></thead>
+    <tbody>
+      <tr><td>P1-1</td><td><span class="tag p1">P1</span></td><td><code>protocol.mjs:289</code></td><td>来源 URL 未清洗进 prompt</td><td>PII 外发 / 合法 URL 误拦</td><td>URL 白名单清洗 + decode 终检 + 3 反例</td></tr>
+      <tr><td>P1-2</td><td><span class="tag p1">P1</span></td><td><code>check-clean-checkout.mjs:22</code></td><td>SKIP_DIRS 按 basename 跳过 <code>src/data/</code>，根配置不对账</td><td>干净检出假保证（65 vs 67）</td><td>路径锚定 + 全量对账 + 反例</td></tr>
+      <tr><td>P1-3</td><td><span class="tag p1">P1</span></td><td><code>fetch.mjs:355-388</code></td><td>pinnedFetch 无 maxBytes，E4012 分支失效</td><td>单 URL 大响应撑内存</td><td>data 阶段超限 destroy + 返回 E4012</td></tr>
+      <tr><td>P2-1</td><td><span class="tag p2">P2</span></td><td><code>batch.mjs:610-615</code></td><td>导出 G2 黑名单依赖调用方传参，不校验 domain 必须入库</td><td>退订终态可生成违规草稿（导出≠发送，影响面有限）</td><td>服务端持久化黑名单 / 终态表</td></tr>
+      <tr><td>P2-2</td><td><span class="tag p2">P2</span></td><td><code>gateway.mjs:196-206</code></td><td><code>settleBilling</code> 失败只写「需人工核对」，不 release，held 永久冻结</td><td>违反「失败全额释放」</td><td><code>!r.ok</code> 分支补 release 并改 <code>ok:false</code></td></tr>
+      <tr><td>P2-3</td><td><span class="tag p2">P2</span></td><td><code>.github/workflows/ci.yml</code></td><td>12 步里缺 <code>evidence:check --self-test</code>（13 项）</td><td>校验器 CLI 改坏 CI 无感</td><td>补一步</td></tr>
+      <tr><td>P2-4</td><td><span class="tag p2">P2</span></td><td><code>index.mjs:691</code></td><td><code>clientError</code> 兜底无反例，删掉仍全绿</td><td>P0-1 修复的一半无回归保护</td><td>补畸形请求行 / 头负例</td></tr>
+      <tr><td>P2-5</td><td><span class="tag p2">P2</span></td><td><code>src/services/</code> · <code>src/components/</code></td><td>220 用例中 cloud.test.mjs 占 138（63%），前端服务层 / 15 个组件 / App 无单测</td><td>repository 防饿死落盘、gateway-client 诊断等无回归锁定</td><td>补 5–8 个关键行为级用例</td></tr>
+      <tr><td>P2-6</td><td><span class="tag p2">P2</span></td><td><code>BatchPipelinePanel.tsx:61-127</code></td><td>服务端导入 / 研判结果与前端演示草稿库不连通；批量出信未实现</td><td>三步管道不能端到端跑真实批次</td><td>打通 store↔server + 批量调 <code>/v1/email/generate</code></td></tr>
+      <tr><td>P2-7</td><td><span class="tag p2">P2</span></td><td><code>OutreachView.tsx:40-42</code> · <code>CrmView.tsx:65</code></td><td>演示「已发 18 / 退信 13.8% / 回复 69.0%」当 KPI，两页 69% vs 80% 矛盾，与 <code>NO_DATA</code> 并存</td><td>演示数据伪装成业务结果，冲击「不能假知道」</td><td>逐卡标「演示」或置灰至有真实事件</td></tr>
+      <tr><td>P2-8</td><td><span class="tag p2">P2</span></td><td><code>e2e-smoke.mjs:12</code></td><td>不检查服务可达性，服务未起返回 0/45 且文案像代码回归</td><td>验证结论失真</td><td>启动前探活 + 明确「前提不满足」退出码，或脚本自启隔离端口</td></tr>
+      <tr><td>P2-9</td><td><span class="tag p2">P2</span></td><td><code>index.mjs:295</code></td><td>OPTIONS 预检在限流 / 鉴权之前短路</td><td>可无限发预检绕限流（无写副作用，DoS 价值有限）</td><td>预检也纳入限流计数</td></tr>
+      <tr><td>P3-1</td><td><span class="tag p3">P3</span></td><td><code>PRD-COVERAGE.md:86</code></td><td>仍写「54 项自检 / 四条阻断」，实跑 66 项 / 5 条</td><td>文档漂移</td><td>同步数字并标注版本</td></tr>
+      <tr><td>P3-2</td><td><span class="tag p3">P3</span></td><td><code>ASSESSMENT-2026-11-10.md:378,554</code></td><td>「CI 15 步」实为 12；「89 tracked」实为 90</td><td>历史数字未随终验同步</td><td>加历史快照注或统一为动态表述</td></tr>
+      <tr><td>P3-3</td><td><span class="tag p3">P3</span></td><td><code>ci.yml:69</code></td><td>探活 curl 无 <code>--noproxy '*'</code>（14.4 只修了 verify-restart.sh）</td><td>有代理的自托管 runner 假失败</td><td>补 --noproxy</td></tr>
+      <tr><td>P3-4</td><td><span class="tag p3">P3</span></td><td><code>e2e-smoke.mjs:279,291</code></td><td>硬编码 <code>minSamples=100 / windowSize=100 / 30</code>，未读 manifest</td><td>契约改值即假失败 / 假通过</td><td>统一读 <code>…Manifest()</code></td></tr>
+      <tr><td>P3-5</td><td><span class="tag p3">P3</span></td><td><code>gateway.mjs:188-190</code></td><td><code>reserveFailure</code> 把 <code>E4003 / E4002</code> 一律说成「已结算」</td><td>错误文案谎报原因</td><td>按 <code>hold.code</code> 分派</td></tr>
+      <tr><td>P3-6</td><td><span class="tag p3">P3</span></td><td><code>index.mjs</code> 729 行 · <code>useAppStore.ts</code> 671 行</td><td>巨石路由 / 混合职责仍在且增大</td><td>可维护性</td><td>独立重构批次，不与修复混做</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">P0 共 0 项：没有发现可远程打死服务、绕过 SSRF 私网拦截或击穿不可逆终态这类致命问题，B1 的三个 P0 保持修复状态。</p>
+</div>
+
+<h2>7. 发布状态与五项外部依赖重分类</h2>
+<div class="grid2">
+  <div class="card">
+    <h3>当前门禁实况（<code>npm run gate</code>）</h3>
+    <table>
+      <tbody>
+        <tr><td><code>internalPreviewReady</code></td><td><span class="tag p1">false</span></td></tr>
+        <tr><td><code>externalValidated</code></td><td><span class="tag p1">false</span></td></tr>
+        <tr><td><code>evidenceReady</code></td><td><span class="tag p1">false</span></td></tr>
+        <tr><td><code>releaseEligible</code></td><td><span class="tag p1">恒 false</span></td></tr>
+        <tr><td><code>accuracyClaim</code></td><td><span class="tag p1">恒 false</span></td></tr>
+        <tr><td>integrity / outcome</td><td>NO_DATA / NO_DATA</td></tr>
+        <tr><td>真实原文 / 发送样本</td><td>0/100 · 0/30</td></tr>
+        <tr><td>Key / 锁快照</td><td>0 / 0</td></tr>
+        <tr><td>外部合规</td><td>0/4（全 <code>not_started</code>）</td></tr>
+        <tr><td><code>.evidence/</code> · <code>.env</code></td><td>均不存在</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h3>重分类：哪些被高估了</h3>
+    <table>
+      <thead><tr><th>依赖</th><th>判定</th><th>成本</th></tr></thead>
+      <tbody>
+        <tr><td>provider 快照</td><td><span class="tag good">配置即用，不是外部合规</span></td><td>小时级，运维抄一个官网版本 ID</td></tr>
+        <tr><td>Google OAuth + CASA</td><td><span class="tag p2">产品形态问题</span></td><td>仅当改自动发送才需要；4–8 周 + 数千美元/年</td></tr>
+        <tr><td>EV 签名 / Tauri</td><td><span class="tag p2">产品形态问题</span></td><td>仅当桌面分发才需要；$300–600/年</td></tr>
+        <tr><td>PIPL / GDPR 法务</td><td><span class="tag p1">必须外部</span></td><td>数周 · 律师意见书</td></tr>
+        <tr><td>100 条原文 + 30 条发送 + 一致性</td><td><span class="tag p1">必须外部，不可合成</span></td><td>真实运营动作；代码只能校验格式</td></tr>
+      </tbody>
+    </table>
+    <p class="muted">现有形态是「导出 mbox 草稿 + 用户自有邮箱发送」，OAuth / CASA / EV 根本不是当前路径的必需品。把它们与法务、真实样本并列成「外部合规 4 项」会误导排期。<strong>建议先拍板形态，再决定这三项是否留在门禁里。</strong></p>
+  </div>
+</div>
+
+<div class="card warn">
+  <strong>Go / No-Go</strong>：对内测——<strong>有条件 Go</strong>，建议先修 3 个 P1（约 0.5–1 天）再扩大试用；对正式发布——<strong>No-Go</strong>，5 条 BLOCKED 一条未撤，且 4 项外部合规 0/4。<strong>3.7 分描述的是「代码与界面作为内测工具的质量」，不是发布判据</strong>；分数提高不会让 <code>releaseEligible</code> 变 true。
+</div>
+
+<h2>8. 修复与路线计划</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>批次</th><th>范围</th><th>关键文件</th><th>工时</th><th>依赖</th><th>验证</th></tr></thead>
+    <tbody>
+      <tr><td><strong>B6 · P1 止血</strong></td><td>P1-1 URL 清洗 + decode 终检；P1-2 check:tracked 路径锚定 + 根配置对账；P1-3 pinnedFetch 字节上限 + E4012</td><td><code>protocol.mjs</code> / <code>check-clean-checkout.mjs</code> / <code>fetch.mjs</code> + 三组反例</td><td>0.5–1 天</td><td>无前置</td><td>220+ 单测全绿、gate 66、<code>check:tracked</code> 报 67 且「故意漏跟踪」反例变红、大响应 <code>E4012</code> 负例</td></tr>
+      <tr><td><strong>B7 · 合规与验证链路</strong></td><td>P2-1 服务端黑名单；P2-2 settle 失败释放 held；P2-3 CI 补证据自检；P2-4 clientError 反例；P2-8 smoke 前提检查；P2-9 OPTIONS 限流；P3-3/3-4/3-5</td><td><code>batch.mjs</code> / <code>gateway.mjs</code> / <code>ci.yml</code> / <code>e2e-smoke.mjs</code></td><td>1–2 天</td><td>B6 定稿</td><td>干净检出 12→13 步全绿、51 冒烟、AC-03、证据自检 13、真实「改坏实现会红」抽样</td></tr>
+      <tr><td><strong>B8 · 产品闭环</strong></td><td>P2-6 打通 store↔server 三步管道 + 批量写信入口；P2-7 演示 KPI 标注；P2-5 前端关键单测；P3-1/3-2 文档数字统一；5 张截图重生成</td><td><code>BatchPipelinePanel.tsx</code> / <code>useAppStore.ts</code> / <code>OutreachView.tsx</code> / <code>CrmView.tsx</code> / docs</td><td>2–4 天</td><td>B7 定稿</td><td>真实批次端到端：导入 14 家 → 研判 → 批量出信 → mbox 导出；截图与文案抽检</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">横切要求：每批修复必须同时补<strong>行为级反例</strong>，不要把新断言又写成「读契约常量」；B6 的 <code>check:tracked</code> 反例尤其要验证「故意让一个 tracked 源码缺失时脚本必须报红」。</p>
+</div>
+
+<div class="card">
+  <h3>外部路线（代码不能代做，按主体标注）</h3>
+  <table>
+    <thead><tr><th>阶段</th><th>代码可做</th><th>外部必须</th></tr></thead>
+    <tbody>
+      <tr><td><strong>0–3 个月</strong></td><td>B6 / B7 / B8；把 14 家真实线索的 <code>source_url</code> / <code>quote</code> 接入证据通道</td><td>运维注入 provider 具体快照 ID；把真实线索扩到 100 条并补 <code>attestation</code> 写入 <code>.evidence/integrity.json</code>；5–10 名种子用户访谈；<strong>拍板「永久导出草稿 vs 未来自动发送」</strong></td></tr>
+      <tr><td><strong>3–6 个月</strong></td><td>回复 / 退信事件导入工具，把回写从人工变半自动；按固定成本表重算定价</td><td>自有企业邮箱跑 ≥30 封真实发送，写 <code>outcome.json</code>；两次运行一致性 <code>consistency.json</code>；PIPL / GDPR 法律意见书</td></tr>
+      <tr><td><strong>6 个月+</strong><br><span class="muted">仅当形态改为自动发送 / 桌面分发</span></td><td>Vite 8 / Vitest 5 跨 major 升级（<code>DEPENDENCY-DECISION.md</code> 选项 B，需单独批准）</td><td>Google OAuth 验证 + CASA Tier 2；EV 证书 + Tauri 2 / DPAPI；支付 / 订阅通道</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>9. 已核实属实的强项</h2>
+<div class="card ok">
+  <ol>
+    <li><strong>发布红线不可绕过</strong>：<code>releaseEligible</code> / <code>accuracyClaim</code> 恒 false 且无旁路；<code>minSamples</code> 只能抬高、<code>windowSize</code> 只能缩小；合规清单只改 <code>status</code> 不算完成；<code>/v1/release/status</code> 只回摘要。</li>
+    <li><strong>5 条 BLOCKED 是真判定</strong>：B4 打通「证据目录 → 真实计算 → blockers 由结果生成」，不再是硬编码字符串；证据自检 13/13 会拒伪造。</li>
+    <li><strong>SSRF 与鉴权闭合</strong>：IPv6 128 位展开、连接 pin 到已验证 IP、robots 3xx 逐跳 fail-closed、代理头只判存在不采信 IP、token SHA-256 后恒定时间比较、限流表有界。</li>
+    <li><strong>计费与账本扎实</strong>：证据失败不结算、<code>idem_key</code> 幂等、SQLite <code>BEGIN IMMEDIATE</code>、AC-03 真实杀进程恢复且只有一条预扣流水。</li>
+    <li><strong>行为级反例有效</strong>：抽检 8 个关键反例，7 个确为行为断言（原始 socket / 真实 HTTP / store 调用 / 账本流水 / console 捕获），把实现改坏会红。</li>
+    <li><strong>降级诚实性主线属实</strong>：未配 Key → <code>E6005</code>，未锁快照 → <code>E6008</code>，offline 不误诊，演示评分卡显示区间并标「未经模型校验」，任何降级不返回像模型写的假正文。</li>
+    <li><strong>工程基线干净</strong>：90 tracked、零密钥入仓、生产依赖 4 个且 <code>npm audit --omit=dev</code> 0 漏洞入 CI、action 固定 SHA、<code>permissions: contents: read</code>、5 张截图可复现且与当前 UI 匹配。</li>
+    <li><strong>文档体系完整</strong>：ADR-001–032、PRD-COVERAGE、RELEASE-CHECKLIST、依赖决策、5 轮评估记录齐全，边界口径写得很清楚。</li>
+  </ol>
+</div>
+
+<h2>10. 残留边界（不算缺陷）</h2>
+<div class="card">
+  <ul>
+    <li>DEMO / 0-6 商业源 / legacy 标注集 / <code>releaseEligible=false</code> / 5 条 BLOCKED 是<strong>刻意自我阻断</strong>，不应「修掉」。</li>
+    <li>多实例 Map 与共享库租约：ADR 已声明单实例部署，<code>verify-restart</code> 只验单实例；上多实例需外部租约或 DB 锁，属独立架构决策。</li>
+    <li><code>attestation</code> 只校验格式与逐字自洽，<strong>代码无法证明证据真实性</strong>；B4 已如实写明签署人责任与发布前独立审计。</li>
+    <li>dev 工具链 6 条漏洞需 Vite 8 / Vitest 5 跨 major，决策 A「风险已限定且已知」不等于「已修复」，升级需单独批准。</li>
+    <li>反向代理把 Host 也改写成回环且不带任何标记头的极端拓扑无法从请求侧识别，唯一正解是部署规约强制 <code>LEADPILOT_API_TOKEN</code>。</li>
+    <li>WCAG 2.1 AA 完整审计、响应式重构、多语言 / 移动端形态：明确未做项，历史评估已承认，不粉饰。</li>
+  </ul>
+</div>
+
+<footer>
+  <p>本报告为只读评估，未修改任何项目源码；验证用的临时服务（隔离端口 5182 + memory store）已停止，探针脚本位于 <code>.tmp/</code>（已被 gitignore 排除），工作区评估前后均为干净。</p>
+  <p>本报告不构成法律意见；正式上线前需就 PIPL 与 GDPR 取得执业律师专项意见。<strong>分数不是发布判据。</strong></p>
+  <p>基线 <code>ef2d28a</code> · 生成时间 2026-11-24 · LeadPilot v0.9.0 · WorkBuddy</p>
+</footer>
+
+</div>
+</body>
+</html>

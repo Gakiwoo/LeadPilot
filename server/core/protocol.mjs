@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 
 export const protocol = JSON.parse(
-  readFileSync(new URL('../shared/model-protocol.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('../../shared/model-protocol.json', import.meta.url), 'utf8'),
 )
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)

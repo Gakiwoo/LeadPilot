@@ -1,9 +1,12 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
+import pkg from './package.json'
 
 export default defineConfig({
   plugins: [react()],
+  // 版本号在构建期注入，避免把整个 package.json（含 scripts / devDependencies）打进前端包
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   // 相对路径：便于后续作为 Tauri 2 的 frontendDist 直接复用
   base: './',
   resolve: {
@@ -19,7 +22,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['src/**/*.test.ts', 'server/**/*.test.mjs'],
+    include: ['tests/**/*.test.ts', 'tests/**/*.test.mjs'],
     // 当前环境的 fs 代理不允许多个 worker 同时写 SSR 转换缓存，改为顺序执行
     fileParallelism: false,
   },

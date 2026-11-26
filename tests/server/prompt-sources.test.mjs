@@ -7,8 +7,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   buildJudgeMessages, assertNoPiiInMessages, sanitizeSourceUrl, safeFetchedAt,
-} from '../protocol.mjs'
-import { createGateway } from '../gateway.mjs'
+} from '../../server/core/protocol.mjs'
+import { createGateway } from '../../server/services/gateway.mjs'
 
 const TEXT_A = 'Authorized distributor for Parker and Eaton across Benelux.'
 const TEXT_B = 'We stock hydraulic hose fittings and brass adapters.'

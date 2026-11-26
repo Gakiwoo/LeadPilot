@@ -16,8 +16,8 @@ import assert from 'node:assert/strict'
 import {
   evaluateReleaseEvidence, validateIntegrityEvidence, validateOutcomeEvidence,
   validateConsistencyEvidence, snapshotStatus, complianceStatus, readCompliance,
-  defaultEvidenceDir, EVIDENCE_CONTRACT_VERSION,
-} from '../server/release-evidence.mjs'
+  EVIDENCE_CONTRACT_VERSION,
+} from '../server/core/release-evidence.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const args = process.argv.slice(2)

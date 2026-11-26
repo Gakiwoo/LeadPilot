@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseBaselineText, validateBaselineImport } from '../server/baseline.mjs'
+import { parseBaselineText, validateBaselineImport } from '../server/core/baseline.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const args = process.argv.slice(2)
