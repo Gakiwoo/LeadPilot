@@ -683,7 +683,7 @@
 | `evidence:check --self-test` / `validate:baseline --self-test` | **13 / 13** / PASSED |
 | `npm audit --omit=dev --audit-level=low` | **0 漏洞** |
 | `smoke` / `verify:restart` | **53 / 53**（隔离端口 5182 + memory）/ **AC-03 PASS** |
-| CI | 干净检出 13 步，run 号以 `gh run list` 为准 |
+| CI | **`45768656456` success**，干净检出 13 步全绿（生产依赖审计 / 门禁 75 项 / 证据自检 / 273 单测 / build / 53 冒烟 / AC-03） |
 
 ### 19.3 边界与残留
 
