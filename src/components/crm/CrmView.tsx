@@ -3,6 +3,7 @@ import { Download, KanbanSquare, LayoutList, Save, TrendingUp } from 'lucide-rea
 import type { Company, CompanyStatus } from '@/types'
 import { STATUS_DEFS } from '@/domain/constants'
 import { toCsv, downloadCsv } from '@/domain/compliance'
+import { computeRateStats, kpiDisplay, localCounterKpi, toTileProps } from '@/domain/metrics'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, DemoBanner, EmptyState, GradeBadge, SectionTitle, StatTile, StatusBadge } from '@/components/ui'
 
@@ -22,16 +23,11 @@ export default function CrmView() {
     c.status !== 'new' || !!c.note || outreach.some((o) => o.companyId === c.id),
   ), [companies, outreach])
 
-  const stats = useMemo(() => {
-    const sent = crmCompanies.filter((c) => ['sent', 'delivered', 'opened', 'replied', 'interested', 'quoted', 'won'].includes(c.status)).length
-    const replied = crmCompanies.filter((c) => ['replied', 'interested', 'quoted', 'won'].includes(c.status)).length
-    const interested = crmCompanies.filter((c) => c.status === 'interested' || c.status === 'won').length
-    return {
-      total: crmCompanies.length, sent, replied, interested,
-      replyRate: sent ? ((replied / sent) * 100).toFixed(1) : '0.0',
-      bounced: crmCompanies.filter((c) => c.status === 'bounced').length,
-    }
-  }, [crmCompanies])
+  // B9 / P2-7：与发信中心共用 computeRateStats（同一状态白名单 / 同一分母），
+  // 不再用 CRM 归集子集另算一套 69% vs 80% 的矛盾口径。
+  const rates = computeRateStats(companies)
+  // 前端当前不读取服务端 outcome 回写，结果型 KPI 一律按 DEMO 展示
+  const realOutcomes = null
 
   const exportAll = () => {
     const headers = ['公司名', '国家', '综合分', '匹配度', '采购概率', '规模', '进口可能性', '联系方式', '客户类型', '状态', '最后联系', '下次跟进', '归属任务', '备注']
@@ -61,11 +57,11 @@ export default function CrmView() {
     <div className="space-y-3">
       <DemoBanner text="CRM 主表的客户、状态与跟进记录均为本地演示数据，不会同步到任何远端；状态与备注可直接编辑并保存在本机，不涉及真实邮件系统。" />
       <div className="grid grid-cols-5 gap-3">
-        <StatTile label="客户总数" value={stats.total} sub="自动归集：产生过行为即入主表" />
-        <StatTile label="已发送" value={stats.sent} sub="发送不额外计费" />
-        <StatTile label="已回复" value={stats.replied} sub={`回复率 ${stats.replyRate}%`} tone="emerald" />
-        <StatTile label="有意向" value={stats.interested} sub="北极星指标 PRW 计数态" tone="emerald" />
-        <StatTile label="退信" value={stats.bounced} sub={stats.bounced ? '需治理：硬退信率 > 3% 触发熔断' : '硬退信率 0.0%'} tone="rose" />
+        <StatTile {...toTileProps(localCounterKpi({ label: '客户总数', value: crmCompanies.length, sub: '自动归集：产生过行为即入主表' }))} />
+        <StatTile {...toTileProps(kpiDisplay({ label: '已发送', value: rates.sent, sub: '与发信中心同口径（全量客户）' }, realOutcomes))} />
+        <StatTile {...toTileProps(kpiDisplay({ label: '已回复', value: rates.replied, sub: '与发信中心同口径（全量客户）', tone: 'emerald' }, realOutcomes))} />
+        <StatTile {...toTileProps(kpiDisplay({ label: '有意向', value: rates.interested, sub: '北极星指标 PRW 计数态', tone: 'emerald' }, realOutcomes))} />
+        <StatTile {...toTileProps(kpiDisplay({ label: '退信', value: rates.bounced, sub: '硬退信率 > 3% 触发熔断', tone: 'rose' }, realOutcomes))} />
       </div>
 
       <Card className="p-3">

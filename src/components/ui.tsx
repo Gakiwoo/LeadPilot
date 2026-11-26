@@ -121,12 +121,18 @@ export function SectionTitle({ title, desc, extra }: { title: string; desc?: str
   )
 }
 
-export function StatTile({ label, value, sub, tone = 'slate' }: { label: string; value: string | number; sub?: string; tone?: Tone }) {
+export function StatTile({ label, value, sub, tone = 'slate', demo = false }: {
+  label: string; value: string | number; sub?: string; tone?: Tone; demo?: boolean
+}) {
+  // B9 / P2-7：演示 KPI 必须逐卡标「演示」并置灰，不能让本地演示数字看起来像真实业务结果
   return (
     <Card className="px-4 py-3">
-      <p className="text-[11px] text-muted">{label}</p>
-      <p className="mt-1 text-[22px] font-semibold tabular-nums leading-7 text-ink">{value}</p>
-      {sub && <p className={`mt-0.5 text-[11px] ${tone === 'rose' ? 'text-rose-600' : tone === 'emerald' ? 'text-emerald-600' : 'text-muted'}`}>{sub}</p>}
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] text-muted">{label}</p>
+        {demo && <Badge tone="amber" className="shrink-0">演示</Badge>}
+      </div>
+      <p className={`mt-1 text-[22px] font-semibold tabular-nums leading-7 ${demo ? 'text-slate-400' : 'text-ink'}`}>{value}</p>
+      {sub && <p className={`mt-0.5 text-[11px] ${demo ? 'text-slate-400' : tone === 'rose' ? 'text-rose-600' : tone === 'emerald' ? 'text-emerald-600' : 'text-muted'}`}>{sub}</p>}
     </Card>
   )
 }

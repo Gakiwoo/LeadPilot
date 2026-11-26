@@ -14,6 +14,11 @@
  *   LEADPILOT_APP_URL   前端地址，默认 http://127.0.0.1:5180/
  *   LEADPILOT_CHROME    Chrome/Chromium/Edge 可执行文件绝对路径（自动探测失败时指定）
  *   LEADPILOT_CDP_PORT  CDP 调试端口，默认 9334
+ *   LEADPILOT_CDP_ATTACH=1  不启动浏览器，直接连接已在该端口运行的 CDP 实例。
+ *     用于「Node 进程内无法创建子进程」的受限环境：先手动启动 Edge/Chrome
+ *     带 --headless=new --remote-debugging-port=9334 --remote-allow-origins=*，
+ *     再执行 LEADPILOT_CDP_ATTACH=1 npm run capture:screenshots。
+ *     attach 模式不会 kill 外部浏览器，也不占用独立 user-data-dir。
  *
  * 这不是 CI 步骤，也不进发布门禁：截图只是文档证据，不参与产品能力判定。
  */
@@ -59,36 +64,42 @@ async function assertAppReady() {
   }
 }
 
-const CHROME = await findChrome()
+const ATTACH = process.env.LEADPILOT_CDP_ATTACH === '1'
+const CHROME = ATTACH ? null : await findChrome()
 await assertAppReady()
 await mkdir(OUT, { recursive: true })
 
-const chrome = spawn(CHROME, [
-  '--headless=new',
-  `--remote-debugging-port=${PORT}`,
-  '--remote-allow-origins=*',
-  `--user-data-dir=${PROFILE}`,
-  '--no-first-run',
-  '--no-default-browser-check',
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-gpu',
-  '--disable-software-rasterizer',
-  '--hide-scrollbars',
-  '--force-device-scale-factor=1',
-  '--window-size=1600,1000',
-  'about:blank',
-], { stdio: ['ignore', 'ignore', 'pipe'] })
-
 // 保留最近几行 Chrome stderr：冷启动失败时给出可诊断的原因，而不是一句「endpoint did not start」
 const chromeErrors = []
-chrome.stderr?.on('data', (chunk) => {
-  chromeErrors.push(String(chunk).trim())
-  if (chromeErrors.length > 12) chromeErrors.shift()
-})
 let spawnError = null
-chrome.on('error', (err) => { spawnError = err })
+let chrome = null
+if (!ATTACH) {
+  chrome = spawn(CHROME, [
+    '--headless=new',
+    `--remote-debugging-port=${PORT}`,
+    '--remote-allow-origins=*',
+    `--user-data-dir=${PROFILE}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--hide-scrollbars',
+    '--force-device-scale-factor=1',
+    '--window-size=1600,1000',
+    'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+
+  chrome.stderr?.on('data', (chunk) => {
+    chromeErrors.push(String(chunk).trim())
+    if (chromeErrors.length > 12) chromeErrors.shift()
+  })
+  chrome.on('error', (err) => { spawnError = err })
+} else {
+  console.log(`attach 模式：连接 127.0.0.1:${PORT} 上已运行的 CDP 实例（不启动 / 不关闭浏览器）`)
+}
 
 const pending = new Map()
 let seq = 0
@@ -143,7 +154,7 @@ try {
   let list = null
   // macOS 首次冷启动 Chrome 可能超过 12s；给 30s，并在进程已退出时立即报错
   for (let i = 0; i < 100; i++) {
-    if (spawnError || chrome.exitCode !== null) break
+    if (spawnError || (chrome && chrome.exitCode !== null)) break
     try {
       const res = await fetch(`http://127.0.0.1:${PORT}/json/list`)
       list = await res.json()
@@ -153,9 +164,11 @@ try {
   }
   if (!list?.some((t) => t.type === 'page' && t.webSocketDebuggerUrl)) {
     throw new Error([
-      `Chrome CDP endpoint 未在 ${PORT} 就绪（${CHROME}）`,
+      ATTACH
+        ? `attach 模式：127.0.0.1:${PORT} 上没有已运行的 CDP 实例（请先启动带 --remote-debugging-port=${PORT} 的浏览器）`
+        : `Chrome CDP endpoint 未在 ${PORT} 就绪（${CHROME}）`,
       spawnError ? `spawn: ${spawnError.message}` : null,
-      chrome.exitCode !== null ? `Chrome 已退出，exitCode=${chrome.exitCode}` : null,
+      chrome && chrome.exitCode !== null ? `Chrome 已退出，exitCode=${chrome.exitCode}` : null,
       chromeErrors.length ? `stderr 尾部：${chromeErrors.slice(-4).join(' | ')}` : null,
       '若端口被占用可用 LEADPILOT_CDP_PORT 换一个。',
     ].filter(Boolean).join('\n'))
@@ -199,5 +212,6 @@ try {
   console.log(`完成：5 张截图已写入 ${OUT}`)
 } finally {
   try { ws?.close() } catch { /* noop */ }
-  chrome.kill('SIGTERM')
+  // attach 模式下浏览器由外部启动，绝不能替调用方关闭
+  if (chrome) chrome.kill('SIGTERM')
 }

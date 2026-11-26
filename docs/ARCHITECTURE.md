@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-034 B9 演示 KPI 口径与文档动态化；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
 
 ## 0. 架构总览（本次交付边界）
 
@@ -393,6 +393,24 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **后果**：`origin` 仍只能 `user_imported`，抓取仍不等于采集；出信端点不写回客户状态、不发送任何邮件；只有 `/v1/export/eml` 才把状态置 `drafted`。本地模板草稿带 DEMO 头，不得计作模型产出或评测样本。**本 ADR 不解除任何 Go / No-Go 判据**：`releaseEligible=false`、商业源 `0/6`、`accuracyClaim=false`、integrity / outcome `NO_DATA` 全部不变；评分仍按 §17.1 的 3.7 / 5.0 口径，待后续复核。
 
 **验证**：273 单测（B8 新增 25 个反例，含 14 家 HTTP 端到端与跨层模板校验）/ 75 门禁 / 53 冒烟 / AC-03 全绿；三处「改坏实现会红」抽样（去掉 `draftSource` 白名单、缺前置仍调 provider、超限静默截断）分别精准触发失败用例，还原后逐字节一致。
+
+---
+
+## ADR-034 · B9 演示 KPI 单一口径与文档数字动态化（v0.9.0 增量）
+
+**背景**：独立评估 P2-7 指出 `OutreachView` 与 `CrmView` 各自计算「回复率 / 退信率」，两页出现 69% vs 80% 的矛盾，还把本地演示数据当作业务 KPI 与 `NO_DATA` 并存。P2-5 指出 220 个用例里 `cloud.test.mjs` 占 138，前端服务层 / 仓储层 / 组件口径没有回归锁定。P3-1 / P3-2 指出文档把「54 项自检 / 四条阻断 / CI 15 步 / 89 tracked」写死，与实跑持续漂移。P3-6（`index.mjs` 729 行、`useAppStore.ts` 671 行巨石重构）按报告明确要求**独立批次，不与修复混做**，B9 不纳入。
+
+**决策**：
+
+- 新增 `src/domain/metrics.ts`（纯函数、无 React / IO / 时间 / 随机）：`computeRateStats()` 用一份状态白名单与一个分母，`bounced` 计入发送尝试、`opened` 计入但不算回复；两页与「已发送记录」列表（`isSentStatus()`）全部复用，跨页口径不可能再漂移。
+- `kpiDisplay(input, real)`：只有 `real.source === 'server_outcomes'` 且 `sampleSize > 0` 才显示原值；否则结果型 KPI 一律置灰显示 `—`，附「演示数据 · 非真实发送结果；真实 outcome 由服务端 `/v1/import/outcomes` 回写」。`localCounterKpi()` 保留本地计数但强制标演示。`StatTile` 新增 `demo` prop，逐卡渲染「演示」徽标并弱化色阶。两页共 9 张卡全部经 `toTileProps()` 透出，不留裸数字 KPI。
+- **不引入 jsdom / testing-library**：测试环境仍是 `environment: 'node'`。P2-5 用 `vi.stubGlobal` 注入 `localStorage` / `fetch`，补 20 个行为级反例，覆盖坏 JSON / 版本不符 / 配额降级 / 双重写失败 / 服务不可达不伪造在线 / HTML 错误页降级 / E6009 指引 / 合规尾巴不代生成，以及 KPI 置灰与跨页一致性。组件渲染正确性由 5 张真实截图抽检承担，不伪装成单测。
+- 文档数字改为**动态表述**：`PRD-COVERAGE.md` 明确各批次数字是历史快照、当前以命令实跑为准，门禁项数与 `BLOCKED` 条数不再写死；`ASSESSMENT-2026-11-10.md` 顶部加历史快照口径说明，并对当时即误记的三处（CI 15 步 / 89 tracked / 65 源码配置假通过）就地校正。
+- 截图链可复现：`scripts/capture-screenshots.mjs` 新增 `LEADPILOT_CDP_ATTACH=1`，连接已运行的 CDP 实例而不 spawn / kill 浏览器，绕开本机 node 无法创建子进程的已知环境故障；5 张 PNG 已重生成并逐张抽检。
+
+**后果**：界面上「演示」与「真实结果」第一次可机读区分；`releaseEligible=false`、`accuracyClaim=false`、商业源 `0/6`、integrity / outcome `NO_DATA` 全部不变。gate 新增 4 条**防回退静态护栏**（9 张 KPI 全部走统一口径、行为级测试纳入 vitest include、文档不再写死旧数字、attach 模式存在）；行为级保证由 `src/tests/b9-*.test.ts` 在 CI `Unit tests` 步骤执行，两者边界在门禁脚本注释里写明，不把静态检查冒充行为验证。
+
+**验证**：293 单测 / 79 门禁 / 53 冒烟 / 13 证据自检 / build `358.15 kB` / `check:tracked` 82 源码·97 tracked / AC-03 全绿；三处「改坏实现会红」抽样（KPI 不置灰、退信移出分母、配额不降级）分别精准触发失败，还原后逐字节一致。
 
 ---
 

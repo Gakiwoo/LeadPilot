@@ -3,6 +3,8 @@
 > 评估日期：2026-11-10·基线：`f9bcd69`（`main` / `origin/main` / GitHub API 三处一致）·只读评估，未修改任何源码
 > 方法：三路独立代码评审（服务端 / 前端 / 工程化）+ 本地实跑验证 + 关键 P0 活体复现 + 文档交叉核验
 > 口径：刻意设计的 `DEMO`、商业数据源 `0/6`、Gmail 未接入、`releaseEligible=false` **不计为缺陷**；「不发布」本身不是扣分理由
+>
+> **历史数字口径（B9 · P3-2 补记）**：本文是 B1–B8 各批次的**审计快照**，文中所有「N 单测 / N 门禁 / N 冒烟 / N 步 CI / N tracked」均指该批次完成时点，不代表当前仓库状态；当前基线以 README「质量与验证」与命令实跑为准。个别行当时即为误记，已就地校正并标注：B4 时点「CI 15 步」实为 **12 步**（B7 起 13 步）、「89 tracked」实为 **90**、B6 之前的「65 源码/配置」是 `check-clean-checkout.mjs` 按 basename 跳过 `src/data/` 造成的**假通过**（B6 已修）；「54 项门禁 / 四条阻断」在 B1 时点实为 66 项 / 5 条 `BLOCKED`。这些数字不参与任何发布判定，也不作为门禁输入。
 
 ---
 
@@ -375,7 +377,7 @@
 | 代码正确性 | 2.2 | 4.2 | 66 项问题全收口，28 个行为级反例，`noUncheckedIndexedAccess` 开启；扣分在 `as T` 边界仍靠运行时形状校验兜底、注入式 `fetchImpl` 不覆盖生产路径 |
 | 安全 | 2.0 | 4.3 | SSRF pin IP、token 恒定时间、限流有界、CORS 通配剔除、robots 3xx fail-closed、PII 终检、错误脱敏、CSV 公式注入、代理拓扑鉴权；扣分在代理把 Host 也改写且不带标记头的极端拓扑（无解，只能靠部署规约） |
 | 并发与可靠性 | 3.2 | 4.3 | `ledgerTransact` 快照回滚、tick try/catch、限流淘汰、持久化防饿死、SSE reader cancel；扣分在多实例 Map / 租约未解 |
-| 测试与验证 | 4.2 | 4.8 | 199 单测 / 60 门禁（行为级，不抄常量）/ 启动安全真子进程 / 干净检出全量对账 / CI 15 步；扣分在无真实 provider E2E、无 WCAG 审计 |
+| 测试与验证 | 4.2 | 4.8 | 199 单测 / 60 门禁（行为级，不抄常量）/ 启动安全真子进程 / 干净检出全量对账 / CI **12 步**（B9 校正：原文误记 15 步；B7 起为 13 步）；扣分在无真实 provider E2E、无 WCAG 审计 |
 | 可维护性 | 3.2 | 4.0 | 版本同源、文档统一、旧截图归档；扣分在魔法数字、重复逻辑、巨石路由仍在 |
 | 工程化 / CI / 供应链 | 4.0 | 4.7 | 干净检出清单改为文件系统全量对账、action 固定 SHA、`npm audit --omit=dev` 0 漏洞；扣分在 dev 链 6 条漏洞需跨 major |
 | 文档一致性 | 2.8 | 4.5 | 10+ 处矛盾全修、5 张截图可复现、三批修复记录落盘；扣分在 ADR 历史数字保留（已明确标注为历史记录） |
@@ -411,7 +413,7 @@
 | `npm ci` | 全新安装 169 packages（2m），0 编译错误 |
 | `typecheck` / `test` / `gate` / `build` | exit 0 / **202/202** / **60/60** / `353.78 kB · gzip 119.45 kB` |
 | `smoke` / `verify:restart` / `validate:baseline` | **48/48** / **AC-03 PASS** / SELF-TEST PASSED |
-| 远端 CI | `37f65c2` run `43180916709` 15 步全绿 |
+| 远端 CI | `37f65c2` run `43180916709` **12 步**全绿（B9 校正：原文误记 15 步） |
 
 **顺带抓到两个只在特定环境暴露的问题**：
 
@@ -551,7 +553,7 @@
 | `npm test` | **220 / 220**（11 文件，前端 46 + 服务端 174，0 skipped；新增 3 个 debug 日志反例） |
 | `npm run gate` | **66 / 66**；5 条 `BLOCKED` 保持，`releaseEligible=false` |
 | `npm run evidence:check -- --self-test` | **13 / 13** |
-| `npm run check:tracked` | **65 源码/配置，89 tracked 无缺失** |
+| `npm run check:tracked` | **65 源码/配置，89 tracked 无缺失**（B9 校正：当时 `git ls-files` 实为 90 tracked；且 65 是 B6 修复前按 basename 跳过 `src/data/` 的**假通过**结果，见 §17 / B6 记录） |
 | `npm audit --omit=dev --audit-level=low` | **found 0 vulnerabilities, exit 0** |
 | `npm run smoke` / `npm run verify:restart` | **51 / 51** / **AC-03 PASS** |
 | `npm run validate:baseline -- --self-test` | SELF-TEST PASSED |
@@ -690,3 +692,39 @@
 发布状态**一条未动**：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` 恒 · `accuracyClaim=false` 恒 · 商业数据源 `0/6` · integrity / outcome 均 `NO_DATA`。B8 接回的是数据层，不是采集能力；本地模板是显式 DEMO，不得计作模型产出或评测样本。评分仍按 §17.1 的 **3.7 / 5.0** 口径。
 
 §18.3 的 B8 待办中 **P2-6 已完成**；P2-7、P2-5、P3-1、P3-2、5 张截图重生成与 P3-6 巨石路由重构**仍未开始**。`docs/ASSESSMENT-2026-11-24.html` / `.pdf` 仍未跟踪入库。
+
+---
+
+## 20. B9 收口：残留清单状态更新（P2-6 / P2-7 / P2-5 / P3-1 / P3-2 / 截图）
+
+用户指令「直接开 B9，收这批残留」。范围按报告 §8 的「产品闭环」批次：B8 已完成 P2-6，B9 收剩下五项；**P3-6 按报告明确要求「独立重构批次，不与修复混做」，不纳入本批次**。
+
+### 20.1 实现
+
+- **P2-7**：新增 `src/domain/metrics.ts`（`computeRateStats` / `isSentStatus` / `kpiDisplay` / `localCounterKpi` / `toTileProps`）；`StatTile` 加 `demo` prop（逐卡「演示」徽标 + 置灰色阶）；发信中心 4 张、客户管理 5 张 KPI 全部改为统一口径，结果型指标无真实 outcome 时显示「—」，两页不再各自算分母。
+- **P2-5**：新增 `src/tests/b9-metrics.test.ts`（10 个）与 `src/tests/b9-frontend.test.ts`（10 个），共 **20 个行为级反例**；不引入 jsdom / testing-library，用 `vi.stubGlobal` 注入 `localStorage` / `fetch`。覆盖坏 JSON / 版本不符 / 配额降级 / 双重写失败 / 离线不伪造在线 / HTML 错误页降级 / E6009 指引 / 合规尾巴不代生成。
+- **P3-1 / P3-2**：`PRD-COVERAGE.md` 加「数字口径」说明 + 门禁行改动态表述；本文顶部加历史快照口径说明，并对当时即误记的 3 处（CI 15 步 / 89 tracked / 65 源码配置假通过）就地校正。
+- **截图**：`scripts/capture-screenshots.mjs` 新增 `LEADPILOT_CDP_ATTACH=1`（连接已有 CDP 实例，不 spawn / 不 kill 浏览器），5 张 PNG 重生成并逐张 Visual 抽检：发信中心与客户管理的 KPI 均带「演示」徽标、结果型指标显示「—」，三步管道文案与抽屉 / 设置页完整渲染。
+
+### 20.2 反例有效性
+
+**改坏实现抽样（真实执行、逐字节还原）**：结果型 KPI 不置灰 / 退信移出分母 / 配额超限不降级，三次分别跑两个 B9 测试文件，各自精准触发 `AssertionError`（`exit 1`）；还原后 `src/domain/metrics.ts`（4168/4168）与 `src/data/repository.ts`（1595/1595）与备份逐字节一致。
+
+| 检查 | B9 结果 |
+|---|---|
+| `typecheck` / `build` | 通过 · `358.15 kB / gzip 121.23 kB` |
+| `npm test` | **293 / 293**（17 文件，前端 73 + 服务端 220，0 skipped；较 B8 的 273 **+20**） |
+| `npm run gate` | **79 / 79**（+4 条 B9 防回退护栏）；`releaseBlocked=true`，5 条 `BLOCKED` 由真实判定生成 |
+| `check:tracked` | **82 个源码/配置、97 tracked 无缺失** |
+| `evidence:check --self-test` / `validate:baseline --self-test` | **13 / 13** / PASSED |
+| `npm audit --omit=dev --audit-level=low` | **0 漏洞** |
+| `smoke` / `verify:restart` | **53 / 53**（隔离端口 5182 + memory）/ **AC-03 PASS** |
+| CI | 干净检出 13 步，run 号以 `gh run list` 为准 |
+
+门禁里的 4 条 B9 断言是**静态防回退护栏**（9 张 KPI 全部走 `toTileProps`、测试文件在 vitest include 范围、文档不再写死旧数字、attach 模式存在）；行为级保证由 20 个单测在 CI `Unit tests` 步骤执行。两者边界在脚本注释里写明，不把静态检查冒充行为验证。
+
+### 20.3 残留与边界
+
+§18.3 / §19.3 所列待办中：**P2-6（B8）、P2-7、P2-5、P3-1、P3-2、5 张截图重生成均已收口**；**仅 P3-6 巨石路由重构仍未开始**（独立批次）。`docs/ASSESSMENT-2026-11-24.html` / `.pdf` 仍未跟踪入库。
+
+发布状态**一条未动**：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` 恒 · `accuracyClaim=false` 恒 · 商业数据源 `0/6` · integrity / outcome 均 `NO_DATA`。B9 改的是表达层与验证层，不新增任何真实采集或发送能力；评分仍按 §17.1 的 **3.7 / 5.0** 口径。

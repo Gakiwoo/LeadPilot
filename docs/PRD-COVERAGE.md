@@ -2,6 +2,8 @@
 
 > 基线 v0.9.0 · 2026-11-09 · 图例：✅ 真实实现且可验证 · 🟡 界面/规则/网关真实、外部依赖未接 · ⚠️ 部分实现 · ❌ 未实现
 >
+> B9 变更（ADR-034）：**演示 KPI 不再伪装业务结果** —— `src/domain/metrics.ts` 统一发信中心 / 客户管理的状态白名单与分母，结果型指标在无服务端真实 outcome 时置灰显示「—」并逐卡标「演示」，本地计数器保留数字但强制标注；新增 20 个前端行为级反例（repository 坏数据与配额降级、网关离线不伪造在线、合规尾巴不代生成）。文档数字改为动态表述、历史快照加口径注；5 张界面截图重生成并支持 `LEADPILOT_CDP_ATTACH=1`。**P3-6 巨石路由重构按报告要求另立批次，本轮未做；本轮没有让任何一条 AC 从 🟡 变 ✅，也没有解除任何 Go / No-Go 判据。**
+>
 > B8 变更（ADR-033）：**三步管道在数据层打通** —— 导入 / 研判 / 批量出信 / mbox 导出共用服务端 `companies` 同一批 `domain`。新增 `POST /v1/batch/generate-drafts`（真实 T1，`succeeded / degraded / failed` 分桶，缺原文三件套 / 邮箱 / 产品逐条 `failed` 且零 provider 调用，降级 `body=null` 不伪造正文）、`contact_grade` 导入契约（非法拒行、缺省保守 C 级）、`draftSource` 白名单与 `X-LeadPilot-Demo` DEMO 头、`E4014 / E4015`；前端 `BatchPipelinePanel.tsx` 不再从演示草稿库拼导出项，候选只来自出信结果或显式本地模板。**本轮没有让任何一条 AC 从 🟡 变 ✅，也没有解除任何 Go / No-Go 判据**。
 >
 > v0.9.0 变更（ADR-032 落地）：**用户指定 URL 抓取**真实实现——`server/fetch.mjs`（robots 遵从 / 每域 ≤1 req/s / 8s 超时 / ≤512KB / 只收 HTML 与纯文本 / 重定向逐跳 SSRF 校验 / 拒绝回环私网），新增 `GET /v1/sources/health`、`POST /v1/sources/fetch`、`POST /v1/batch/fetch-sources`；抓取原文标 `user_directed_fetch`，公司 `origin` 仍 `user_imported`，抓取 ≠ 采集、商业 6 类源仍 `0/6`。**本轮同样没有新增任何可宣称的准确率**，AC 统计不变。
@@ -19,6 +21,8 @@
 > v0.3.0 变更：**AC-03 闭环**（`server/store.mjs` 让任务游标 / 缓存 / 审计跨进程恢复）、服务端鉴权 + CORS + 限流、模型快照锁定（`E6008`）、GitHub 仓库与 CI 全链路。
 >
 > v0.2.0 变更：新增真实服务端 LLM 网关（`server/gateway.mjs`）、云端任务编排与 SSE（`server/orchestrator.mjs`）、评测门禁（`server/eval.mjs`）、T1 写信 HTTP 接口，以及前端全链路接入与显式降级。
+
+> **数字口径（B9 收口）**：下表各批次写的「N 个单测 / N 项门禁 / N 项冒烟」都是**该批次完成时的历史快照**，不代表当前总量；当前基线一律以 `npm test` / `npm run gate` / `npm run smoke` / `npm run check:tracked` 的实跑输出为准（README「质量与验证」汇总当前值）。发布门禁的自检项数与 `BLOCKED` 条数由 `scripts/check-release-gates.mjs` 与 `evaluateReleaseEvidence()` 真实生成，本文档不再写死，避免再次出现「文档说四条、实跑五条」的漂移。
 
 ## 一、功能模块对照
 
@@ -85,7 +89,7 @@
 | T0 → judge 事实链（v0.5.0） | ✅ | `<t0_facts>` 注入 Prompt、冲突代码裁决、缓存键带规则版本、全路径带 `t0.used`；5 个单测 + 2 项冒烟（ADR-022）。**前端演示数据不伪造 sources** |
 | 385 家标注契约（v0.5.0） | ✅（契约/校验器） | `shared/baseline-contract.json` + `server/baseline.mjs`；`GET /v1/eval/baseline/contract`、`POST /v1/eval/baseline/validate`；反例夹具 + CLI 自检 + 门禁断言。**标注数据仍为 0，评测仍 `NO_DATA`**（ADR-020） |
 | 前端服务层边界（v0.5.0） | ✅ | `adapters.ts` 唯一 re-export 入口；`npm run gate` 静态扫描组件/store/App 禁止直连实现，CI 强制执行（ADR-019） |
-| 发布门禁脚本（v0.9.0） | ✅ | `scripts/check-release-gates.mjs` **54 项**自检，覆盖账本幂等、跨进程恢复、T0 冲突裁决、基准反例、适配器边界、数据源 0/6、diff 纯函数、队列自动出队、定位锁定 / 导入≠采集 / 导出≠发送 / 熔断，以及 v0.8.0 新增的「无样本必须 `NO_DATA` / 小样本不得 PASSED / 退信率超限必须 BLOCKED / 发布状态三分离 / 产品文案禁止宣称准确率」与 v0.9.0 新增的「只抓用户指定 URL / robots 遵从 / 限速 / SSRF 命中不发起请求 / 抓取 ≠ 采集」；输出 `releaseBlocked=true` 与四条阻断（integrity / outcome / provider 快照 / OAuth·EV·法务），`LEADPILOT_REQUIRE_BASELINE=1` 时才真正卡 CI |
+| 发布门禁脚本（v0.9.0 + B9） | ✅ | `scripts/check-release-gates.mjs` 自检项数**由 `npm run gate` 实跑输出决定，本文档不写死**：覆盖账本幂等、跨进程恢复、T0 冲突裁决、基准反例、适配器边界、数据源 0/6、diff 纯函数、队列自动出队、定位锁定 / 导入≠采集 / 导出≠发送 / 熔断，以及 v0.8.0 的「无样本必须 `NO_DATA` / 小样本不得 PASSED / 退信率超限必须 BLOCKED / 发布状态三分离 / 禁止宣称准确率」、v0.9.0 的「只抓用户指定 URL / robots 遵从 / 限速 / SSRF」、B7 的 G2 抑制表、B8 的三步管道同源、B9 的演示 KPI 护栏。**阻断项由 `evaluateReleaseEvidence()` 真实生成**（当前 5 条 `BLOCKED`，不是历史文档里的「四条」）；`releaseBlocked=true`，`LEADPILOT_REQUIRE_BASELINE=1` 时才真正卡 CI |
 | CI 加固（v0.4.0） | ✅ | `Tracked sources sanity` 防止 `.gitignore` 再次误伤；`AC-03 process restart` 用 `scripts/verify-restart.sh` 真实杀进程 → 直读 SQLite → 同库重启 → 恢复值逐项比对 → 断点续跑 |
 | T0 规则事实抽取 | ✅ | `server/t0.mjs` + 共享协议 `t0Extraction` 词表；8 个单测 + 3 项冒烟覆盖可核验引用 / 不补零 / PII 清洗 / 写信锚点接入（ADR-016） |
 | 数据源适配器注册表 | ✅（契约） | `server/data-sources.mjs`：6 类源 health、显式 `demo` / `blocked`、`collect()` 聚合去重；5 个单测 + 2 项冒烟。**真实实现仍未接入**（ADR-017） |

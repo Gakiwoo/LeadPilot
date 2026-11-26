@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { AlertTriangle, FileText, Gauge, Mail, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { assertNoBatchSend, checkSendGates, type SendGateResult } from '@/domain/compliance'
+import { computeRateStats, isSentStatus, kpiDisplay, localCounterKpi, toTileProps } from '@/domain/metrics'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, DemoBanner, EmptyState, SectionTitle, StatTile, StatusBadge } from '@/components/ui'
 import BatchPipelinePanel from './BatchPipelinePanel'
@@ -15,16 +16,18 @@ export default function OutreachView() {
   const [gateResult, setGateResult] = useState<SendGateResult | null>(null)
 
   const gateCompany = companies.find((c) => c.id === gateCompanyId) ?? companies[0]
-  const sentCompanies = companies.filter((c) => ['sent', 'delivered', 'replied', 'interested', 'quoted', 'won', 'bounced'].includes(c.status))
-  const bounceRate = sentCompanies.length ? companies.filter((c) => c.status === 'bounced').length / sentCompanies.length : 0
-  const replyRate = sentCompanies.length ? companies.filter((c) => ['replied', 'interested', 'quoted', 'won'].includes(c.status)).length / sentCompanies.length : 0
+  // B9 / P2-7：与 CRM 页共用同一份状态白名单与分母，杜绝两页回复率互相矛盾
+  const rates = computeRateStats(companies)
+  const sentCompanies = companies.filter((c) => isSentStatus(c.status))
+  // 前端当前不读取服务端 outcome 回写，结果型 KPI 一律按 DEMO 展示（不把演示数字当业务结果）
+  const realOutcomes = null
 
   const runGate = () => {
     if (!gateCompany) return
     const r = checkSendGates({
       contact: gateCompany.contacts[0], blacklist: settings.blacklist,
       sentToday: settings.gmail.sentToday, dailyLimit: settings.gmail.dailyLimit,
-      bounceRate, consecutiveHardBounces: 0, singleConfirmed: false,
+      bounceRate: rates.bounceRate, consecutiveHardBounces: 0, singleConfirmed: false,
     })
     setGateResult(r)
     showToast(r.allowed ? '四道闸门全部通过' : `${r.failed.length} 道闸门未通过，已阻止发送`, r.allowed ? 'ok' : 'warn')
@@ -37,10 +40,10 @@ export default function OutreachView() {
       <BatchPipelinePanel />
 
       <div className="grid grid-cols-4 gap-3">
-        <StatTile label="今日已发 / 额度" value={`${settings.gmail.sentToday} / ${settings.gmail.dailyLimit}`} sub="个人 Gmail 上限 500，产品默认 100 留安全余量" />
-        <StatTile label="硬退信率" value={`${(bounceRate * 100).toFixed(1)}%`} sub={bounceRate > 0.03 ? '超过 3%：发送熔断' : '阈值 ≤ 2%，3% 触发熔断'} tone={bounceRate > 0.03 ? 'rose' : 'emerald'} />
-        <StatTile label="回复率" value={`${(replyRate * 100).toFixed(1)}%`} sub="唯一可靠强信号，不以打开率为核心指标" tone="emerald" />
-        <StatTile label="草稿队列" value={outreach.length} sub="Gmail 未接入：草稿仅存本地队列，无自动重试与真实发送" />
+        <StatTile {...toTileProps(localCounterKpi({ label: '今日已发 / 额度', value: `${settings.gmail.sentToday} / ${settings.gmail.dailyLimit}`, sub: '个人 Gmail 上限 500，产品默认 100 留安全余量' }))} />
+        <StatTile {...toTileProps(kpiDisplay({ label: '硬退信率', value: `${(rates.bounceRate * 100).toFixed(1)}%`, sub: rates.bounceRate > 0.03 ? '超过 3%：发送熔断' : '阈值 ≤ 2%，3% 触发熔断', tone: rates.bounceRate > 0.03 ? 'rose' : 'emerald' }, realOutcomes))} />
+        <StatTile {...toTileProps(kpiDisplay({ label: '回复率', value: `${(rates.replyRate * 100).toFixed(1)}%`, sub: '唯一可靠强信号，不以打开率为核心指标', tone: 'emerald' }, realOutcomes))} />
+        <StatTile {...toTileProps(localCounterKpi({ label: '草稿队列', value: outreach.length, sub: 'Gmail 未接入：草稿仅存本地队列，无自动重试与真实发送' }))} />
       </div>
 
       <div className="grid grid-cols-2 gap-3">

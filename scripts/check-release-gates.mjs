@@ -769,6 +769,38 @@ function walkTs(dir, out = []) {
     rejected.ok === false && rejected.code === 'E4015' && !rejected.content)
 }
 
+// 7c. B9 · 演示 KPI 护栏 / 文档数字动态化 / 截图可复现
+//     边界：这里是「防 UI 回退」的静态护栏，B9 的行为级保证在
+//     src/tests/b9-metrics.test.ts 与 b9-frontend.test.ts，由 CI Unit tests 步骤真实执行。
+{
+  const views = ['src/components/outreach/OutreachView.tsx', 'src/components/crm/CrmView.tsx']
+    .map((f) => readFileSync(join(ROOT, f), 'utf8'))
+  const tiles = views.flatMap((s) => [...s.matchAll(/<StatTile\b[\s\S]*?\/>/g)].map((m) => m[0]))
+  check('B9 / P2-7 护栏：两页 9 张 KPI 卡全部走统一口径函数，不留裸数字 KPI',
+    tiles.length === 9 && tiles.every((t) => t.includes('toTileProps(')),
+    `tiles=${tiles.length} wrapped=${tiles.filter((t) => t.includes('toTileProps(')).length}`)
+  check('B9 / P2-5 护栏：行为级反例文件纳入 vitest include 覆盖范围，且两页共用 metrics.ts',
+    readFileSync(join(ROOT, 'vite.config.ts'), 'utf8').includes("src/**/*.test.ts")
+    && existsSync(join(ROOT, 'src/tests/b9-metrics.test.ts'))
+    && existsSync(join(ROOT, 'src/tests/b9-frontend.test.ts'))
+    && existsSync(join(ROOT, 'src/domain/metrics.ts'))
+    && views.every((v) => v.includes('@/domain/metrics')))
+
+  const coverage = readFileSync(join(ROOT, 'docs/PRD-COVERAGE.md'), 'utf8')
+  const assessment = readFileSync(join(ROOT, 'docs/ASSESSMENT-2026-11-10.md'), 'utf8')
+  check('B9 / P3-1·P3-2：文档不再写死「54 项 / 四条阻断」，历史数字改为动态表述与快照注',
+    /数字口径（B9 收口）/.test(coverage)
+    && !/\*\*54 项\*\*自检/.test(coverage)
+    && !/与四条阻断（/.test(coverage)
+    && /历史数字口径（B9/.test(assessment)
+    && /12 步\*\*（B9 校正/.test(assessment),
+    'PRD-COVERAGE / ASSESSMENT-2026-11-10')
+
+  const capture = readFileSync(join(ROOT, 'scripts/capture-screenshots.mjs'), 'utf8')
+  check('B9 截图链：attach 模式存在且不关闭外部启动的浏览器',
+    /LEADPILOT_CDP_ATTACH/.test(capture) && /if \(chrome\) chrome\.kill/.test(capture))
+}
+
 // 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦
 //    旧实现末尾写死 evaluateIntegrity([]) / evaluateOutcome([]) + 5 条硬编码 BLOCKED，
 //    即使真实样本存在也永远 NO_DATA。下面用行为级断言证明判定随输入真实变化。
