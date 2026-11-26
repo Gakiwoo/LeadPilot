@@ -607,3 +607,50 @@
 - B7：G2 服务端黑名单依赖调用方、`settleBilling` 失败不释放 held、CI 补 `evidence:check --self-test`、`clientError` / OPTIONS / smoke 服务可达性前提、探活代理。
 - B8：UI 三步管道数据断裂与批量出信、演示 KPI 未标注且跨页矛盾、前端关键单测、`docs/PRD-COVERAGE.md` 仍写「54 项 / 四条阻断」的历史漂移、截图重生成。
 - 外部：provider 快照注入、真实样本 100 / 30 + attestation、法务意见；OAuth / CASA / EV 取决于产品形态拍板。
+
+---
+
+## 18. B7 收口（2026-11-26）
+
+触发：用户「直接开 B7」。按报告 §8 的 B7 范围（P2-1 / P2-2 / P2-3 / P2-4 / P2-8 / P2-9 / P3-3 / P3-4 / P3-5）逐项落地，**不夹带 B8 的产品闭环改动**。评估报告 `docs/ASSESSMENT-2026-11-24.html` / `.pdf` 仍未入库，等用户拍板。
+
+### 18.1 九项缺口与修复
+
+| 编号 | 修复 |
+|---|---|
+| P2-1 | `server/store.mjs` 三种实现（memory / json / sqlite）新增 `suppressions` 表与 `suppressionUpsert / Get / List`；新增 `POST /v1/import/suppressions` 与 `GET /v1/suppressions`；`checkExportGates()` 增加 `knownDomains`（缺失即 fail-closed）与 `serverBlacklist`，`exportDrafts()` 从持久化表读名单、校验 `domain` 必须已入库；`importOutcomes()` 的 `unsubscribed / invalid` 自动写抑制表；调用方 `blacklist` 降级为「临时补充」而非依赖 |
+| P2-2 | `settleBilling()` 在 `!r.ok` 时 `ledger.release()` 全额释放冻结额，返回 `settleFailed / released / releaseCode`；新增 `exceptionBillingNote()` 区分「已结算 / 结算失败已释放 / 结算失败释放失败 / 从未结算」，异常路径不再谎报已完成结算 |
+| P2-3 | CI 新增 `Release evidence validator self-test`（`npm run evidence:check -- --self-test`），干净检出 **12 → 13 步** |
+| P2-4 | `clientError` 兜底行为级反例：用原始 socket 发畸形请求头，断言响应含 `Content-Length: 0`（Node 默认实现没有该头），且 `/health` 仍 200；删掉业务 handler 就会红 |
+| P2-8 | `scripts/e2e-smoke.mjs` 启动时先探活 `/health`；服务未起明确输出 `SMOKE_PRECONDITION` 并以退出码 2 退出，不再打印「0/45 checks passed」把环境问题伪装成代码回归 |
+| P2-9 | `server/index.mjs` 把 `OPTIONS` 短路移到 `rateOk()` 之后：预检计入限流但仍免鉴权 |
+| P3-3 | CI 探活 `curl` 补 `--noproxy '*'`，避免自托管 runner 的代理造成假失败 |
+| P3-4 | 冒烟脚本的 `minSamples=100 / windowSize=100 / minSamples=30` 改为读 `GET /v1/eval/integrity/gates` 与 `/v1/eval/outcome/gates`，样本量按 manifest 动态构造，契约改值不再假失败 / 假通过 |
+| P3-5 | `reserveFailure()` 按 `hold.code` 分派 `E4001 / E4002 / E4003 / E4005` 四种文案，不再一律说成「已结算」 |
+
+配套：`BatchPipelinePanel.tsx` 的导出拒绝 toast 改为展示 `blocked[0].reasons` 首因；命中「未导入客户库 / G2 抑制」时给出「先在导入线索步骤导入域名」的操作指引，避免 B7 的 fail-closed 让 UI 看起来坏掉（B8 才打通 store↔server 三步管道）。
+
+### 18.2 反例有效性与实跑
+
+新增 `server/tests/b7-hardening.test.mjs` **12 个行为级反例**：抑制名单不传 `blacklist` 仍拦、跨 pipeline 实例、persistent store 跨进程恢复、终态自动登记、未知域名与缺上下文 fail-closed、HTTP 端点闭环、`settle` 失败释放与双失败如实标注、四种错误码文案分派、`OPTIONS` 限流、`clientError` 兜底。
+
+**改坏实现抽样（真实执行、逐字节还原）**：把 `OPTIONS` 短路移回限流前 / 去掉 `Content-Length: 0` / 让 `settle` 失败不 release，三次分别跑新测试文件，**每次恰好 1 个用例红、其余 11 个绿（exit 1）**；还原后 `server/index.mjs` / `server/gateway.mjs` 与备份逐字节一致。这证明反例不是「抄常量」的假保证。
+
+| 检查 | B7 结果 |
+|---|---|
+| `typecheck` / `build` | 通过 · `354.03 kB / gzip 119.60 kB` |
+| `npm test` | **248 / 248**（13 文件，前端 46 + 服务端 202，0 skipped；较 B6 的 236 **+12**） |
+| `npm run gate` | **69 / 69**（新增 3 条 B7 行为级断言）；`releaseBlocked=true`，5 条 `BLOCKED` 由真实判定生成 |
+| `check:tracked` | **77 个源码/配置、92 tracked 无缺失** |
+| `evidence:check --self-test` / `validate:baseline --self-test` | **13 / 13** / PASSED |
+| `npm audit --omit=dev --audit-level=low` | **0 漏洞** |
+| `smoke` / `verify:restart` | **51 / 51**（隔离端口 5182 + memory）/ **AC-03 PASS**；另实测服务未起时退出码 2 |
+| GitHub Actions | **`45754511570` success**，干净检出 13 步全绿（含新增证据自检 / 生产依赖审计 / AC-03） |
+
+提交链：`fd4288f`（B6）→ **`510af05` fix(b7): …**（12 文件 / +622 −47）→ 本节 docs 记录。临时后台服务 `OVhHLq` 已停止。
+
+### 18.3 边界与残留
+
+发布状态**一条未动**：`internalPreviewReady=false` / `externalValidated=false` / `evidenceReady=false` / `releaseEligible=false` 恒 · `accuracyClaim=false` 恒 · 商业数据源 `0/6` · integrity / outcome 均 `NO_DATA`。B7 是合规与验证链路止血，不改变「内测工具」定位，评分仍按 §17.1 的 **3.7 / 5.0** 口径，待 B8 后重新复核。
+
+**B8 待办（未开始）**：P2-6 打通前端演示草稿库 ↔ 服务端 `companies` 三步管道与批量写信、P2-7 演示 KPI 标注与跨页矛盾、P2-5 前端服务层 / 组件关键单测、P3-1 `docs/PRD-COVERAGE.md` 仍写「54 项 / 四条阻断」的漂移、P3-2 历史数字动态化、5 张截图重生成。P3-6 巨石路由重构另立批次。
