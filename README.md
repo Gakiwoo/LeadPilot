@@ -161,10 +161,10 @@ npm run dev
 ```bash
 npm run dev            # 前端开发服务器
 npm run cloud          # 后端（网关 + 任务编排）
-npm test               # 单元测试：321 个用例，19 个文件
+npm test               # 单元测试：351 个用例，20 个文件
 npm run lint           # 代码检查
 npm run typecheck      # 类型检查
-npm run gate           # 发布门禁自检（85 项）
+npm run gate           # 发布门禁自检（89 项）
 npm run build          # 生产构建
 npm run smoke          # 端到端冒烟（需先启动后端）
 npm run verify:restart # 杀进程后断点续跑验证
@@ -178,7 +178,7 @@ src/      前端（React + TypeScript）
   components/   页面与组件（layout / ui / 各业务页）
   domain/       纯计算逻辑，不碰界面也不联网
   services/     所有对外请求的唯一出口
-  store/        全局状态
+  store/        全局状态（组合根 useAppStore.ts + 按域拆分的 slices/）
   data/ types/  演示数据、存储适配、数据模型
 
 server/   后端（Node 原生 http，零依赖）
@@ -263,7 +263,7 @@ scripts/        校验与发布门禁脚本
 
 | 文档 | 里面有什么 |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 技术决策记录（ADR-001–035） |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 技术决策记录（ADR-001–036） |
 | [`docs/PM-REVIEW.md`](docs/PM-REVIEW.md) | 产品评审、范围取舍、为什么砍掉某些功能 |
 | [`docs/PRD-COVERAGE.md`](docs/PRD-COVERAGE.md) | 需求逐条对照：做了 / 没做 / 为什么 |
 | [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | 发布前还缺哪些证据和外部审批 |

@@ -826,7 +826,9 @@ function walkTs(dir, out = []) {
     batchSrc.includes('opts.existingFingerprints')
     && /validateRows\(parsed\.rows, \{ existingDomains: existingDomains\(\), existingFingerprints: existingFingerprints\(\) \}\)/.test(batchSrc))
 
-  const storeSrc = readFileSync(join(ROOT, 'src/store/useAppStore.ts'), 'utf8')
+  // P3-6 拆分后 store 是多文件目录，按目录聚合扫描：
+  // 断言的是「任务出库这条链路接了三重指纹」，不是「某一行必须待在某个文件里」。
+  const storeSrc = walkTs(join(ROOT, 'src/store')).map((f) => readFileSync(f, 'utf8')).join('\n')
   check('AC-05 已接进任务出库：startTask 按三重指纹过滤，不再只看域名',
     storeSrc.includes("from '@/domain/dedupe'")
     && /dedupeByFingerprint\(candidates, \(c\) => c\)/.test(storeSrc)
@@ -844,6 +846,41 @@ function walkTs(dir, out = []) {
   const coverageAc05 = readFileSync(join(ROOT, 'docs/PRD-COVERAGE.md'), 'utf8')
   check('AC-05 文档：不再声称三重指纹未实现，且写明覆盖范围',
     /\| AC-05 \|[^|]*\| ✅ \|/.test(coverageAc05) && /三重指纹/.test(coverageAc05))
+}
+
+// 7e. P3-6 · store 巨石拆分
+//     边界：静态护栏只能防「又长回巨石」和「拆一半留残骸」；
+//     行为等价由 tests/frontend/store-actions.test.ts 的 30 条特征测试在 CI Unit tests 执行。
+//     拆分顺序是「先绿 → 再重构 → 再绿」，那 30 条在拆分前后必须一字不差通过。
+{
+  const entryPath = join(ROOT, 'src/store/useAppStore.ts')
+  const entry = readFileSync(entryPath, 'utf8')
+  const entryLines = entry.split('\n').length
+  check('P3-6 组合根不再长成巨石：useAppStore.ts ≤ 80 行，且不自己写任何动作实现',
+    entryLines <= 80
+    && !/startTask:\s*\(/.test(entry)
+    && !/setCompanyStatus:\s*\(/.test(entry)
+    && !/judgeWithGateway:\s*async/.test(entry),
+    `lines=${entryLines}`)
+
+  const requiredStoreFiles = [
+    'src/store/types.ts', 'src/store/defaults.ts', 'src/store/demo-bootstrap.ts',
+    'src/store/runtime.ts', 'src/store/cloud-events.ts', 'src/store/persistence.ts',
+    'src/store/slices/ui.ts', 'src/store/slices/task.ts', 'src/store/slices/company.ts',
+    'src/store/slices/outreach.ts', 'src/store/slices/settings.ts',
+    'src/store/slices/gateway.ts', 'src/store/slices/reset.ts',
+  ]
+  const missing = requiredStoreFiles.filter((f) => !existsSync(join(ROOT, f)))
+  check('P3-6 拆分骨架齐备：slice 与支撑模块各就各位，没有拆一半留残骸',
+    missing.length === 0, `missing=${missing.join(',') || 'none'}`)
+
+  check('P3-6 对外契约未变：AppState 定义在 types，ViewKey 等仍从组合根可导入',
+    /export type \{ Filters, QuickFilter, SortKey, ViewKey, ToastTone \} from '\.\/types'/.test(entry)
+    && readFileSync(join(ROOT, 'src/store/types.ts'), 'utf8').includes('export interface AppState'))
+
+  check('P3-6 行为等价有据：30 条特征测试在仓库内且纳入 vitest include',
+    existsSync(join(ROOT, 'tests/frontend/store-actions.test.ts'))
+    && readFileSync(join(ROOT, 'config/vite.config.ts'), 'utf8').includes('tests/**/*.test.ts'))
 }
 
 // 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦

@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-034 B9 演示 KPI 口径与文档动态化；ADR-035 B10 AC-05 三重指纹去重；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-034 B9 演示 KPI 口径与文档动态化；ADR-035 B10 AC-05 三重指纹去重；ADR-036 P3-6 客户端 store 按 slice 拆分；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
 
 > **目录分层（v0.9.1 重构）**：ADR 正文记录的是做决策当时的路径，保留原样不追改（决策理由与文件位置无关）。当前实际布局见 README「工程结构」，映射如下：
 > `server/{protocol,t0,ledger,eval,baseline,data-sources,release-evidence}.mjs` → `server/core/`；
@@ -442,6 +442,34 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **后果**：AC-05 从 ⚠️ 升 ✅（覆盖范围明确写在 `PRD-COVERAGE.md`：所有会产生客户记录的入口都经过这两个函数；真实商业源仍 0/6，接入后同样走该入口）。同行名同国的真实不同公司会被判重，代价是有意接受的 —— 因此每条判重都留 `reason`，且不同国家绝不合并。`releaseEligible=false`、`accuracyClaim=false`、商业源 `0/6` 全部不变，本轮不解除任何 Go / No-Go 判据。gate 新增 6 条静态护栏（唯一真源 / 无第二份实现 / 已接进导入管道 / 已接进任务出库 / 夹具两侧共用 / 文档口径），行为级保证由 28 个反例在 CI `Unit tests` 执行，两者边界在门禁脚本注释里写明，不把静态检查冒充行为验证。
 
 **验证**：321 单测（新增 28）/ 85 门禁 / 冒烟 53 / build / `check:tracked` 全绿，CI `45969154967` 九步全过；三处「改坏实现会红」抽样（客户端只按域名判重、服务端库内不查指纹、后缀不按长度倒序）分别精准触发失败，还原后三个文件 SHA-256 逐一比对一致。
+
+---
+
+## ADR-036 · P3-6 客户端 store 按 slice 拆分（行为等价重构）
+
+**背景**：独立评估的 P3-6 指出两处巨石：`server/index.mjs` 729 行与 `src/store/useAppStore.ts` 671 行（B10 后 719 行），并要求**独立批次，不与修复混做**。服务端那半已由目录分层批次拆成 `app.mjs` + `http/` + `routes/`；客户端 store 一直留着，成了仓库里唯一还在的巨石。
+
+风险点不在「拆」，而在「拆的过程中顺手改语义」：store 管着扣点、状态机红线、合规闸门、撤销副作用，任何一处笔误都是资损或合规事故，而当时的测试只覆盖了 `addOutreach` 的三条终态用例。
+
+**决策**：
+
+- **先补特征测试，再动刀。** 顺序固定为「先绿 → 再重构 → 再绿」：先写 30 条 `tests/frontend/store-actions.test.ts`，在**未重构的代码**上跑绿，把现状逐条钉住；重构后这套断言必须一字不差通过，以此证明是行为等价重构。断言只描述「现在是什么样」，不描述「我认为应该是什么样」。
+- 按域拆成 7 个 slice + 4 个支撑模块，组合根只做组装：
+  - `slices/ui.ts`（视图/抽屉/筛选/选中/Toast）、`slices/task.ts`（启动与暂停继续中止，唯一扣点处）、`slices/company.ts`（状态机与撤销）、`slices/outreach.ts`（草稿队列 + G2 硬拦）、`slices/settings.ts`（设置与点数镜像）、`slices/gateway.ts`（网关探测与重新研判）、`slices/reset.ts`（演示重置，唯一跨全字段的动作）；
+  - `cloud-events.ts`（SSE 事件 → 任务进度）、`persistence.ts`（节流落盘）、`runtime.ts`（运行器/定时器/SSE 游标等生命周期句柄）、`demo-bootstrap.ts` + `defaults.ts`（演示数据与初始常量）、`types.ts`（对外契约）。
+- **对外形状一个字都不改**：`AppState` 仍是原来那个扁平对象，组件继续 `useAppStore((s) => s.xxx)`，`ViewKey` 等类型仍从 `useAppStore` 导出，`src/app/router.ts` 与全部业务组件零改动。
+- 三条实现层面的取舍：
+  - 生命周期句柄（`TaskRunner` / Timer / `cloudClose` / `cloudCursor`）**必须留在模块作用域**（`runtime.ts`），不能进 state。否则每次 `setState` 都会让 React 去 diff 一个运行器实例，持久化也会试图把它塞进 localStorage。`cloudCursor` 同时被 task slice（续跑回传）和 cloud-events（收事件更新）读写，所以只能有一份。
+  - `cloud-events` 改成工厂注入 `set / get`（`createCloudEventHandler`），不再直接 `useAppStore.setState`，否则 slice 要反向 import 组合根形成循环依赖。
+  - 初始数据（companies / tasks / outreach / settings）**只由 `demo-bootstrap` 提供**，slice 内不写占位值；组合根把它们放在 spread 的最后，防止被切片的默认值盖掉。
+- 类型用 `Pick<AppState, ...>` 声明每个 slice 负责的字段，编译器兜住「某个动作忘了实现」与「实现了但没并回 AppState」两类漏项。
+- 门禁护栏同步调整：AC-05 那条「已接进任务出库」原本按文件路径读 `useAppStore.ts`，拆分后**真的变红了**（证明断言有效），改为按 `src/store` 目录聚合扫描 —— 断言的是「这条链路接了去重」，不是「某一行必须待在某个文件里」。新增 4 条 P3-6 护栏：组合根 ≤ 80 行且不自写动作、13 个 slice/支撑文件齐备、对外契约未变、特征测试在仓库且纳入 vitest include。
+
+**后果**：`useAppStore.ts` 从 719 行降到 55 行，最长切片 `slices/task.ts` 约 230 行。前端产物从 `365.94 kB / gzip 124.78 kB` 微增到 `366.60 kB / gzip 125.21 kB`（+0.66 kB / +0.43 kB），来自新增的模块边界与重新导出，属于可接受代价，不引入任何运行时开销。行为零变化：351 单测（含 30 条特征测试）、89 门禁、53 冒烟全绿，`releaseEligible=false`、商业源 `0/6` 等发布边界一条未动。
+
+**验证**：三处「改坏实现会红」抽样迁移到 slice 上验证灵敏度未被稀释 —— `slices/task.ts` 去掉筛选重置、`slices/company.ts` 的 undo 不回滚黑名单、`slices/ui.ts` 切视图不清选中，各自精准触发 1 条失败，还原后三个文件 SHA-256 逐一一致。CI `见提交后补充`。
+
+**未做**：`src/components/settings/SettingsView.tsx`（419 行）等组件级拆分不在本批次内；`slices/task.ts` 仍是最长的切片，若后续继续增长可再按「本地运行器 / 云端编排」拆两片。
 
 ---
 
