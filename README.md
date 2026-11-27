@@ -161,10 +161,10 @@ npm run dev
 ```bash
 npm run dev            # 前端开发服务器
 npm run cloud          # 后端（网关 + 任务编排）
-npm test               # 单元测试：293 个用例，17 个文件
+npm test               # 单元测试：321 个用例，19 个文件
 npm run lint           # 代码检查
 npm run typecheck      # 类型检查
-npm run gate           # 发布门禁自检（79 项）
+npm run gate           # 发布门禁自检（85 项）
 npm run build          # 生产构建
 npm run smoke          # 端到端冒烟（需先启动后端）
 npm run verify:restart # 杀进程后断点续跑验证
@@ -248,6 +248,7 @@ scripts/        校验与发布门禁脚本
 | 点数账本（预扣 / 结算 / 退款，幂等） | ✅ 可用 |
 | 批量导入 → 研判 → 出信 → 导出 → 回写 | ✅ 内测可用 |
 | 用户指定网址抓取 | ✅ 可用 |
+| 重复线索去重（域名 + 公司名归一化 + 国家三重指纹） | ✅ 可用（导入与任务出库同一套规则） |
 | 真实 AI 调用 | 🟡 配好 Key 和版本号即可用 |
 | 六类商业数据源 | ⚪ 一个都没接（如实显示 0/6） |
 | 人工标注对照测试 | ❌ 决定不做，所以不宣称准确率 |
@@ -262,11 +263,12 @@ scripts/        校验与发布门禁脚本
 
 | 文档 | 里面有什么 |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 技术决策记录（ADR-001–034） |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 技术决策记录（ADR-001–035） |
 | [`docs/PM-REVIEW.md`](docs/PM-REVIEW.md) | 产品评审、范围取舍、为什么砍掉某些功能 |
 | [`docs/PRD-COVERAGE.md`](docs/PRD-COVERAGE.md) | 需求逐条对照：做了 / 没做 / 为什么 |
 | [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | 发布前还缺哪些证据和外部审批 |
 | [`shared/model-protocol.json`](shared/model-protocol.json) | 前后端共用的协议定义（改这里两边一起变） |
+| [`shared/dedupe-contract.json`](shared/dedupe-contract.json) | 前后端共用的去重规则（公司名后缀表、国家别名、判重口径） |
 
 ---
 

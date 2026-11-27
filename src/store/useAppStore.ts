@@ -5,6 +5,7 @@ import type {
 import { buildDemoCompanies, DEMO_TASK_ID } from '@/data/demo-data'
 import { localRepository } from '@/data/repository'
 import { DEPTH_CONFIG } from '@/domain/constants'
+import { dedupeByFingerprint, fingerprintKeys } from '@/domain/dedupe'
 import { applyTransition, canTransition } from '@/domain/state-machine'
 import { checkSendGates } from '@/domain/compliance'
 import { acceptModelJudgement } from '@/domain/llm-judgement'
@@ -357,10 +358,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
       companyIds: [],
     }
-    const existingDomains = new Set(state.companies.map((c) => c.domain))
-    const pool = DEMO_ENABLED
-      ? buildDemoCompanies(120).filter((c) => !existingDomains.has(c.domain))
-      : []
+    // AC-05：任务出库同样按三重指纹走 —— 先算库内已有指纹，再对本批候选做同期去重。
+    // 只按域名过滤会漏掉「同一家公司换了国别后缀 / 经销域名又出现」的重复线索。
+    const knownKeys = new Set(state.companies.flatMap((c) => fingerprintKeys(c)))
+    const candidates = DEMO_ENABLED ? buildDemoCompanies(120) : []
+    const { unique, duplicates } = dedupeByFingerprint(candidates, (c) => c)
+    const pool = unique.filter((c) => !fingerprintKeys(c).some((k) => knownKeys.has(k)))
+    const existingSkipped = unique.length - pool.length
+    const skipped = candidates.length - pool.length
+    if (skipped > 0) {
+      task.progress.log.push(logLine(
+        `三重指纹去重：候选 ${candidates.length} 家 → 跳过 ${skipped} 家（库内已存在 ${existingSkipped} 家 / 本批内重复 ${duplicates.length} 家），实际可入库候选 ${pool.length} 家`,
+      ))
+    }
 
     set((s) => ({
       tasks: [task, ...s.tasks],

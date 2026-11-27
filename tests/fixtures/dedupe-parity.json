@@ -1,0 +1,183 @@
+{
+  "contract": "dedupe-fingerprint-v1",
+  "version": "1.0.0",
+  "note": "跨语言一致性夹具：客户端 src/domain/dedupe.ts 与服务端 server/core/dedupe.mjs 必须对同一条 input 产出完全相同的 fingerprint。任一侧改规则而另一侧没跟，两个测试文件会同时红。",
+  "cases": [
+    {
+      "id": "strip-gmbh-and-domain-noise",
+      "input": { "domain": "https://WWW.Rhein-Hydraulik.de:443/about?x=1", "name": "Rhein Hydraulik Handel GmbH", "country": "德国" },
+      "expect": {
+        "domain": "rhein-hydraulik.de",
+        "nameKey": "rhein hydraulik handel",
+        "countryKey": "DE",
+        "basis": "domain",
+        "keys": ["d:rhein-hydraulik.de", "n:rhein hydraulik handel|c:DE"]
+      }
+    },
+    {
+      "id": "strip-multi-suffix",
+      "input": { "domain": "acme.example", "name": "Acme GmbH & Co. KG", "country": "Germany" },
+      "expect": {
+        "domain": "acme.example",
+        "nameKey": "acme",
+        "countryKey": "DE",
+        "basis": "domain",
+        "keys": ["d:acme.example", "n:acme|c:DE"]
+      }
+    },
+    {
+      "id": "fullwidth-and-punctuation",
+      "input": { "domain": "", "name": "ＡＣＭＥ Ｔｒａｄｉｎｇ　ＬＴＤ", "country": "uk" },
+      "expect": {
+        "domain": "",
+        "nameKey": "acme trading",
+        "countryKey": "GB",
+        "basis": "name_country",
+        "keys": ["n:acme trading|c:GB"]
+      }
+    },
+    {
+      "id": "cjk-ltd",
+      "input": { "domain": "", "name": "深圳寇德精密制品有限公司", "country": "中国" },
+      "expect": {
+        "domain": "",
+        "nameKey": "深圳寇德精密制品",
+        "countryKey": "CN",
+        "basis": "name_country",
+        "keys": ["n:深圳寇德精密制品|c:CN"]
+      }
+    },
+    {
+      "id": "cjk-stock-company-longest-suffix-first",
+      "input": { "domain": "", "name": "深圳寇德精密制品股份有限公司", "country": "中国" },
+      "expect": {
+        "domain": "",
+        "nameKey": "深圳寇德精密制品",
+        "countryKey": "CN",
+        "basis": "name_country",
+        "keys": ["n:深圳寇德精密制品|c:CN"]
+      }
+    },
+    {
+      "id": "collapse-whitespace",
+      "input": { "domain": "", "name": "  ACME   Trading  ", "country": "NL" },
+      "expect": {
+        "domain": "",
+        "nameKey": "acme trading",
+        "countryKey": "NL",
+        "basis": "name_country",
+        "keys": ["n:acme trading|c:NL"]
+      }
+    },
+    {
+      "id": "latin-suffix-needs-word-boundary",
+      "input": { "domain": "", "name": "Dallas", "country": "US" },
+      "expect": {
+        "domain": "",
+        "nameKey": "dallas",
+        "countryKey": "US",
+        "basis": "name_country",
+        "keys": ["n:dallas|c:US"]
+      }
+    },
+    {
+      "id": "trailing-co-stripped",
+      "input": { "domain": "", "name": "Midwest Hydraulic Supply Co.", "country": "US" },
+      "expect": {
+        "domain": "",
+        "nameKey": "midwest hydraulic supply",
+        "countryKey": "US",
+        "basis": "name_country",
+        "keys": ["n:midwest hydraulic supply|c:US"]
+      }
+    },
+    {
+      "id": "never-strip-name-to-empty",
+      "input": { "domain": "", "name": "Co.", "country": "US" },
+      "expect": {
+        "domain": "",
+        "nameKey": "co",
+        "countryKey": "US",
+        "basis": "none",
+        "keys": []
+      }
+    },
+    {
+      "id": "no-country-falls-back-to-domain-only",
+      "input": { "domain": "gulffluid.ae", "name": "Gulf Fluid Trading LLC", "country": "" },
+      "expect": {
+        "domain": "gulffluid.ae",
+        "nameKey": "gulf fluid trading",
+        "countryKey": "",
+        "basis": "domain",
+        "keys": ["d:gulffluid.ae"]
+      }
+    },
+    {
+      "id": "country-iso-alias",
+      "input": { "domain": "", "name": "Iberia Componentes SL", "country": "ES" },
+      "expect": {
+        "domain": "",
+        "nameKey": "iberia componentes",
+        "countryKey": "ES",
+        "basis": "name_country",
+        "keys": ["n:iberia componentes|c:ES"]
+      }
+    },
+    {
+      "id": "unknown-country-not-guessed",
+      "input": { "domain": "", "name": "Mars Trading Ltd", "country": "Mars" },
+      "expect": {
+        "domain": "",
+        "nameKey": "mars trading",
+        "countryKey": "mars",
+        "basis": "name_country",
+        "keys": ["n:mars trading|c:mars"]
+      }
+    },
+    {
+      "id": "no-domain-no-name-is-uncheckable",
+      "input": { "domain": "", "name": "", "country": "德国" },
+      "expect": {
+        "domain": "",
+        "nameKey": "",
+        "countryKey": "DE",
+        "basis": "none",
+        "keys": []
+      }
+    },
+    {
+      "id": "domain-trailing-dot-and-www",
+      "input": { "domain": "WWW.Example.COM.", "name": "", "country": "" },
+      "expect": {
+        "domain": "example.com",
+        "nameKey": "",
+        "countryKey": "",
+        "basis": "domain",
+        "keys": ["d:example.com"]
+      }
+    },
+    {
+      "id": "no-transliteration-different-names-stay-different",
+      "input": { "domain": "", "name": "Rhein Hydraulik Handel", "country": "DE" },
+      "expect": {
+        "domain": "",
+        "nameKey": "rhein hydraulik handel",
+        "countryKey": "DE",
+        "basis": "name_country",
+        "keys": ["n:rhein hydraulik handel|c:DE"]
+      }
+    },
+    {
+      "id": "short-name-kept-but-not-fingerprinted",
+      "input": { "domain": "", "name": "AB", "country": "DE" },
+      "expect": {
+        "domain": "",
+        "nameKey": "ab",
+        "countryKey": "DE",
+        "basis": "none",
+        "keys": []
+      }
+    }
+  ]
+}

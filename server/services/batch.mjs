@@ -15,6 +15,10 @@
 import { protocol, validateEmailDraft, sanitizeContext } from '../core/protocol.mjs'
 import { extractFacts } from '../core/t0.mjs'
 import { createFetcher, FETCH_VERSION } from './fetch.mjs'
+import { normalizeDomain, fingerprintOf, DEDUPE_CONTRACT, DEDUPE_VERSION } from '../core/dedupe.mjs'
+
+// AC-05：域名规范化与三重指纹的规范实现在 core/dedupe.mjs，此处只做转出，避免出现第二份。
+export { normalizeDomain, DEDUPE_CONTRACT, DEDUPE_VERSION }
 
 const CFG = protocol.batchPipeline
 export const BATCH_VERSION = CFG.version
@@ -23,19 +27,7 @@ export const BATCH_FETCH_VERSION = FETCH_VERSION
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 const iso = (ms) => new Date(ms).toISOString()
 
-/* ------------------------------------------------------------------ 域名规范化 */
-
-/** 去 scheme / userinfo / www / 端口 / 路径 / 尾点，统一小写；不做 DNS、不联网 */
-export function normalizeDomain(raw) {
-  let s = String(raw ?? '').trim().toLowerCase()
-  if (!s) return ''
-  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
-  s = s.split(/[/?#]/)[0]
-  if (s.includes('@')) s = s.split('@').pop()
-  s = s.replace(/:\d+$/, '')
-  s = s.replace(/^www\./, '')
-  return s.replace(/^\.+|\.+$/g, '')
-}
+/* ------------------------------------------------------------------ 域名校验 */
 
 export function isDomain(v) {
   if (typeof v !== 'string' || v.length > 253 || !/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(v)) return false
@@ -109,11 +101,13 @@ function csvRows(text) {
 /* ------------------------------------------------------------------ 导入校验 */
 
 /**
- * 纯函数：逐行校验 + 域名去重，绝不静默丢数据。
+ * 纯函数：逐行校验 + 三重指纹去重（域名 + 公司名归一化 + 国家），绝不静默丢数据。
  * 联系人邮箱/姓名允许本地存储，但登记 piiFields，发往模型前必须剥离。
  */
 export function validateRows(rows, opts = {}) {
   const existing = opts.existingDomains instanceof Set ? opts.existingDomains : new Set()
+  // AC-05：库内已有指纹（d:域名 / n:公司名|国家），由调用方用 fingerprintOf 构建
+  const existingKeys = opts.existingFingerprints instanceof Set ? opts.existingFingerprints : new Set()
   const errors = []
   const accepted = []
   const rejected = []
@@ -125,6 +119,7 @@ export function validateRows(rows, opts = {}) {
   }
 
   const seen = new Set()
+  const seenNameCountry = new Map()
   rows.forEach((raw, i) => {
     const rowIndex = i + 1
     if (!isObj(raw)) { rejected.push({ rowIndex, reason: '该行不是对象' }); return }
@@ -159,9 +154,35 @@ export function validateRows(rows, opts = {}) {
     const contactGrade = rawGrade || 'C'
     const gradeSource = rawGrade ? 'imported' : 'default_conservative'
 
-    if (seen.has(domain)) { duplicates.push({ rowIndex, domain, reason: '批内重复（同一规范化域名）' }); return }
+    const country = String(raw.country ?? '').trim().slice(0, 80)
+    // AC-05 三重指纹：域名 + 公司名归一化 + 国家。缺国家/名字就不参与 name_country 判重（不猜）
+    const fp = fingerprintOf({ domain, name: companyName, country })
+    const nameCountryKey = fp.keys.find((k) => k.startsWith('n:')) ?? ''
+
+    if (seen.has(domain)) {
+      duplicates.push({ rowIndex, domain, basis: 'domain', reason: '批内重复（同一规范化域名）' })
+      return
+    }
+    if (nameCountryKey && seenNameCountry.has(nameCountryKey)) {
+      duplicates.push({
+        rowIndex, domain, basis: 'name_country', fingerprint: nameCountryKey,
+        reason: `批内重复（域名不同但公司名归一化 + 国家相同：${fp.nameKey} · ${fp.countryKey}，与第 ${seenNameCountry.get(nameCountryKey) + 1} 行）`,
+      })
+      return
+    }
     seen.add(domain)
-    if (existing.has(domain)) { duplicates.push({ rowIndex, domain, reason: '库内已存在（不覆盖既有研判与状态）' }); return }
+    if (nameCountryKey) seenNameCountry.set(nameCountryKey, rowIndex - 1)
+    if (existing.has(domain)) {
+      duplicates.push({ rowIndex, domain, basis: 'domain', reason: '库内已存在（不覆盖既有研判与状态）' })
+      return
+    }
+    if (nameCountryKey && existingKeys.has(nameCountryKey)) {
+      duplicates.push({
+        rowIndex, domain, basis: 'name_country', fingerprint: nameCountryKey,
+        reason: `库内已存在同名同国公司（域名不同：${fp.nameKey} · ${fp.countryKey}），不覆盖既有研判与状态`,
+      })
+      return
+    }
 
     const hasSource = Boolean(sourceUrl && fetchedAt && rawText.trim())
     const piiFields = []
@@ -169,7 +190,7 @@ export function validateRows(rows, opts = {}) {
     if (contactName) piiFields.push('contact_name')
     accepted.push({
       rowIndex, domain, companyName,
-      country: String(raw.country ?? '').trim().slice(0, 80),
+      country,
       productHint: String(raw.product_hint ?? '').trim().slice(0, 120),
       sourceUrl, fetchedAt, rawText,
       contactEmail, contactName, contactGrade, gradeSource, piiFields,
@@ -389,6 +410,16 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
   function companies() { return typeof store.companyList === 'function' ? store.companyList() : [] }
   function existingDomains() { return new Set(companies().map((c) => c.domain)) }
 
+  /** AC-05：库内已有三重指纹，供 validateRows 判重；companyName 与 name 两种字段名都要认 */
+  function existingFingerprints() {
+    const keys = new Set()
+    for (const c of companies()) {
+      const fp = fingerprintOf({ domain: c?.domain, name: c?.companyName ?? c?.name, country: c?.country })
+      for (const k of fp.keys) keys.add(k)
+    }
+    return keys
+  }
+
   /** B7 / P2-1：服务端持久化的 G2 全局抑制名单。返回 null = 存储层不支持，必须 fail-closed。 */
   function suppressionRecords() {
     if (typeof store.suppressionList !== 'function' || typeof store.suppressionUpsert !== 'function') return null
@@ -443,7 +474,7 @@ export function createBatchPipeline({ store, gateway, fetcher = createFetcher(),
     if (parsed.errors.length) {
       return { ok: false, code: 'E4007', errors: parsed.errors, summary: { received: 0, accepted: 0, rejected: 0, duplicates: 0 } }
     }
-    const v = validateRows(parsed.rows, { existingDomains: existingDomains() })
+    const v = validateRows(parsed.rows, { existingDomains: existingDomains(), existingFingerprints: existingFingerprints() })
     if (!v.ok) {
       return { ok: false, code: 'E4007', errors: v.errors, rejected: v.rejected, duplicates: v.duplicates, summary: v.summary }
     }

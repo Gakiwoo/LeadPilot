@@ -315,6 +315,13 @@ function tradeRecordsFor(s: Seed, id: string, features: RuleFeatures): TradeReco
   }))
 }
 
+/**
+ * 演示数据的变体标签（用于 48 / 120 两种生成量下的第 2、第 3… 轮公司）。
+ * 8 个标签 = 最多支撑 16 家种子 × 8 轮 = 128 家，够覆盖当前所有生成量；
+ * 标签必须两两不同，否则同名同国会命中 AC-05 三重指纹去重而被正确剔除。
+ */
+const VARIANT_LABELS = ['North', 'Industrial', 'Global', 'Regional', 'Coastal', 'Alpine', 'Baltic', 'Harbor']
+
 export function buildDemoCompanies(count = 48): Company[] {
   const out: Company[] = []
   for (let i = 0; i < count; i++) {
@@ -322,7 +329,10 @@ export function buildDemoCompanies(count = 48): Company[] {
     // SEEDS 为空是编程错误：宁可少造数据，也不对 undefined 取属性
     if (!base) break
     const variant = Math.floor(i / SEEDS.length)
-    const suffix = variant === 0 ? '' : ` ${['North', 'Industrial', 'Global', 'Regional'][variant - 1] ?? ''}`.trim()
+    // AC-05 起，任务出库会按三重指纹（域名 + 公司名归一化 + 国家）去重，
+    // 所以变体标签必须保证唯一：标签用尽后回退成空串会让第 5 个变体起与变体 0 同名同国，
+    // 被正确判成重复、候选池凭空缩水。这里把标签数扩到 8，覆盖 48 / 120 两档生成量。
+    const suffix = variant === 0 ? '' : ` ${VARIANT_LABELS[variant - 1] ?? ''}`.trim()
     const name = variant === 0 ? base.name : `${base.name}${suffix ? ` · ${suffix}` : ''}`
     const domain = variant === 0 ? base.domain : `${base.domain.split('.')[0]}${variant}.${base.domain.split('.').slice(1).join('.')}`
     const id = `c_${(i + 1).toString().padStart(4, '0')}`

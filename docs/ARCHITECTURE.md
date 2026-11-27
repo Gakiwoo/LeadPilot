@@ -1,6 +1,6 @@
 # LeadPilot 技术架构与决策记录（ADR）
 
-> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-034 B9 演示 KPI 口径与文档动态化；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
+> 对应 PRD v1.1 第 9 章 · 基线版本 v0.9.0 · 2026-11-09（v0.9.0：ADR-032 用户指定抓取落地；ADR-033 B8 三步管道同源与批量出信；ADR-034 B9 演示 KPI 口径与文档动态化；ADR-035 B10 AC-05 三重指纹去重；ADR-031 评测口径与 v0.8.0 决策保留；CI run `42646714121` 全绿）
 
 > **目录分层（v0.9.1 重构）**：ADR 正文记录的是做决策当时的路径，保留原样不追改（决策理由与文件位置无关）。当前实际布局见 README「工程结构」，映射如下：
 > `server/{protocol,t0,ledger,eval,baseline,data-sources,release-evidence}.mjs` → `server/core/`；
@@ -419,6 +419,29 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 **后果**：界面上「演示」与「真实结果」第一次可机读区分；`releaseEligible=false`、`accuracyClaim=false`、商业源 `0/6`、integrity / outcome `NO_DATA` 全部不变。gate 新增 4 条**防回退静态护栏**（9 张 KPI 全部走统一口径、行为级测试纳入 vitest include、文档不再写死旧数字、attach 模式存在）；行为级保证由 `src/tests/b9-*.test.ts` 在 CI `Unit tests` 步骤执行，两者边界在门禁脚本注释里写明，不把静态检查冒充行为验证。
 
 **验证**：293 单测 / 79 门禁 / 53 冒烟 / 13 证据自检 / build `358.15 kB` / `check:tracked` 82 源码·97 tracked / AC-03 全绿；三处「改坏实现会红」抽样（KPI 不置灰、退信移出分母、配额不降级）分别精准触发失败，还原后逐字节一致。
+
+---
+
+## ADR-035 · AC-05 三重指纹去重（B10 增量）
+
+**背景**：AC-05 一直是 ⚠️ —— 去重只看规范化域名。真实脏数据最常见的形态恰恰是「同一家公司在不同国别后缀 / 经销域名下再次出现」（`rhein-hydraulik.de` 与 `rhein-hydraulik-gmbh.de`），只看域名必然漏。PRD 要求的是**三重指纹：域名 + 公司名归一化 + 国家**。
+
+同时存在一个结构性问题：去重规则要在两个地方生效（服务端导入管道、客户端任务出库），两侧各写一套实现必然漂移 —— 这正是 ADR-023（共享协议单一真源）当初要防的事。
+
+**决策**：
+
+- 规则本身进 `shared/dedupe-contract.json`（`dedupe-fingerprint-v1`）：归一化管线步骤、法律实体后缀表、国家别名表、判重规则与 `minNameKeyLength / maxSuffixStrips` 两个阈值。两侧只实现归一化动作，不各自定义规则。
+- 客户端 `src/domain/dedupe.ts`、服务端 `server/core/dedupe.mjs` 各一份等价实现（纯函数，无 IO / 随机 / 时间依赖），**用同一份跨语言夹具 `tests/fixtures/dedupe-parity.json`（16 条）对齐**：两侧测试各自比对同一夹具，等价性由传递性保证，不需要跨语言 import。夹具与契约版本号三方一致，单边改规则会两侧同时红。
+- 归一化只抹「不该影响判定的差异」：NFC、小写、全角转半角、标点转空格、折叠空白、剥尾部法律后缀（可多次，如 `GmbH & Co. KG`）。**法律后缀按字符数倒序匹配**，否则中文「股份有限公司」会被「有限公司」先吃掉、留下「股份」残词。拉丁后缀要求词边界，避免 `Dallas` 被 `as` 切掉；剥完短于 `minNameKeyLength` 就停止剥离 —— 宁可少判重，也不把公司名清空成误合并。**不做音译、不做同义词表**。
+- 判重顺序：域名相同 → 判重；域名不同但「公司名归一化 + 国家」相同 → 判重（`basis=name_country`）。缺公司名或缺国家 → 不参与 name_country 判重，只按域名判；三项全缺 → 记 `uncheckable` 如实上报，不静默当唯一。
+- **去重只做判定、不删数据**：被判重的一律进 `duplicates`，带 `reason + basis + matchedIndex`（指回首次出现的那条），由调用方决定如何呈现。导入管道据此给出 `partial=true`，不静默丢行。
+- 接线两处：`server/services/batch.mjs` 的 `validateRows(rows, { existingDomains, existingFingerprints })` 同时做批内与库内判重，`existingFingerprints()` 从 `store.companyList()` 算出（`companyName` / `name` 两种字段名都认）；`src/store/useAppStore.ts` 的 `startTask` 出库前先算库内已有指纹再过滤，并在任务日志里写明「候选 N → 跳过 M（库内已存在 X / 本批内重复 Y）」。
+- `normalizeDomain` 的规范实现从 `server/services/batch.mjs` 迁到 `server/core/dedupe.mjs`，`batch.mjs` 只做转出，消除第二份实现（对外导出路径不变，既有调用方与测试不受影响）。
+- 顺带修一个被新规则暴露的真实缺陷：`buildDemoCompanies` 的变体标签只有 4 个，120 档生成时第 5 个变体起标签退化成空串，公司与变体 0 同名同国 —— 三重指纹会正确地把它判成重复，导致演示候选池凭空缩水。标签扩到 8 个并加测试锁住「120 档去重后不缩水」。
+
+**后果**：AC-05 从 ⚠️ 升 ✅（覆盖范围明确写在 `PRD-COVERAGE.md`：所有会产生客户记录的入口都经过这两个函数；真实商业源仍 0/6，接入后同样走该入口）。同行名同国的真实不同公司会被判重，代价是有意接受的 —— 因此每条判重都留 `reason`，且不同国家绝不合并。`releaseEligible=false`、`accuracyClaim=false`、商业源 `0/6` 全部不变，本轮不解除任何 Go / No-Go 判据。gate 新增 6 条静态护栏（唯一真源 / 无第二份实现 / 已接进导入管道 / 已接进任务出库 / 夹具两侧共用 / 文档口径），行为级保证由 28 个反例在 CI `Unit tests` 执行，两者边界在门禁脚本注释里写明，不把静态检查冒充行为验证。
+
+**验证**：321 单测（新增 28）/ 84 门禁 / 冒烟 53 / build / `check:tracked` 全绿；三处「改坏实现会红」抽样（客户端只按域名判重、服务端库内不查指纹、后缀不按长度倒序）分别精准触发失败，还原后三个文件 SHA-256 逐一比对一致。
 
 ---
 

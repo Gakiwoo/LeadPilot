@@ -801,6 +801,51 @@ function walkTs(dir, out = []) {
     /LEADPILOT_CDP_ATTACH/.test(capture) && /if \(chrome\) chrome\.kill/.test(capture))
 }
 
+// 7d. B10 · AC-05 三重指纹去重（域名 + 公司名归一化 + 国家）
+//     边界：这里只是静态护栏，防「规则只写在注释里、没接进管道」这类回退；
+//     行为级保证由 tests/frontend/dedupe.test.ts 与 tests/server/ac05-dedupe.test.mjs 在 CI Unit tests 执行，
+//     两侧同时对 tests/fixtures/dedupe-parity.json 对齐 —— 任一侧改规则没同步，两处一起红。
+{
+  const contractPath = join(ROOT, 'shared/dedupe-contract.json')
+  const dedupeContract = existsSync(contractPath) ? JSON.parse(readFileSync(contractPath, 'utf8')) : null
+  const clientDedupe = readFileSync(join(ROOT, 'src/domain/dedupe.ts'), 'utf8')
+  const serverDedupe = readFileSync(join(ROOT, 'server/core/dedupe.mjs'), 'utf8')
+  check('AC-05 唯一真源：去重规则只在 shared/dedupe-contract.json，客户端与服务端各读同一份',
+    Boolean(dedupeContract) && dedupeContract.contract === 'dedupe-fingerprint-v1'
+    && clientDedupe.includes("from '../../shared/dedupe-contract.json'")
+    && serverDedupe.includes("'../../shared/dedupe-contract.json'")
+    && clientDedupe.includes('export const DEDUPE_VERSION: string = contract.version')
+    && serverDedupe.includes('export const DEDUPE_VERSION = dedupeContract.version'))
+
+  const batchSrc = readFileSync(join(ROOT, 'server/services/batch.mjs'), 'utf8')
+  check('AC-05 无第二份实现：batch.mjs 的 normalizeDomain 转出 core/dedupe.mjs，不再自己写一遍',
+    /import \{[^}]*normalizeDomain[^}]*\} from '\.\.\/core\/dedupe\.mjs'/.test(batchSrc)
+    && !/export function normalizeDomain/.test(batchSrc))
+
+  check('AC-05 已接进导入管道：validateRows 收 existingFingerprints，importCompanies 真实传入',
+    batchSrc.includes('opts.existingFingerprints')
+    && /validateRows\(parsed\.rows, \{ existingDomains: existingDomains\(\), existingFingerprints: existingFingerprints\(\) \}\)/.test(batchSrc))
+
+  const storeSrc = readFileSync(join(ROOT, 'src/store/useAppStore.ts'), 'utf8')
+  check('AC-05 已接进任务出库：startTask 按三重指纹过滤，不再只看域名',
+    storeSrc.includes("from '@/domain/dedupe'")
+    && /dedupeByFingerprint\(candidates, \(c\) => c\)/.test(storeSrc)
+    && !/existingDomains\.has\(c\.domain\)/.test(storeSrc))
+
+  const fixturePath = join(ROOT, 'tests/fixtures/dedupe-parity.json')
+  const parity = existsSync(fixturePath) ? JSON.parse(readFileSync(fixturePath, 'utf8')) : { cases: [], version: '' }
+  const clientSpec = readFileSync(join(ROOT, 'tests/frontend/dedupe.test.ts'), 'utf8')
+  const serverSpec = readFileSync(join(ROOT, 'tests/server/ac05-dedupe.test.mjs'), 'utf8')
+  check('AC-05 跨语言夹具：≥16 条，两侧测试读同一份，防单边改规则',
+    parity.cases.length >= 16 && parity.version === (dedupeContract?.version ?? '')
+    && clientSpec.includes('dedupe-parity.json') && serverSpec.includes('dedupe-parity.json'),
+    `cases=${parity.cases.length} version=${parity.version}`)
+
+  const coverageAc05 = readFileSync(join(ROOT, 'docs/PRD-COVERAGE.md'), 'utf8')
+  check('AC-05 文档：不再声称三重指纹未实现，且写明覆盖范围',
+    /\| AC-05 \|[^|]*\| ✅ \|/.test(coverageAc05) && /三重指纹/.test(coverageAc05))
+}
+
 // 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦
 //    旧实现末尾写死 evaluateIntegrity([]) / evaluateOutcome([]) + 5 条硬编码 BLOCKED，
 //    即使真实样本存在也永远 NO_DATA。下面用行为级断言证明判定随输入真实变化。
