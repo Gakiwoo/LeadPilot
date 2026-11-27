@@ -467,7 +467,7 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 **后果**：`useAppStore.ts` 从 719 行降到 55 行，最长切片 `slices/task.ts` 约 230 行。前端产物从 `365.94 kB / gzip 124.78 kB` 微增到 `366.60 kB / gzip 125.21 kB`（+0.66 kB / +0.43 kB），来自新增的模块边界与重新导出，属于可接受代价，不引入任何运行时开销。行为零变化：351 单测（含 30 条特征测试）、89 门禁、53 冒烟全绿，`releaseEligible=false`、商业源 `0/6` 等发布边界一条未动。
 
-**验证**：三处「改坏实现会红」抽样迁移到 slice 上验证灵敏度未被稀释 —— `slices/task.ts` 去掉筛选重置、`slices/company.ts` 的 undo 不回滚黑名单、`slices/ui.ts` 切视图不清选中，各自精准触发 1 条失败，还原后三个文件 SHA-256 逐一一致。CI `见提交后补充`。
+**验证**：三处「改坏实现会红」抽样迁移到 slice 上验证灵敏度未被稀释 —— `slices/task.ts` 去掉筛选重置、`slices/company.ts` 的 undo 不回滚黑名单、`slices/ui.ts` 切视图不清选中，各自精准触发 1 条失败，还原后三个文件 SHA-256 逐一一致。CI `45995277625` 九步全过。
 
 **未做**：`src/components/settings/SettingsView.tsx`（419 行）等组件级拆分不在本批次内；`slices/task.ts` 仍是最长的切片，若后续继续增长可再按「本地运行器 / 云端编排」拆两片。
 
