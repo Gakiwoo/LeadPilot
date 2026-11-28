@@ -1,19 +1,22 @@
 import { useState } from 'react'
-import { AlertTriangle, FileText, Gauge, Mail, ShieldAlert, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, FileText, Gauge, LayoutTemplate, Mail, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { assertNoBatchSend, checkSendGates, type SendGateResult } from '@/domain/compliance'
 import { computeRateStats, isSentStatus, kpiDisplay, localCounterKpi, toTileProps } from '@/domain/metrics'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, DemoBanner, EmptyState, SectionTitle, StatTile, StatusBadge } from '@/components/ui'
 import BatchPipelinePanel from './BatchPipelinePanel'
+import TemplateLibrary from './TemplateLibrary'
 
 export default function OutreachView() {
   const companies = useAppStore((s) => s.companies)
   const outreach = useAppStore((s) => s.outreach)
   const settings = useAppStore((s) => s.settings)
+  const templates = useAppStore((s) => s.templates)
   const showToast = useAppStore((s) => s.showToast)
   const openComposer = useAppStore((s) => s.openComposer)
   const [gateCompanyId, setGateCompanyId] = useState('')
   const [gateResult, setGateResult] = useState<SendGateResult | null>(null)
+  const [tplOpen, setTplOpen] = useState(false)
 
   const gateCompany = companies.find((c) => c.id === gateCompanyId) ?? companies[0]
   // B9 / P2-7：与 CRM 页共用同一份状态白名单与分母，杜绝两页回复率互相矛盾
@@ -131,10 +134,14 @@ export default function OutreachView() {
           </div>
         </Card>
         <Card className="p-4">
-          <SectionTitle title="发信红线" desc="模板库与多步序列尚未实现；以下是当前已由代码强制的产品级硬约束" />
+          <SectionTitle
+            title="发信红线"
+            desc="模板库已落地（内置只读基线 + 自建模板）；多步序列仍未实现。以下是当前已由代码强制的产品级硬约束"
+            extra={<Button size="sm" onClick={() => setTplOpen(true)}><LayoutTemplate size={13} /> 模板库（{templates.length}）</Button>}
+          />
           <div className="space-y-1.5">
             {[
-              { icon: FileText, text: '本地规则模板按目的生成草稿；模板库与自动多步序列尚未实现', tone: 'brand' },
+              { icon: FileText, text: '本地规则模板按目的生成草稿；模板库可从写信页套用，自动多步序列尚未实现', tone: 'brand' },
               { icon: AlertTriangle, text: assertNoBatchSend(2).allowed ? '' : '不提供「批量直接发送」：批量与真发之间必须保留人的一次确认', tone: 'rose' },
               { icon: ShieldCheck, text: '每封信必须带真实身份与退订说明，由系统注入且不可删除', tone: 'emerald' },
               { icon: ShieldCheck, text: '退订即刻生效且不可绕过，全局黑名单不提供忽略开关', tone: 'emerald' },
@@ -147,6 +154,8 @@ export default function OutreachView() {
           </div>
         </Card>
       </div>
+
+      <TemplateLibrary open={tplOpen} onClose={() => setTplOpen(false)} />
     </div>
   )
 }

@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, CheckCircle2, CloudCog, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, CloudCog, LayoutTemplate, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react'
 import type { Company } from '@/types'
 import { EMAIL_LENGTH_LIMIT, EMAIL_PURPOSES } from '@/domain/constants'
 import { injectComplianceFooter, validateEmail } from '@/domain/compliance'
+import { buildTemplateVars, materializeTemplate, type EmailTemplate } from '@/domain/email-template'
 import {
   generateEmails, pickAnchor, type GeneratedEmail,
   generateEmailWithGateway, type EmailGenerateResponse,
 } from '@/services/adapters'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Field, Modal } from '@/components/ui'
+import TemplateLibrary from './TemplateLibrary'
 
 export default function EmailComposer({ company, onClose }: { company: Company | null; onClose(): void }) {
   const settings = useAppStore((s) => s.settings)
@@ -25,11 +27,12 @@ export default function EmailComposer({ company, onClose }: { company: Company |
   const [generating, setGenerating] = useState(false)
   const [source, setSource] = useState<'local' | 'gateway'>('local')
   const [gatewayNote, setGatewayNote] = useState('')
+  const [tplOpen, setTplOpen] = useState(false)
 
   useEffect(() => {
     // P1-16：company 被关闭（null）时也必须清空，否则同公司重开会残留上一轮正文与标注
     setMails([]); setEdited(''); setRegens(0); setActive(0)
-    setGenerating(false); setSource('local'); setGatewayNote('')
+    setGenerating(false); setSource('local'); setGatewayNote(''); setTplOpen(false)
   }, [company?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const current = mails[active]
@@ -105,6 +108,38 @@ export default function EmailComposer({ company, onClose }: { company: Company |
     }
   }
 
+  /**
+   * F11：套用模板库里的模板。
+   *
+   * 三件事必须一起做，少一件都会骗人：
+   *  1. 缺变量的洞转成 `[待填：x]`（materializeTemplate），否则 `{{product}}` 会绕过
+   *     hasPlaceholder 检查，带着花括号混进草稿队列；
+   *  2. 合规尾巴照旧由 `injectComplianceFooter` 注入，模板不带尾巴；
+   *  3. 明确标注「这是模板渲染，未调用任何模型」——不能让它看起来像模型输出。
+   */
+  const applyTemplate = (tpl: EmailTemplate) => {
+    const { text: anchor, tags } = pickAnchor(company)
+    const vars = buildTemplateVars({ company, profile: settings.profile, anchor })
+    const rendered = materializeTemplate(tpl, vars)
+    const body = injectComplianceFooter(rendered.body, settings.profile)
+    setMails([{
+      variant: 'A',
+      angle: `模板：${tpl.name}`,
+      subject: rendered.subject,
+      body,
+      anchor,
+      tags: [...tags, `模板库 · ${tpl.name}`],
+      validation: validateEmail(body, {
+        maxWords: EMAIL_LENGTH_LIMIT[length], requirePersonalization: true, anchor,
+      }),
+    }])
+    setEdited(''); setActive(0); setSource('local')
+    setGatewayNote(rendered.ready
+      ? `已套用模板「${tpl.name}」，正文由模板渲染后注入合规尾巴。本次未调用任何模型。`
+      : `已套用模板「${tpl.name}」，但缺少 ${rendered.missingVars.map((v) => `{{${v}}}`).join('、')} 的取值，正文里已标成 [待填：x]；发送前校验会拦住未填项。`)
+    showToast(rendered.ready ? '已套用模板，可以直接改或写入草稿队列' : '已套用模板，但有变量没填上，已标为待填', rendered.ready ? 'ok' : 'warn')
+  }
+
   const createDraft = () => {
     if (!current) return
     if (company.contacts[0]?.grade === 'D') {
@@ -163,6 +198,9 @@ export default function EmailComposer({ company, onClose }: { company: Company |
           <Button variant="primary" size="sm" disabled={generating} onClick={() => void generate()}>
             <Sparkles size={13} /> {generating ? '云端生成中…' : '生成 2 版'}
           </Button>
+          <Button size="sm" onClick={() => setTplOpen(true)}>
+            <LayoutTemplate size={13} /> 套用模板
+          </Button>
           <Button size="sm" disabled={!current || regens >= 5 || generating} onClick={() => {
             setRegens((n) => n + 1)
             void generate(true)
@@ -217,6 +255,8 @@ export default function EmailComposer({ company, onClose }: { company: Company |
           </>
         )}
       </div>
+
+      <TemplateLibrary open={tplOpen} onClose={() => setTplOpen(false)} onPick={applyTemplate} />
     </Modal>
   )
 }

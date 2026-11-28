@@ -7,6 +7,7 @@
 import type { Company, DevTask } from '@/types'
 import { buildDemoCompanies, DEMO_TASK_ID } from '@/data/demo-data'
 import { localRepository } from '@/data/repository'
+import { DEFAULT_TEMPLATES, type EmailTemplate } from '@/domain/email-template'
 import { DEFAULT_SETTINGS } from './defaults'
 
 export function demoTask(companies: Company[]): DevTask {
@@ -55,3 +56,15 @@ export const initialTasks: DevTask[] = persisted?.tasks?.length
 export const initialOutreach = persisted?.outreach ?? []
 
 export const initialSettings = persisted?.settings ?? DEFAULT_SETTINGS
+
+/**
+ * F11 模板库：内置模板**永远在**。
+ *
+ * 不能写成「持久化里有模板就只用持久化的」——那样一旦用户删光自建模板、
+ * 或旧版本数据没有 templates 字段，内置基线会连带消失。内置必须是基线，自建叠加其上。
+ */
+export const initialTemplates: EmailTemplate[] = (() => {
+  const builtins = DEFAULT_TEMPLATES.map((t) => ({ ...t }))
+  const customs = (persisted?.templates ?? []).filter((t) => !t.builtin && !String(t.id ?? '').startsWith('tpl_builtin_'))
+  return [...builtins, ...customs]
+})()

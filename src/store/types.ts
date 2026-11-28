@@ -14,6 +14,7 @@ import type {
   Company, CompanyStatus, DevTask, Outreach, Settings, StatusLogEntry, TaskConfig, TaskProgress,
 } from '@/types'
 import type { GatewayHealth } from '@/services/adapters'
+import type { EmailTemplate, TemplateDraft } from '@/domain/email-template'
 
 export type ViewKey = 'developer' | 'crm' | 'outreach' | 'settings'
 export type SortKey = 'default' | 'total' | 'propensity' | 'import' | 'name' | 'discovered'
@@ -62,6 +63,8 @@ export interface AppState {
   tasks: DevTask[]
   outreach: Outreach[]
   settings: Settings
+  /** F11 模板库。内置模板常驻（不可删、不可覆盖），自建模板由用户维护 */
+  templates: EmailTemplate[]
   activeView: ViewKey
   drawerCompanyId: string | null
   composerCompanyId: string | null
@@ -99,6 +102,10 @@ export interface AppState {
   batchSetStatus(ids: string[], to: CompanyStatus, confirmed?: boolean): { ok: boolean; needsConfirm?: boolean; message?: string }
   addOutreach(o: Outreach): { ok: boolean; message?: string }
   updateOutreach(id: string, patch: Partial<Outreach>): void
+  /** F11：保存模板（无 id 新建 / 有 id 更新）。保存前必过 validateTemplate */
+  saveTemplate(draft: TemplateDraft): { ok: boolean; message?: string; id?: string }
+  deleteTemplate(id: string): { ok: boolean; message?: string }
+  duplicateTemplate(id: string): { ok: boolean; message?: string; id?: string }
   updateSettings(patch: Partial<Settings>): void
   addBlacklist(value: string): void
   probeGateway(): Promise<void>

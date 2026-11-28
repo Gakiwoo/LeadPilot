@@ -31,6 +31,7 @@ export function flushSave(): void {
       tasks: state.tasks,
       outreach: state.outreach,
       settings: state.settings,
+      templates: state.templates,
     })
   } catch { /* 存储配额满或隐私模式：不因落盘失败打断交互 */ }
 }

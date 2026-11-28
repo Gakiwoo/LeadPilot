@@ -10,6 +10,7 @@
  *  - slices/task.ts       任务启动与暂停继续中止（唯一会扣点的地方）
  *  - slices/company.ts    客户状态机与撤销
  *  - slices/outreach.ts   本地草稿队列（自动流转 + G2 硬拦）
+ *  - slices/templates.ts  模板库（F11：保存前必过校验，内置不可删/不可覆盖）
  *  - slices/settings.ts   设置与点数镜像
  *  - slices/gateway.ts    网关探测与单家客户重新研判
  *  - slices/reset.ts      演示重置（唯一跨全字段的动作）
@@ -25,11 +26,12 @@ import { createUiSlice } from './slices/ui'
 import { createTaskSlice } from './slices/task'
 import { createCompanySlice } from './slices/company'
 import { createOutreachSlice } from './slices/outreach'
+import { createTemplatesSlice } from './slices/templates'
 import { createSettingsSlice } from './slices/settings'
 import { createGatewaySlice } from './slices/gateway'
 import { createResetSlice } from './slices/reset'
 import {
-  initialCompanies, initialOutreach, initialSettings, initialTasks,
+  initialCompanies, initialOutreach, initialSettings, initialTasks, initialTemplates,
 } from './demo-bootstrap'
 import { bindPersistence } from './persistence'
 
@@ -41,6 +43,7 @@ export const useAppStore = create<AppState>()((...a) => ({
   ...createTaskSlice(...a),
   ...createCompanySlice(...a),
   ...createOutreachSlice(...a),
+  ...createTemplatesSlice(...a),
   ...createSettingsSlice(...a),
   ...createGatewaySlice(...a),
   ...createResetSlice(...a),
@@ -49,6 +52,7 @@ export const useAppStore = create<AppState>()((...a) => ({
   tasks: initialTasks,
   outreach: initialOutreach,
   settings: initialSettings,
+  templates: initialTemplates,
 }))
 
 bindPersistence(useAppStore)
