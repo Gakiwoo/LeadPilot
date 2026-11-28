@@ -883,6 +883,57 @@ function walkTs(dir, out = []) {
     && readFileSync(join(ROOT, 'config/vite.config.ts'), 'utf8').includes('tests/**/*.test.ts'))
 }
 
+// 7f. F11 · 模板库
+//     边界：本批次只做模板库，多步序列未做，所以文档只能 🟡 不能 ✅。
+//     静态护栏防四类倒退：另写一套禁词表、保存动作绕开校验、内置模板被就地改坏、
+//     缺变量的花括号漏过发送闸门（这条最阴：{{x}} 不属于 hasPlaceholder 认的方括号形态）。
+{
+  const tplDomain = readFileSync(join(ROOT, 'src/domain/email-template.ts'), 'utf8')
+
+  check('F11 模板域层单一真源：变量白名单只定义一次（TEMPLATE_VARIABLES），各处引用同一份',
+    /export const TEMPLATE_VARIABLES = \[/.test(tplDomain)
+    // 除这一处定义外，不允许再出现第二份「变量清单」数组定义
+    && (tplDomain.match(/const [A-Z_]*VARIABLES\s*(?::[^=]+)?= \[/g) ?? []).length === 1
+    && (tplDomain.match(/TEMPLATE_VARIABLES/g) ?? []).length >= 4)
+
+  check('F11 不另写禁词表：模板校验复用 domain/compliance 的 validateEmail（与服务端 F6-2 同一份词表）',
+    /import \{ validateEmail \} from '\.\/compliance'/.test(tplDomain)
+    && !/BANNED_WORDS\s*=/.test(tplDomain)
+    && !/dear sir or madam/i.test(tplDomain))
+
+  check('F11 合规尾巴与发件人身份不进模板：内置模板正文不含退订语句与公司后缀',
+    !/unsubscribe|reply\s+stop|退订/i.test(
+      (tplDomain.match(/body: '[^']*'/g) ?? []).join(' '),
+    )
+    && !/\b(?:GmbH|Ltd|Inc)\b/.test((tplDomain.match(/body: '[^']*'/g) ?? []).join(' ')))
+
+  const tplSlice = readFileSync(join(ROOT, 'src/store/slices/templates.ts'), 'utf8')
+  check('F11 保存动作必过校验：saveTemplate 先跑 validateTemplate，不合法就不进 state',
+    /validateTemplate\(\{ name, subject, body, purpose \}\)/.test(tplSlice)
+    && /if \(!checked\.ok\)/.test(tplSlice))
+  check('F11 内置模板不可篡改：覆盖与删除两条路径都按 id 前缀拒绝',
+    /isBuiltin\(targetId\)/.test(tplSlice) && /isBuiltin\(id\)/.test(tplSlice)
+    && tplSlice.includes('内置模板不可修改') && tplSlice.includes('内置模板不可删除'))
+
+  check('F11 缺变量的洞转方括号：materializeTemplate 产出 [待填：x]，让 hasPlaceholder 必然拦住',
+    /export function materializeTemplate/.test(tplDomain)
+    && tplDomain.includes('`[待填：${name}]`'))
+
+  const composer = readFileSync(join(ROOT, 'src/components/outreach/EmailComposer.tsx'), 'utf8')
+  const library = readFileSync(join(ROOT, 'src/components/outreach/TemplateLibrary.tsx'), 'utf8')
+  check('F11 已接进写信链路：写信页可套用模板，且套用后照旧注入合规尾巴',
+    composer.includes('TemplateLibrary')
+    && composer.includes('materializeTemplate')
+    && /injectComplianceFooter\(rendered\.body, settings\.profile\)/.test(composer)
+    && library.includes('saveTemplate'))
+
+  const coverageF11 = readFileSync(join(ROOT, 'docs/PRD-COVERAGE.md'), 'utf8')
+  check('F11 文档口径诚实：不再标 ❌，但也只能 🟡（多步序列未做）',
+    /\| F11 \|[^\n]*\| 🟡 \|/.test(coverageF11)
+    && !/\| F11 \|[^\n]*\| ❌ \|/.test(coverageF11)
+    && coverageF11.includes('多步序列'))
+}
+
 // 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦
 //    旧实现末尾写死 evaluateIntegrity([]) / evaluateOutcome([]) + 5 条硬编码 BLOCKED，
 //    即使真实样本存在也永远 NO_DATA。下面用行为级断言证明判定随输入真实变化。

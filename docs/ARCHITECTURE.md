@@ -473,6 +473,30 @@ PRD 指定 TanStack Table + 虚拟滚动。本次基线用原生 `<table>` + CSS
 
 ---
 
+## ADR-037 · 模板库：模板只管措辞，合规尾巴与身份永远由代码注入（F11 第一步）
+
+**背景**：`F11 模板库与多步序列`在 `PRD-COVERAGE` 里一直是 ❌，而当时 `buildImportedTemplateDraft` 是个写死的单模板 —— 用户每写一次同类邮件都要从头敲。这是当时唯一「纯本地可做、且直接面向用户」的功能缺口，不依赖任何外部 provider、OAuth 或法律意见，所以单独作为一批。
+
+**风险不在「写模板功能」，而在「让模板有机会破坏合规」**：模板是用户可编辑的自由文本，一旦允许它自带签名块或退订语句，就会和代码注入的合规尾巴拼成双尾巴，F6-2 校验会判不合规，而用户完全不知道为什么。
+
+**决策**：
+
+- 域层 `src/domain/email-template.ts` 纯函数，三项职责分开：`renderTemplate`（只替换不做补全）、`materializeTemplate`（把填不上的洞变成可拦形态）、`validateTemplate`（保存闸门）。
+- **变量白名单只有七个**（`company / product / anchor / senderName / senderCompany / market / advantage`）。白名单外一律报错，不静默留空 —— 留着 `{{foo}}` 进正文，用户看到的是一封带花括号的信，比报错糟得多。
+- **缺值不编造**：`renderTemplate` 缺变量时保留原文并如实报 `missingVars`，与 B8「没有 productHint 就不生成模板」同一条纪律。
+- **模板不得自带退订语句或发件人身份**，否则判非法。这里踩到一个真实冲突：`validateEmail.hasSenderIdentity` 用 `COMPANY_SUFFIX` 全局匹配 `Ltd/Inc/Co/GmbH`，而 `{{company}}` 填的是**客户**公司名，真实值经常就是「Rhein Hydraulik GmbH」。若把变量注入的身份也算进去，所有引用公司名的合法模板会被整片误杀。因此身份探针分两次渲染：**专有名词类变量（`company` / `senderName` / `senderCompany`）在身份检测这一轮保持占位符不替换**，能命中的就只剩「模板自己写死的签名块」。
+- **缺变量的洞必须变成方括号**：`{{product}}` 逃得过 `validateEmail.hasPlaceholder`（它认的是 `[...]`），一封带花括号的信就这样混过 F7-2 闸门发出去。`materializeTemplate` 统一转成 `[待填：product]`，让那道闸门必然拦住。这条有正反两向断言锁死。
+- store 侧 `slices/templates.ts`：**保存动作自己调 `validateTemplate`**，不靠 UI 层自觉 —— 再好的校验函数，只要写入口绕开它就是装饰。内置模板按 id 前缀 `tpl_builtin_` 判定，**不可覆盖、不可删除**，只能「复制为我的模板」再改（允许就地改的话，用户改坏一次就再也拿不回出厂措辞）。
+- 持久化 `PersistedState.templates` 设为**可选字段、不升 version**：v1 早期快照没有它，升版本会把老用户数据整份丢弃。内置模板由 `demo-bootstrap` 永远补齐，不做「有持久化就只用持久化的」——那样用户删光自建模板时基线会连带消失。
+
+**后果**：`F11` 从 ❌ 升到 🟡。前端产物 `366.60 → 379.70 kB`（gzip `125.21 → 130.10 kB`），主要是模板库面板与表单。单测 351 → 408（域层 40 + store 20 + 既有），门禁 89 → 97，冒烟 53/53 不变。
+
+**验证**：两处变异抽样 —— 把 `saveTemplate` 的 `if (!checked.ok)` 短路（门禁 1 红 + store 测试 3 红）、把 `fillGaps` 退回 `{{name}}`（门禁 1 红 + 域层测试 2 红），还原后两个文件 SHA-256 逐一一致。另有一处变异验证「误杀反例」有效：把身份探针的豁免列表清空，那条「引用 {{company}} 不算写死身份」的用例立刻变红。
+
+**未做**：多步序列（follow-up 排期 / 自动节奏）不做，所以 F11 只到 🟡 不到 ✅ —— 序列一旦要做，必须先与 F8 状态机、F7-2 闸门、G3 额度队列对齐，否则会出现「自动排期绕过人工确认」这种红线问题。
+
+---
+
 ## 性能目标对照（PRD 8.1）
 
 | 指标 | PRD 目标 | 基线状态 |
