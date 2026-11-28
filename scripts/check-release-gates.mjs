@@ -928,10 +928,49 @@ function walkTs(dir, out = []) {
     && library.includes('saveTemplate'))
 
   const coverageF11 = readFileSync(join(ROOT, 'docs/PRD-COVERAGE.md'), 'utf8')
-  check('F11 文档口径诚实：不再标 ❌，但也只能 🟡（多步序列未做）',
+  check('F11 文档口径诚实：模板库 + 多步序列都落地，但整体仍 🟡（不做自动节奏，也不发信）',
     /\| F11 \|[^\n]*\| 🟡 \|/.test(coverageF11)
     && !/\| F11 \|[^\n]*\| ❌ \|/.test(coverageF11)
-    && coverageF11.includes('多步序列'))
+    && coverageF11.includes('多步序列')
+    && coverageF11.includes('人工推进'))
+}
+
+// 7g. F11 第二步 · 多步序列
+//     边界：序列只做「排期提示」，不做自动发送 / 自动建草稿 / 自动改状态。
+//     静态护栏防五类倒退：偷偷加定时器、能力校验变成死代码、保存绕开校验、
+//     内置序列被就地改坏、以及「配了序列但界面上没有任何落点」。
+{
+  const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  const fuDomainRaw = readFileSync(join(ROOT, 'src/domain/follow-up.ts'), 'utf8')
+  const fuDomain = stripComments(fuDomainRaw)
+  const fuSlice = readFileSync(join(ROOT, 'src/store/slices/sequences.ts'), 'utf8')
+
+  check('F11 序列域层无执行能力：代码里没有定时器 / 发送 / 改状态 / 建草稿的调用',
+    !/setInterval|setTimeout|requestAnimationFrame|queueMicrotask/.test(fuDomain)
+    && !/addOutreach|setCompanyStatus|sendEmail|autoSend|autoSchedule/.test(fuDomain))
+
+  check('F11 序列上限可达：总跨度上限严格小于「步数上限 × 单步上限」，否则就是一段死校验',
+    /MAX_SEQUENCE_SPAN_DAYS = (\d+)/.test(fuDomain)
+    && Number((fuDomain.match(/MAX_SEQUENCE_SPAN_DAYS = (\d+)/) ?? [])[1])
+      < Number((fuDomain.match(/MAX_SEQUENCE_STEPS = (\d+)/) ?? [])[1])
+        * Number((fuDomain.match(/MAX_STEP_GAP_DAYS = (\d+)/) ?? [])[1]))
+
+  check('F11 序列保存必过校验：saveSequence 先跑 validateSequence，不合法就不进 state',
+    /validateSequence\(\{ name, steps \}, \{ templateIds \}\)/.test(fuSlice)
+    && /if \(!checked\.ok\)/.test(fuSlice))
+
+  check('F11 内置序列不可篡改：覆盖与删除两条路径都按 id 前缀拒绝',
+    /isBuiltin\(targetId\)/.test(fuSlice) && /isBuiltin\(id\)/.test(fuSlice)
+    && fuSlice.includes('内置序列不可修改') && fuSlice.includes('内置序列不可删除'))
+
+  const detail = readFileSync(join(ROOT, 'src/components/developer/SequenceProgress.tsx'), 'utf8')
+  const lib = readFileSync(join(ROOT, 'src/components/outreach/SequenceLibrary.tsx'), 'utf8')
+  check('F11 序列有真实落点：详情页按 planFollowUp 展示进度，模板库弹窗可编辑',
+    detail.includes('planFollowUp') && lib.includes('planFollowUp')
+    && readFileSync(join(ROOT, 'src/components/outreach/TemplateLibrary.tsx'), 'utf8').includes('SequenceLibrary'))
+
+  check('F11 界面上写明「不自动发送」：序列面板与详情页都要有这句，否则用户会以为是自动节奏',
+    lib.includes('不自动发送') && detail.includes('不自动发送'))
 }
 
 // 8. B4 · 门禁不能再「红得假」：真实证据必须能改变判定，伪造证据必须被拦

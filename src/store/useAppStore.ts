@@ -27,11 +27,12 @@ import { createTaskSlice } from './slices/task'
 import { createCompanySlice } from './slices/company'
 import { createOutreachSlice } from './slices/outreach'
 import { createTemplatesSlice } from './slices/templates'
+import { createSequencesSlice } from './slices/sequences'
 import { createSettingsSlice } from './slices/settings'
 import { createGatewaySlice } from './slices/gateway'
 import { createResetSlice } from './slices/reset'
 import {
-  initialCompanies, initialOutreach, initialSettings, initialTasks, initialTemplates,
+  initialCompanies, initialOutreach, initialSequences, initialSettings, initialTasks, initialTemplates,
 } from './demo-bootstrap'
 import { bindPersistence } from './persistence'
 
@@ -44,6 +45,7 @@ export const useAppStore = create<AppState>()((...a) => ({
   ...createCompanySlice(...a),
   ...createOutreachSlice(...a),
   ...createTemplatesSlice(...a),
+  ...createSequencesSlice(...a),
   ...createSettingsSlice(...a),
   ...createGatewaySlice(...a),
   ...createResetSlice(...a),
@@ -53,6 +55,7 @@ export const useAppStore = create<AppState>()((...a) => ({
   outreach: initialOutreach,
   settings: initialSettings,
   templates: initialTemplates,
+  sequences: initialSequences,
 }))
 
 bindPersistence(useAppStore)

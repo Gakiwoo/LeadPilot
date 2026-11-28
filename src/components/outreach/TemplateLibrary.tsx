@@ -18,6 +18,7 @@ import {
 import { EMAIL_PURPOSES } from '@/domain/constants'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, EmptyState, Field, Modal } from '@/components/ui'
+import SequenceLibrary from './SequenceLibrary'
 
 const STAGE_LABEL: Record<TemplateStage, string> = {
   intro: '首次触达',
@@ -52,6 +53,7 @@ export default function TemplateLibrary({ open, onClose, onPick }: {
 
   const [draft, setDraft] = useState<TemplateDraft>(EMPTY_DRAFT)
   const [saving, setSaving] = useState(false)
+  const [tab, setTab] = useState<'templates' | 'sequences'>('templates')
 
   const selected = draft.id ? templates.find((t) => t.id === draft.id) ?? null : null
   const readOnly = Boolean(selected?.builtin)
@@ -114,18 +116,38 @@ export default function TemplateLibrary({ open, onClose, onPick }: {
     <Modal
       open={open}
       onClose={onClose}
-      title="模板库"
+      title="模板与跟进序列"
       width="960px"
       footer={
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-muted">合规尾巴与发件人身份由代码注入 · 模板不保存这两样</span>
+          <span className="text-[11px] text-muted">
+            {tab === 'templates'
+              ? '合规尾巴与发件人身份由代码注入 · 模板不保存这两样'
+              : '序列只给时间提示：不自动发送、不自动建草稿、不自动改客户状态'}
+          </span>
           <Button variant="ghost" size="sm" className="ml-auto" onClick={onClose}>关闭</Button>
-          {onPick && selected && (
+          {tab === 'templates' && onPick && selected && (
             <Button variant="primary" size="sm" onClick={() => { onPick(selected); onClose() }}>套用这封模板</Button>
           )}
         </div>
       }
     >
+      <div className="mb-3 flex items-center gap-1 border-b border-line">
+        {([
+          ['templates', '模板库'],
+          ['sequences', '跟进序列'],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={`-mb-px border-b-2 px-3 py-1.5 text-[12px] transition ${tab === key ? 'border-brand-500 font-medium text-brand-700' : 'border-transparent text-muted hover:text-slate-700'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'templates' ? (
       <div className="grid grid-cols-[240px_1fr] gap-4">
         {/* 左：模板列表 */}
         <div className="min-h-0 space-y-3">
@@ -224,6 +246,9 @@ export default function TemplateLibrary({ open, onClose, onPick }: {
           )}
         </div>
       </div>
+      ) : (
+        <SequenceLibrary />
+      )}
     </Modal>
   )
 }

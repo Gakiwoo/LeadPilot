@@ -15,6 +15,7 @@ import type {
 } from '@/types'
 import type { GatewayHealth } from '@/services/adapters'
 import type { EmailTemplate, TemplateDraft } from '@/domain/email-template'
+import type { FollowUpSequence, SequenceDraft } from '@/domain/follow-up'
 
 export type ViewKey = 'developer' | 'crm' | 'outreach' | 'settings'
 export type SortKey = 'default' | 'total' | 'propensity' | 'import' | 'name' | 'discovered'
@@ -65,6 +66,8 @@ export interface AppState {
   settings: Settings
   /** F11 模板库。内置模板常驻（不可删、不可覆盖），自建模板由用户维护 */
   templates: EmailTemplate[]
+  /** F11 多步序列。只提供排期提示，不自动发送、不自动建草稿、不自动改状态 */
+  sequences: FollowUpSequence[]
   activeView: ViewKey
   drawerCompanyId: string | null
   composerCompanyId: string | null
@@ -106,6 +109,10 @@ export interface AppState {
   saveTemplate(draft: TemplateDraft): { ok: boolean; message?: string; id?: string }
   deleteTemplate(id: string): { ok: boolean; message?: string }
   duplicateTemplate(id: string): { ok: boolean; message?: string; id?: string }
+  /** F11：保存序列（无 id 新建 / 有 id 更新）。保存前必过 validateSequence */
+  saveSequence(draft: SequenceDraft): { ok: boolean; message?: string; id?: string }
+  deleteSequence(id: string): { ok: boolean; message?: string }
+  duplicateSequence(id: string): { ok: boolean; message?: string; id?: string }
   updateSettings(patch: Partial<Settings>): void
   addBlacklist(value: string): void
   probeGateway(): Promise<void>

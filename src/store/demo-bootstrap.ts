@@ -8,6 +8,7 @@ import type { Company, DevTask } from '@/types'
 import { buildDemoCompanies, DEMO_TASK_ID } from '@/data/demo-data'
 import { localRepository } from '@/data/repository'
 import { DEFAULT_TEMPLATES, type EmailTemplate } from '@/domain/email-template'
+import { DEFAULT_SEQUENCES, type FollowUpSequence } from '@/domain/follow-up'
 import { DEFAULT_SETTINGS } from './defaults'
 
 export function demoTask(companies: Company[]): DevTask {
@@ -66,5 +67,15 @@ export const initialSettings = persisted?.settings ?? DEFAULT_SETTINGS
 export const initialTemplates: EmailTemplate[] = (() => {
   const builtins = DEFAULT_TEMPLATES.map((t) => ({ ...t }))
   const customs = (persisted?.templates ?? []).filter((t) => !t.builtin && !String(t.id ?? '').startsWith('tpl_builtin_'))
+  return [...builtins, ...customs]
+})()
+
+/**
+ * F11 多步序列：与模板库同一条规则 —— **内置序列永远在**，自建叠加其上。
+ * 换成「有持久化就只用持久化的」会让老快照丢掉出厂节奏。
+ */
+export const initialSequences: FollowUpSequence[] = (() => {
+  const builtins = DEFAULT_SEQUENCES.map((s) => ({ ...s, steps: s.steps.map((x) => ({ ...x })) }))
+  const customs = (persisted?.sequences ?? []).filter((s) => !s.builtin && !String(s.id ?? '').startsWith('seq_builtin_'))
   return [...builtins, ...customs]
 })()

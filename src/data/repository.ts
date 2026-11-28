@@ -4,6 +4,7 @@
  */
 import type { Company, DevTask, Outreach, Settings } from '@/types'
 import type { EmailTemplate } from '@/domain/email-template'
+import type { FollowUpSequence } from '@/domain/follow-up'
 
 export interface PersistedState {
   version: 1
@@ -16,6 +17,11 @@ export interface PersistedState {
    * 由 demo-bootstrap 用内置模板兜底——不升 version，否则老用户数据会被整份丢弃。
    */
   templates?: EmailTemplate[]
+  /**
+   * F11 多步序列。同样可选、不升 version：老快照没有这个字段，
+   * 由 demo-bootstrap 用内置序列兜底。
+   */
+  sequences?: FollowUpSequence[]
 }
 
 export interface Repository {

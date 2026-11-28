@@ -5,6 +5,7 @@ import { CUSTOMER_TYPES, DIMENSION_LABELS, GRADE_LABELS, SIZE_LABELS, STATUS_DEF
 import { minimizeForModel } from '@/domain/compliance'
 import { useAppStore } from '@/store/useAppStore'
 import { Badge, Button, Card, Drawer, GradeBadge, ScoreBar, SectionTitle, StatusBadge } from '@/components/ui'
+import SequenceProgress from './SequenceProgress'
 
 const DIMS: DimensionKey[] = ['match', 'propensity', 'size', 'import', 'contact']
 
@@ -256,6 +257,7 @@ export default function CompanyDetail({ company, onClose }: { company: Company |
                 {c.followups.map((f) => <p key={f.id} className="flex items-center gap-1.5 text-[11px] text-amber-700"><ChevronDown size={11} /> 跟进 {f.dueDate} · {f.content} · {f.channel}</p>)}
               </div>
             )}
+            <SequenceProgress company={c} />
           </Card>
         </section>
       </div>

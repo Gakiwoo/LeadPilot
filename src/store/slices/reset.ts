@@ -11,6 +11,7 @@ import { DEFAULT_FILTERS, DEFAULT_SETTINGS } from '../defaults'
 import { demoTask } from '../demo-bootstrap'
 import { resetTaskRuntime } from '../runtime'
 import { builtinTemplates } from './templates'
+import { builtinSequences } from './sequences'
 import type { AppState } from '../types'
 
 export type ResetSlice = Pick<AppState, 'resetDemo'>
@@ -25,6 +26,8 @@ export const createResetSlice: StateCreator<AppState, [], [], ResetSlice> = (set
       // F11：模板库一并回到出厂集。重置的语义是「回到演示基线」，
       // 留着用户自建模板会让「重置后仍是旧样子」，与用户预期不符。
       templates: builtinTemplates(),
+      // F11 同一条：序列也回到出厂集，避免「重置后还留着旧的跟进节奏」
+      sequences: builtinSequences(),
       activeTaskId: null, drawerCompanyId: null, composerCompanyId: null, selectedIds: [],
       pointsSource: 'local-demo',
       filters: { ...DEFAULT_FILTERS },
